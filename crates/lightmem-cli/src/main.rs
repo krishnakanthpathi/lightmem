@@ -44,6 +44,10 @@ enum Commands {
         /// Confidence score (0.0 to 1.0)
         #[arg(short = 'c', long, default_value = "0.9")]
         confidence: f32,
+
+        /// Output created memory as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Recall memories via hybrid semantic + keyword search
@@ -89,6 +93,10 @@ enum Commands {
         /// Max results
         #[arg(short = 'l', long, default_value = "20")]
         limit: usize,
+
+        /// Output list as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Forget or expire a memory
@@ -99,6 +107,10 @@ enum Commands {
         /// Permanently delete instead of soft-retiring
         #[arg(long)]
         hard: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Export memories to Open Knowledge Format (OKF)
@@ -168,7 +180,11 @@ enum Commands {
     },
 
     /// Display storage statistics and active database path
-    Stats,
+    Stats {
+        /// Output statistics as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
@@ -202,6 +218,7 @@ fn main() -> Result<()> {
             title,
             tags,
             confidence,
+            json,
         } => {
             let lm = open_engine(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
@@ -215,6 +232,11 @@ fn main() -> Result<()> {
                 .unwrap_or_default();
 
             let memory = lm.remember(&content, cat, title, tag_vec, Some(confidence))?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&memory)?);
+                return Ok(());
+            }
 
             println!(
                 "{} Stored memory [{}] in {}\n  ID: {}\n  Title: {}",
@@ -282,6 +304,7 @@ fn main() -> Result<()> {
             status,
             as_of,
             limit,
+            json,
         } => {
             let lm = open_engine(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
@@ -289,6 +312,11 @@ fn main() -> Result<()> {
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
             let memories = lm.list(cat, st, as_of_dt, limit)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&memories)?);
+                return Ok(());
+            }
 
             if memories.is_empty() {
                 println!("{}", "No memories found.".dimmed());
@@ -314,9 +342,22 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Forget { id, hard } => {
+        Commands::Forget { id, hard, json } => {
             let lm = open_engine(effective_db, global)?;
             let ok = lm.forget(&id, hard)?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": id,
+                        "success": ok,
+                        "hard_deleted": hard,
+                    })
+                );
+                return Ok(());
+            }
+
             if ok {
                 let action = if hard { "Permanently deleted" } else { "Retired (soft-expired)" };
                 println!("{} {} memory {}", "✔".green(), action, id.yellow());
@@ -440,9 +481,14 @@ fn main() -> Result<()> {
             println!("  Config File:      {}", LightMemConfig::config_file().display());
         }
 
-        Commands::Stats => {
+        Commands::Stats { json } => {
             let lm = open_engine(effective_db, global)?;
             let stats = lm.stats()?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+                return Ok(());
+            }
 
             println!("{} Storage Statistics", "📊".bold());
             println!("  Database:          {}", lm.db_path().display().to_string().cyan());

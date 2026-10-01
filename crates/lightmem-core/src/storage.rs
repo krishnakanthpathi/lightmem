@@ -2,10 +2,11 @@ use crate::models::{MemoryRecord, MemoryStatus, MemoryType};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStats {
     pub total_memories: usize,
     pub active_memories: usize,
