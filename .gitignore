@@ -6,3 +6,12 @@
 .DS_Store
 .fastembed_cache/
 **/.fastembed_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
