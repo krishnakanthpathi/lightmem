@@ -1,0 +1,195 @@
+pub mod config;
+pub mod embeddings;
+pub mod exporter;
+pub mod importer;
+pub mod models;
+pub mod search;
+pub mod storage;
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+pub use config::LightMemConfig;
+pub use embeddings::{
+    EmbeddingProvider, HashEmbeddingProvider, OllamaEmbeddingProvider, OnnxEmbeddingProvider,
+};
+pub use exporter::Exporter;
+pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
+pub use models::{MemoryRecord, MemoryStatus, MemoryType, ScoredMemory};
+pub use search::HybridSearchEngine;
+pub use storage::{Storage, StorageStats};
+
+pub struct LightMem {
+    storage: Arc<Storage>,
+    embedder: Arc<dyn EmbeddingProvider>,
+    config: LightMemConfig,
+}
+
+impl LightMem {
+    /// Open the active database based on configuration (local project or global)
+    pub fn open_default(force_global: bool) -> Result<Self> {
+        let config = LightMemConfig::load();
+        let db_path = LightMemConfig::resolve_db_path(force_global);
+        Self::open_at(&db_path, config)
+    }
+
+    /// Open database at a specific path
+    pub fn open_at(db_path: &Path, config: LightMemConfig) -> Result<Self> {
+        let storage = Storage::open(db_path)?;
+
+        let embedder: Arc<dyn EmbeddingProvider> = match config.backend.as_str() {
+            "onnx" => {
+                let model_str = config.onnx_model.as_deref().unwrap_or("bge-small");
+                let path = std::path::Path::new(model_str);
+                if path.is_dir() {
+                    match OnnxEmbeddingProvider::new_custom_dir(path) {
+                        Ok(p) => Arc::new(p),
+                        Err(e) => {
+                            eprintln!("Warning: Failed to load custom ONNX model from {:?}: {}. Falling back to default bge-small", path, e);
+                            Arc::new(OnnxEmbeddingProvider::new(Some("bge-small"))?)
+                        }
+                    }
+                } else {
+                    Arc::new(OnnxEmbeddingProvider::new(Some(model_str))?)
+                }
+            }
+            "ollama" => Arc::new(OllamaEmbeddingProvider::new(
+                config.ollama_url.clone(),
+                config.embedding_model.clone(),
+            )),
+            _ => Arc::new(HashEmbeddingProvider),
+        };
+
+        Ok(Self {
+            storage: Arc::new(storage),
+            embedder,
+            config,
+        })
+    }
+
+    pub fn db_path(&self) -> &Path {
+        self.storage.path()
+    }
+
+    pub fn config(&self) -> &LightMemConfig {
+        &self.config
+    }
+
+    /// Store a new memory into the database
+    pub fn remember(
+        &self,
+        content: &str,
+        category: Option<MemoryType>,
+        title: Option<String>,
+        tags: Vec<String>,
+        confidence: Option<f32>,
+    ) -> Result<MemoryRecord> {
+        let clean_content = content.trim().to_string();
+        if clean_content.is_empty() {
+            anyhow::bail!("Memory content cannot be blank");
+        }
+
+        let resolved_type = category.unwrap_or(MemoryType::Fact);
+        let resolved_title = title.unwrap_or_else(|| {
+            clean_content
+                .lines()
+                .next()
+                .unwrap_or("Untitled Memory")
+                .chars()
+                .take(80)
+                .collect()
+        });
+
+        let conf = confidence.unwrap_or(0.9);
+        let memory = MemoryRecord::new(
+            resolved_type,
+            resolved_title,
+            clean_content,
+            tags,
+            conf,
+            Some("explicit_statement".to_string()),
+        );
+
+        let card_text = memory.to_card_text();
+        let vector = self.embedder.embed(&card_text).ok();
+
+        self.storage.insert_memory(&memory, vector.as_deref())?;
+        Ok(memory)
+    }
+
+    /// Semantic + BM25 Hybrid Recall
+    pub fn recall(
+        &self,
+        query: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+        min_similarity: Option<f32>,
+    ) -> Result<Vec<ScoredMemory>> {
+        HybridSearchEngine::search(
+            &self.storage,
+            self.embedder.as_ref(),
+            query,
+            category,
+            Some(MemoryStatus::Active),
+            as_of,
+            limit,
+            min_similarity,
+        )
+    }
+
+    /// List memories with optional filtering
+    pub fn list(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        self.storage.list_memories(category, status, as_of, limit)
+    }
+
+    /// Retrieve single memory by ID
+    pub fn get(&self, id: &str) -> Result<Option<MemoryRecord>> {
+        self.storage.get_memory(id)
+    }
+
+    /// Forget (soft-delete or hard delete) a memory
+    pub fn forget(&self, id: &str, hard_delete: bool) -> Result<bool> {
+        self.storage.forget_memory(id, hard_delete)
+    }
+
+    /// Export memories to an OKF bundle
+    pub fn export_okf(&self, target_path: Option<&Path>) -> Result<PathBuf> {
+        Exporter::export_okf(&self.storage, target_path)
+    }
+
+    /// Import memories from an external file (.json or .md/.okf)
+    pub fn import_file(&self, file_path: &Path) -> Result<usize> {
+        let raw = std::fs::read_to_string(file_path)
+            .with_context(|| format!("Failed to read import file {:?}", file_path))?;
+
+        let candidates = if file_path.extension().and_then(|s| s.to_str()) == Some("json") {
+            JsonMemoryImporter.parse(&raw)?
+        } else {
+            OkfMemoryImporter.parse(&raw)?
+        };
+
+        let count = candidates.len();
+        for candidate in candidates {
+            let memory = candidate.to_memory_record();
+            let card_text = memory.to_card_text();
+            let vector = self.embedder.embed(&card_text).ok();
+            self.storage.insert_memory(&memory, vector.as_deref())?;
+        }
+
+        Ok(count)
+    }
+
+    /// Get database statistics
+    pub fn stats(&self) -> Result<StorageStats> {
+        self.storage.stats()
+    }
+}

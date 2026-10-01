@@ -4,3 +4,5 @@
 *.db-wal
 *.db-shm
 .DS_Store
+.fastembed_cache/
+**/.fastembed_cache/
