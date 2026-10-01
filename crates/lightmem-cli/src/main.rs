@@ -118,6 +118,32 @@ enum Commands {
         file: PathBuf,
     },
 
+    /// Ask a question and synthesize/extract the factual answer (with toggleable Needle 3 precision reranker)
+    Answer {
+        /// The question to answer
+        question: String,
+
+        /// Toggle: Force use of Needle 3 precision reranker & factual slot extractor
+        #[arg(long)]
+        needle: bool,
+
+        /// Filter candidate memories by category
+        #[arg(short = 't', long = "type")]
+        category: Option<String>,
+
+        /// Point-in-time view (YYYY-MM-DD or RFC3339)
+        #[arg(long)]
+        as_of: Option<String>,
+
+        /// Max candidate memories to retrieve for reranking
+        #[arg(short = 'l', long, default_value = "5")]
+        limit: usize,
+
+        /// Output results as JSON for agent consumption
+        #[arg(long)]
+        json: bool,
+    },
+
     /// View or update backend configuration
     Config {
         /// Set backend engine: 'onnx', 'ollama', or 'hash'
@@ -135,6 +161,10 @@ enum Commands {
         /// Ollama embedding model name (e.g. nomic-embed-text)
         #[arg(long)]
         model: Option<String>,
+
+        /// Default reranker: 'top1' (0ms instant) or 'needle' (Needle 3 precision SLM)
+        #[arg(long)]
+        reranker: Option<String>,
     },
 
     /// Display storage statistics and active database path
@@ -316,11 +346,53 @@ fn main() -> Result<()> {
             );
         }
 
+        Commands::Answer {
+            question,
+            needle,
+            category,
+            as_of,
+            limit,
+            json,
+        } => {
+            let lm = open_engine(effective_db, global)?;
+            let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
+            let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
+
+            let result = lm.answer(&question, cat, as_of_dt, limit, needle)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+
+            println!(
+                "{} Synthesized Answer for \"{}\" [reranker: {}]:",
+                "💡".bold(),
+                question.bold(),
+                result.reranker_used.cyan().bold()
+            );
+            println!();
+            println!("  {}", result.answer.green().bold());
+            println!();
+
+            if let Some(m) = &result.selected_memory {
+                println!(
+                    "  {} Source Memory: [{}] {} {}",
+                    "📌".dimmed(),
+                    m.category.as_str().cyan(),
+                    m.title.bold(),
+                    format!("(ID: {})", m.id.chars().take(8).collect::<String>()).dimmed()
+                );
+                println!("     {}", m.content.replace('\n', "\n     ").dimmed());
+            }
+        }
+
         Commands::Config {
             backend,
             onnx_model,
             url,
             model,
+            reranker,
         } => {
             let mut cfg = LightMemConfig::load();
             let mut changed = false;
@@ -341,6 +413,15 @@ fn main() -> Result<()> {
                 cfg.embedding_model = m;
                 changed = true;
             }
+            if let Some(r) = reranker {
+                let lower = r.to_lowercase();
+                if lower == "needle" || lower == "top1" {
+                    cfg.reranker = lower;
+                    changed = true;
+                } else {
+                    eprintln!("Invalid reranker '{}'. Choose 'top1' or 'needle'.", r);
+                }
+            }
 
             if changed {
                 cfg.save()?;
@@ -353,6 +434,7 @@ fn main() -> Result<()> {
                 "  ONNX Model/Path:  {}",
                 cfg.onnx_model.as_deref().unwrap_or("bge-small").cyan()
             );
+            println!("  Reranker:         {}", cfg.reranker.cyan().bold());
             println!("  Ollama URL:       {}", cfg.ollama_url.dimmed());
             println!("  Ollama Model:     {}", cfg.embedding_model.dimmed());
             println!("  Config File:      {}", LightMemConfig::config_file().display());

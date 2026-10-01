@@ -45,13 +45,31 @@ lmem recall "auth configuration" --type decision
 lmem recall "styling rules" --json
 ```
 
-### 3. Point-in-Time Historical Queries (`--as-of`)
+### 3. Precision Answering & Reranking (`lmem answer`)
+Ask a direct natural language question. By default, it returns the top-ranked candidate instantly (< 5ms). Toggle `--needle` to invoke **Needle 3** (an ultra-fast 35MB Apple Silicon SLM) for candidate disambiguation and factual slot extraction.
+
+```bash
+# Instant Rank-1 Answer (0ms latency, zero python invocation)
+lmem answer "what port does redis run on?"
+
+# Needle 3 Precision Disambiguation & Slot Extraction
+lmem answer "what port does redis run on?" --needle
+
+# Filter by category and output structured JSON
+lmem answer "what database engine do we use?" --needle --type fact --json
+
+# Set Needle 3 as default reranker
+lmem config --reranker needle   # Switch default to Needle 3
+lmem config --reranker top1     # Switch default to instant Top-1
+```
+
+### 4. Point-in-Time Historical Queries (`--as-of`)
 ```bash
 # Reconstruct what memories were active on August 5th, 2026
 lmem recall "infrastructure setup" --as-of 2026-08-05
 ```
 
-### 4. Open Knowledge Format Export & Import
+### 5. Open Knowledge Format Export & Import
 ```bash
 # Export all active memories to a clean OKF Markdown bundle
 lmem export --okf -o ./PROJECT_MEMORY.md
@@ -61,7 +79,7 @@ lmem import ./PROJECT_MEMORY.md
 lmem import ./memanto_export.json
 ```
 
-### 5. Retiring & Forgetting Memories
+### 6. Retiring & Forgetting Memories
 ```bash
 # Soft-retire a memory (preserves historical audit trail for --as-of queries)
 lmem forget <MEMORY_ID>
@@ -70,7 +88,7 @@ lmem forget <MEMORY_ID>
 lmem forget <MEMORY_ID> --hard
 ```
 
-### 6. Storage Statistics & Configuration
+### 7. Storage Statistics & Configuration
 ```bash
 # View active database and category breakdown
 lmem stats
@@ -99,16 +117,19 @@ lmem config --backend hash
 ├── Cargo.toml
 ├── crates/
 │   ├── lightmem-core/         # Core Rust library (SQLite, FTS5, Vectors, RRF, Importers)
+│   │   ├── scripts/
+│   │   │   └── needle_picker.py # Needle 3 Action SLM disambiguator & slot extractor
 │   │   ├── src/
 │   │   │   ├── config.rs      # Global/local paths & backend config
-│   │   │   ├── embeddings.rs  # Ollama + Hash fallback providers & cosine similarity
+│   │   │   ├── embeddings.rs  # Local ONNX + Ollama + Hash fallback providers
 │   │   │   ├── exporter.rs    # OKF bundle generation
 │   │   │   ├── importer.rs    # Integratable JSON & OKF parsing pipeline
 │   │   │   ├── models.rs      # 13 MemoryTypes, MemoryRecord, ScoredMemory
+│   │   │   ├── reranker.rs    # Top1 & Needle 3 precision reranker engines
 │   │   │   ├── search.rs      # Hybrid search & Reciprocal Rank Fusion (RRF)
 │   │   │   └── storage.rs     # SQLite WAL mode, FTS5 sync triggers, BLOB vectors
 │   └── lightmem-cli/          # Fast CLI application (`lmem`)
-│       └── src/main.rs
+│       └── src/main.rs        # CLI subcommands: remember, recall, answer, list, forget, config, stats
 └── wrappers/                  # Native bindings (Android UniFFI Kotlin, macOS/iOS Swift)
 ```
 

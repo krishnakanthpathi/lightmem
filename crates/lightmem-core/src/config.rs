@@ -8,6 +8,12 @@ pub struct LightMemConfig {
     pub onnx_model: Option<String>,
     pub ollama_url: String,
     pub embedding_model: String,
+    #[serde(default = "default_reranker")]
+    pub reranker: String,
+}
+
+fn default_reranker() -> String {
+    "top1".to_string()
 }
 
 impl Default for LightMemConfig {
@@ -17,6 +23,7 @@ impl Default for LightMemConfig {
             onnx_model: Some("bge-small".to_string()),
             ollama_url: "http://100.75.149.115:7777".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
+            reranker: default_reranker(),
         }
     }
 }

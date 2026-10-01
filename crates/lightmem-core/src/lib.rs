@@ -3,6 +3,7 @@ pub mod embeddings;
 pub mod exporter;
 pub mod importer;
 pub mod models;
+pub mod reranker;
 pub mod search;
 pub mod storage;
 
@@ -18,6 +19,7 @@ pub use embeddings::{
 pub use exporter::Exporter;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
 pub use models::{MemoryRecord, MemoryStatus, MemoryType, ScoredMemory};
+pub use reranker::{AnswerResult, NeedleReranker, Reranker, Top1Reranker};
 pub use search::HybridSearchEngine;
 pub use storage::{Storage, StorageStats};
 
@@ -191,5 +193,28 @@ impl LightMem {
     /// Get database statistics
     pub fn stats(&self) -> Result<StorageStats> {
         self.storage.stats()
+    }
+
+    /// Answer a natural language question using retrieved memory candidates
+    /// and either Top-1 direct selection (0ms) or Needle 3 precision disambiguation.
+    pub fn answer(
+        &self,
+        question: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+        use_needle: bool,
+    ) -> Result<AnswerResult> {
+        let candidates = self.recall(question, category, as_of, limit, None)?;
+
+        let needle_enabled = use_needle || self.config.reranker.eq_ignore_ascii_case("needle");
+
+        if needle_enabled {
+            let reranker = NeedleReranker::default();
+            reranker.answer(question, &candidates)
+        } else {
+            let reranker = Top1Reranker;
+            reranker.answer(question, &candidates)
+        }
     }
 }
