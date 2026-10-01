@@ -128,9 +128,64 @@ lmem config --backend hash
 │   │   │   ├── reranker.rs    # Top1 & Needle 3 precision reranker engines
 │   │   │   ├── search.rs      # Hybrid search & Reciprocal Rank Fusion (RRF)
 │   │   │   └── storage.rs     # SQLite WAL mode, FTS5 sync triggers, BLOB vectors
-│   └── lightmem-cli/          # Fast CLI application (`lmem`)
-│       └── src/main.rs        # CLI subcommands: remember, recall, answer, list, forget, config, stats
-└── wrappers/                  # Native bindings (Android UniFFI Kotlin, macOS/iOS Swift)
+│   ├── lightmem-cli/          # Fast CLI application (`lmem`)
+│   │   └── src/main.rs        # CLI subcommands: remember, recall, answer, list, forget, config, stats
+│   └── lightmem-py/           # Native PyO3 C-Extension (direct `import lightmem` in Python)
+│       ├── Cargo.toml
+│       ├── pyproject.toml     # Maturin packaging configuration
+│       └── src/lib.rs         # PyO3 bindings & class definitions
+```
+
+---
+
+## 🐍 Native Python Usage (`import lightmem`)
+
+LightMem is compiled directly into a native CPython C-extension using PyO3. Zero subprocesses, zero CLI overhead—pure in-memory Rust speed.
+
+### Installation
+```bash
+# Build & install wheel directly using maturin
+cd crates/lightmem-py
+maturin build --release
+pip install ../../target/wheels/*.whl
+```
+
+### Direct Python Example
+```python
+import lightmem
+
+# Initialize in-memory native Rust engine
+lm = lightmem.LightMem()  # Uses .lightmem.db or pass db_path="..."
+
+# 1. Store memory
+mem = lm.remember(
+    content="PostgreSQL 16 runs on port 5432 with replication enabled",
+    category="decision",
+    title="PostgreSQL Setup",
+    tags=["db", "infra"],
+    confidence=0.95
+)
+print("Stored ID:", mem.id)
+
+# 2. Hybrid Recall (BM25 + BGE-Small Vector RRF)
+results = lm.recall("what port does postgres use?", limit=5)
+for r in results:
+    print(f"[{r.memory.category}] {r.memory.title} (score: {r.score:.3f})")
+    print(f"  {r.memory.content}")
+
+# 3. Answer synthesis (Fast Top-1 vs Precision Needle 3)
+ans_fast = lm.answer("what port is postgres on?")
+print("Answer (Fast):", ans_fast.answer)
+
+ans_needle = lm.answer("what port is postgres on?", needle=True)
+print("Answer (Needle 3):", ans_needle.answer)
+
+# 4. Storage statistics
+stats = lm.stats()
+print("Total memories:", stats.total_memories, "By category:", stats.by_category)
+
+# 5. Forget memory
+lm.forget(mem.id, hard=False)
 ```
 
 ---
