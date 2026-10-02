@@ -139,10 +139,27 @@ lmem config --backend hash
 │   │   │   └── storage.rs     # SQLite WAL mode, FTS5 sync triggers, BLOB vectors
 │   ├── lightmem-cli/          # Fast CLI application (`lmem`)
 │   │   └── src/main.rs        # CLI subcommands: remember, recall, answer, list, forget, config, stats
-│   └── lightmem-py/           # Native PyO3 C-Extension (direct `import lightmem` in Python)
-│       ├── Cargo.toml
-│       ├── pyproject.toml     # Maturin packaging configuration
-│       └── src/lib.rs         # PyO3 bindings & class definitions
+│   ├── lightmem-py/           # Native PyO3 C-Extension (direct `import lightmem` in Python)
+│   │   ├── Cargo.toml
+│   │   ├── pyproject.toml     # Maturin packaging configuration
+│   │   └── src/lib.rs         # PyO3 bindings & class definitions
+│   └── lightmem-ffi/          # Universal FFI Layer (UniFFI + ANSI C-ABI exports)
+│       ├── src/lib.rs         # Mozilla UniFFI proc-macro object & exports
+│       ├── src/types.rs       # 14 Memory categories & record representations
+│       └── src/c_api.rs       # ANSI C function exports for Linux/Windows/C#
+├── bindings/
+│   ├── apple/                 # Swift Package (macOS & iOS SPM / XCFramework)
+│   │   ├── Package.swift      # Swift Package Manager manifest
+│   │   └── Sources/LightMem/  # Swift wrapper & type definitions
+│   ├── android/               # Android / Kotlin Gradle library
+│   │   ├── build.gradle.kts   # AAR build configuration
+│   │   └── src/main/kotlin/   # Kotlin client & UniFFI bindings
+│   ├── linux/                 # Linux C/C++ native shared library & pkg-config
+│   │   ├── include/lightmem.h # ANSI C API header
+│   │   └── lightmem.pc.in     # pkg-config specification
+│   └── windows/               # Windows native DLL & C# .NET SDK
+│       ├── include/lightmem.h # Windows C/C++ header with dllexport/dllimport
+│       └── dotnet/            # C# .NET 8/9 class library & P/Invoke wrapper
 ```
 
 ---
@@ -199,8 +216,144 @@ lm.forget(mem.id, hard=False)
 
 ---
 
-## 📱 Future Native Mobile & Desktop Wrappers
+## 🌍 Cross-Platform Native SDKs
 
-Because `lightmem-core` is written in standard Rust with zero dynamic interpreter dependencies, it compiles directly into:
-1. **Android (`.aar`):** Native Kotlin bindings using UniFFI for Jetpack Compose apps.
-2. **Apple (`.xcframework`):** Native Swift bindings using UniFFI for SwiftUI and macOS menu bar apps.
+LightMem provides first-class native developer libraries powered by a unified Rust FFI layer (`crates/lightmem-ffi`), delivering pure in-process SQLite WAL speed with zero Python or CLI subprocess overhead.
+
+### 🍏 1. Apple (macOS & iOS) — Swift Package (`import LightMem`)
+Integrated directly via Swift Package Manager (`Package.swift`) or universal `LightMem.xcframework`.
+
+```bash
+# Build Swift bindings & package
+./bindings/apple/scripts/build-apple.sh
+```
+
+```swift
+import LightMem
+
+// Open local project store (or pass dbPath / global: true)
+let client = try LightMem()
+
+// 1. Remember fact, preference, or password
+let mem = try client.remember(
+    "PostgreSQL 16 runs on port 5432 with replication enabled",
+    category: "decision",
+    title: "Postgres Setup",
+    tags: ["database", "postgres"]
+)
+print("Stored ID:", mem.id)
+
+// 2. Hybrid Recall (BM25 + Vector Cosine RRF)
+let results = try client.recall("what port does postgres use?", limit: 5)
+for r in results {
+    print("[\(r.memory.category)] \(r.memory.title) (score: \(r.score))")
+}
+
+// 3. Factual Answer Synthesis
+let ans = try client.answer("what port does postgres use?", needle: true)
+print("Answer:", ans.answer)
+```
+
+---
+
+### 🤖 2. Android — Kotlin Library (`dev.lightmem.LightMem`)
+Packaged as an Android Archive (`.aar`) with JNI `.so` binaries for `arm64-v8a`, `armeabi-v7a`, and `x86_64`.
+
+```bash
+# Generate Kotlin bindings and compile JNI libraries
+./bindings/android/scripts/build-android.sh
+```
+
+```kotlin
+import dev.lightmem.LightMem
+
+// Initialize native engine in your Application or ViewModel
+val client = LightMem(dbPath = context.filesDir.resolve("memories.db").absolutePath)
+
+// Remember memory
+val record = client.remember(
+    content = "User prefers system-dark OLED theme",
+    category = "preference",
+    title = "UI Theme",
+    tags = listOf("theme", "display")
+)
+
+// Recall memories
+val results = client.recall(query = "theme preference", limit = 5u)
+for (r in results) {
+    println("[${r.memory.category}] ${r.memory.title}")
+}
+```
+
+---
+
+### 🐧 3. Linux — C / C++ Native Shared Library (`#include "lightmem.h"`)
+Ships with standard `liblightmem.so`, ANSI C99/C++ header `lightmem.h`, and `pkg-config` specification (`lightmem.pc`).
+
+```bash
+# Build Linux shared library & pkg-config
+./bindings/linux/scripts/build-linux.sh
+```
+
+```c
+#include <stdio.h>
+#include "lightmem.h"
+
+int main() {
+    LMemHandle* lm = lmem_open("/path/to/memories.db", 0);
+    
+    char* rec_json = lmem_remember(
+        lm, 
+        "Linux kernel uses eBPF for programmable telemetry", 
+        "fact", 
+        "eBPF Architecture", 
+        "linux,ebpf", 
+        0.98f
+    );
+    printf("Stored: %s\n", rec_json);
+    lmem_free_string(rec_json);
+
+    char* search_json = lmem_recall(lm, "eBPF telemetry", "fact", NULL, 5, -1.0f);
+    printf("Recalled: %s\n", search_json);
+    lmem_free_string(search_json);
+
+    lmem_close(lm);
+    return 0;
+}
+```
+
+---
+
+### 🪟 4. Windows — C# .NET 8/9 SDK (`using LightMem;`) & Win32 DLL
+Provides `lightmem.dll` alongside a single-file C# SDK (`LightMem.cs`) supporting WPF, WinUI 3, MAUI, and ASP.NET Core with automatic P/Invoke marshalling.
+
+```powershell
+# Build Windows DLL and .NET SDK library
+powershell ./bindings/windows/scripts/build-windows.ps1
+```
+
+```csharp
+using LightMem;
+
+using var lm = new LightMemClient();
+
+// Store memory
+var record = lm.Remember(
+    "Windows 11 Mica material enabled for modern fluent shell",
+    category: "decision",
+    title: "Fluent Shell Styling",
+    tags: new[] { "winui", "fluent", "desktop" }
+);
+
+// Hybrid recall
+var results = lm.Recall("fluent shell styling", limit: 5);
+foreach (var r in results)
+{
+    Console.WriteLine($"[{r.Memory.Category}] {r.Memory.Title} (score: {r.Score:F3})");
+}
+
+// Direct question answering with Needle 3
+var answer = lm.Answer("what material is used for the shell?", needle: true);
+Console.WriteLine($"Answer: {answer.Answer}");
+```
+
