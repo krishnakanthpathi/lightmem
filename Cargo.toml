@@ -3,5 +3,6 @@ members = [
     "crates/lightmem-core",
     "crates/lightmem-cli",
     "crates/lightmem-py",
+    "crates/lightmem-ffi",
 ]
 resolver = "2"
