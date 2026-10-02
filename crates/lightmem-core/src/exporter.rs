@@ -14,7 +14,10 @@ impl Exporter {
 
         let mut grouped: BTreeMap<String, Vec<MemoryRecord>> = BTreeMap::new();
         for m in memories {
-            grouped.entry(m.category.as_str().to_string()).or_default().push(m);
+            grouped
+                .entry(m.category.as_str().to_string())
+                .or_default()
+                .push(m);
         }
 
         let mut md = String::new();
@@ -25,7 +28,10 @@ impl Exporter {
         md.push_str("---\n\n");
 
         md.push_str("# 🧠 Open Knowledge Base\n\n");
-        md.push_str(&format!("> Exported on: **{}**\n\n", Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+        md.push_str(&format!(
+            "> Exported on: **{}**\n\n",
+            Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ));
 
         for cat in MemoryType::ALL {
             let cat_str = cat.as_str();
@@ -42,7 +48,10 @@ impl Exporter {
                     if !item.tags.is_empty() {
                         md.push_str(&format!("- **Tags:** `{}`\n", item.tags.join("`, `")));
                     }
-                    md.push_str(&format!("- **Created:** {}\n\n", item.created_at.to_rfc3339()));
+                    md.push_str(&format!(
+                        "- **Created:** {}\n\n",
+                        item.created_at.to_rfc3339()
+                    ));
                     md.push_str(&format!("{}\n\n", item.content.trim()));
                     md.push_str("---\n\n");
                 }

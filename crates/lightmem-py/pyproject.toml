@@ -16,3 +16,4 @@ classifiers = [
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "lightmem"
+include = ["lightmem.pyi"]

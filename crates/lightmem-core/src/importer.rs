@@ -67,18 +67,29 @@ impl MemoryImporter for JsonMemoryImporter {
     }
 
     fn parse(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
-        let items: Vec<RawJsonItem> = serde_json::from_str(raw)
-            .with_context(|| "Failed to parse JSON memory array")?;
+        let items: Vec<RawJsonItem> =
+            serde_json::from_str(raw).with_context(|| "Failed to parse JSON memory array")?;
 
         let mut out = Vec::new();
         for item in items {
-            let content = item.content.or(item.text).unwrap_or_default().trim().to_string();
+            let content = item
+                .content
+                .or(item.text)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             if content.is_empty() {
                 continue;
             }
 
             let title = item.title.unwrap_or_else(|| {
-                content.lines().next().unwrap_or("Imported Memory").chars().take(80).collect()
+                content
+                    .lines()
+                    .next()
+                    .unwrap_or("Imported Memory")
+                    .chars()
+                    .take(80)
+                    .collect()
             });
 
             let cat_str = item.category.or(item.type_name);
@@ -93,7 +104,11 @@ impl MemoryImporter for JsonMemoryImporter {
                         }
                     }
                 } else if let Some(s) = val.as_str() {
-                    tags = s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                    tags = s
+                        .split(',')
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect();
                 }
             }
 
@@ -168,17 +183,34 @@ impl MemoryImporter for OkfMemoryImporter {
 
                 for line in lines {
                     if line.starts_with("- **ID:**") {
-                        id = Some(line.trim_start_matches("- **ID:**").replace('`', "").trim().to_string());
+                        id = Some(
+                            line.trim_start_matches("- **ID:**")
+                                .replace('`', "")
+                                .trim()
+                                .to_string(),
+                        );
                     } else if line.starts_with("- **Tags:**") {
                         let tag_part = line.trim_start_matches("- **Tags:**").replace('`', "");
-                        tags = tag_part.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        tags = tag_part
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     } else if line.starts_with("- **Confidence:**") {
-                        let conf_str = line.trim_start_matches("- **Confidence:**").replace('`', "").trim().to_string();
+                        let conf_str = line
+                            .trim_start_matches("- **Confidence:**")
+                            .replace('`', "")
+                            .trim()
+                            .to_string();
                         if let Ok(c) = conf_str.parse::<f32>() {
                             confidence = c;
                         }
                     } else if line.starts_with("- **Created:**") {
-                        let ts_str = line.trim_start_matches("- **Created:**").replace('`', "").trim().to_string();
+                        let ts_str = line
+                            .trim_start_matches("- **Created:**")
+                            .replace('`', "")
+                            .trim()
+                            .to_string();
                         if let Ok(dt) = DateTime::parse_from_rfc3339(&ts_str) {
                             created_at = Some(dt.with_timezone(&Utc));
                         }

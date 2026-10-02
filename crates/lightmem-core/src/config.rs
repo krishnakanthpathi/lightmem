@@ -61,8 +61,7 @@ impl LightMemConfig {
             .with_context(|| format!("Failed to create config dir {:?}", dir))?;
 
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(Self::config_file(), json)
-            .with_context(|| "Failed to write config file")?;
+        std::fs::write(Self::config_file(), json).with_context(|| "Failed to write config file")?;
         Ok(())
     }
 

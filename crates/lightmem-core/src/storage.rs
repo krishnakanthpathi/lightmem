@@ -146,7 +146,7 @@ impl Storage {
 
         tx.execute(
             r#"
-            INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at)
+            INSERT OR REPLACE INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
             params![
@@ -167,7 +167,7 @@ impl Storage {
         if let Some(v) = vector {
             let blob = serialize_f32_slice(v);
             tx.execute(
-                "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
+                "INSERT OR REPLACE INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
                 params![memory.id, blob, v.len() as i64],
             )?;
         }
@@ -181,7 +181,8 @@ impl Storage {
         let mut stmt = conn.prepare(
             r#"
             SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at
-            FROM memories WHERE id = ?1
+            FROM memories WHERE id = ?1 OR id LIKE (?1 || '%')
+            LIMIT 1
             "#,
         )?;
 
@@ -195,14 +196,28 @@ impl Storage {
 
     pub fn forget_memory(&self, id: &str, hard_delete: bool) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
+        let exact_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM memories WHERE id = ?1 OR id LIKE (?1 || '%') LIMIT 1",
+                params![id],
+                |r| r.get(0),
+            )
+            .ok();
+
+        let target_id = match exact_id {
+            Some(resolved) => resolved,
+            None => return Ok(false),
+        };
+
         if hard_delete {
-            let rows_affected = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+            let rows_affected =
+                conn.execute("DELETE FROM memories WHERE id = ?1", params![target_id])?;
             Ok(rows_affected > 0)
         } else {
             let now_str = Utc::now().to_rfc3339();
             let rows_affected = conn.execute(
                 "UPDATE memories SET status = 'expired', expired_at = ?1, updated_at = ?1 WHERE id = ?2",
-                params![now_str, id],
+                params![now_str, target_id],
             )?;
             Ok(rows_affected > 0)
         }
@@ -232,7 +247,10 @@ impl Storage {
             params_vec.push(Box::new(as_of_str.clone()));
             query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
-            query.push_str(&format!(" AND (expired_at IS NULL OR expired_at > ?{})", params_vec.len()));
+            query.push_str(&format!(
+                " AND (expired_at IS NULL OR expired_at > ?{})",
+                params_vec.len()
+            ));
         } else if let Some(st) = status {
             params_vec.push(Box::new(st.as_str().to_string()));
             query.push_str(&format!(" AND status = ?{}", params_vec.len()));
@@ -247,7 +265,7 @@ impl Storage {
 
         let mut stmt = conn.prepare(&query)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(param_refs.as_slice(), |row| row_to_memory(row))?;
+        let rows = stmt.query_map(param_refs.as_slice(), row_to_memory)?;
 
         let mut results = Vec::new();
         for r in rows {
@@ -276,7 +294,7 @@ impl Storage {
             FROM memories_fts f
             JOIN memories m ON m.id = f.id
             WHERE memories_fts MATCH ?1
-            "#
+            "#,
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(clean_query)];
@@ -291,7 +309,10 @@ impl Storage {
             params_vec.push(Box::new(as_of_str.clone()));
             sql.push_str(&format!(" AND m.created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
-            sql.push_str(&format!(" AND (m.expired_at IS NULL OR m.expired_at > ?{})", params_vec.len()));
+            sql.push_str(&format!(
+                " AND (m.expired_at IS NULL OR m.expired_at > ?{})",
+                params_vec.len()
+            ));
         } else if let Some(st) = status {
             params_vec.push(Box::new(st.as_str().to_string()));
             sql.push_str(&format!(" AND m.status = ?{}", params_vec.len()));
@@ -332,7 +353,7 @@ impl Storage {
             FROM memory_vectors v
             JOIN memories m ON m.id = v.id
             WHERE 1=1
-            "#
+            "#,
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -347,7 +368,10 @@ impl Storage {
             params_vec.push(Box::new(as_of_str.clone()));
             sql.push_str(&format!(" AND m.created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
-            sql.push_str(&format!(" AND (m.expired_at IS NULL OR m.expired_at > ?{})", params_vec.len()));
+            sql.push_str(&format!(
+                " AND (m.expired_at IS NULL OR m.expired_at > ?{})",
+                params_vec.len()
+            ));
         } else if let Some(st) = status {
             params_vec.push(Box::new(st.as_str().to_string()));
             sql.push_str(&format!(" AND m.status = ?{}", params_vec.len()));
@@ -372,12 +396,24 @@ impl Storage {
     pub fn stats(&self) -> Result<StorageStats> {
         let conn = self.conn.lock().unwrap();
 
-        let total_memories: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let active_memories: i64 = conn.query_row("SELECT COUNT(*) FROM memories WHERE status = 'active'", [], |r| r.get(0))?;
-        let expired_memories: i64 = conn.query_row("SELECT COUNT(*) FROM memories WHERE status = 'expired'", [], |r| r.get(0))?;
-        let total_vectors: i64 = conn.query_row("SELECT COUNT(*) FROM memory_vectors", [], |r| r.get(0))?;
+        let total_memories: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+        let active_memories: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE status = 'active'",
+            [],
+            |r| r.get(0),
+        )?;
+        let expired_memories: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE status = 'expired'",
+            [],
+            |r| r.get(0),
+        )?;
+        let total_vectors: i64 =
+            conn.query_row("SELECT COUNT(*) FROM memory_vectors", [], |r| r.get(0))?;
 
-        let mut stmt = conn.prepare("SELECT category, COUNT(*) FROM memories GROUP BY category ORDER BY COUNT(*) DESC")?;
+        let mut stmt = conn.prepare(
+            "SELECT category, COUNT(*) FROM memories GROUP BY category ORDER BY COUNT(*) DESC",
+        )?;
         let rows = stmt.query_map([], |row| {
             let cat: String = row.get(0)?;
             let count: i64 = row.get(1)?;
@@ -412,13 +448,21 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
     let updated_at_str: String = row.get(9)?;
     let expired_at_str: Option<String> = row.get(10)?;
 
-    let category = category_str.parse::<MemoryType>().unwrap_or(MemoryType::Fact);
-    let status = status_str.parse::<MemoryStatus>().unwrap_or(MemoryStatus::Active);
+    let category = category_str
+        .parse::<MemoryType>()
+        .unwrap_or(MemoryType::Fact);
+    let status = status_str
+        .parse::<MemoryStatus>()
+        .unwrap_or(MemoryStatus::Active);
 
     let tags = if tags_str.trim().is_empty() {
         Vec::new()
     } else {
-        tags_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        tags_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     };
 
     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
@@ -460,9 +504,9 @@ fn serialize_f32_slice(slice: &[f32]) -> Vec<u8> {
 
 fn deserialize_f32_slice(bytes: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(bytes.len() / 4);
-    for chunk in bytes.chunks_exact(4) {
-        let arr: [u8; 4] = chunk.try_into().unwrap();
-        out.push(f32::from_le_bytes(arr));
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for &chunk in chunks {
+        out.push(f32::from_le_bytes(chunk));
     }
     out
 }

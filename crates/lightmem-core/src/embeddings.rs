@@ -57,14 +57,13 @@ impl OnnxEmbeddingProvider {
         let tokenizer_file = std::fs::read(dir.join("tokenizer.json"))
             .with_context(|| format!("Failed to read tokenizer.json in {:?}", dir))?;
 
-        let config_file = std::fs::read(dir.join("config.json"))
-            .unwrap_or_default();
+        let config_file = std::fs::read(dir.join("config.json")).unwrap_or_default();
 
-        let special_tokens_map_file = std::fs::read(dir.join("special_tokens_map.json"))
-            .unwrap_or_default();
+        let special_tokens_map_file =
+            std::fs::read(dir.join("special_tokens_map.json")).unwrap_or_default();
 
-        let tokenizer_config_file = std::fs::read(dir.join("tokenizer_config.json"))
-            .unwrap_or_default();
+        let tokenizer_config_file =
+            std::fs::read(dir.join("tokenizer_config.json")).unwrap_or_default();
 
         let tokenizer_files = TokenizerFiles {
             tokenizer_file,
@@ -74,11 +73,11 @@ impl OnnxEmbeddingProvider {
         };
 
         let user_model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files);
-        let model = TextEmbedding::try_new_from_user_defined(
-            user_model,
-            InitOptionsUserDefined::default(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to load custom ONNX model from {:?}: {}", dir, e))?;
+        let model =
+            TextEmbedding::try_new_from_user_defined(user_model, InitOptionsUserDefined::default())
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to load custom ONNX model from {:?}: {}", dir, e)
+                })?;
 
         Ok(Self {
             model: Mutex::new(model),
@@ -153,9 +152,9 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
 
         match resp_result {
             Ok(resp) => {
-                let parsed: OllamaEmbedResponse = resp
-                    .into_json()
-                    .with_context(|| format!("Failed to parse Ollama response from {}", endpoint))?;
+                let parsed: OllamaEmbedResponse = resp.into_json().with_context(|| {
+                    format!("Failed to parse Ollama response from {}", endpoint)
+                })?;
 
                 if let Some(emb) = parsed.embedding {
                     return Ok(emb);
@@ -182,7 +181,12 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                         model: &self.model,
                         input: text,
                     })
-                    .with_context(|| format!("Failed to call Ollama at {} (and {}) : {}", endpoint, alt_endpoint, e))?;
+                    .with_context(|| {
+                        format!(
+                            "Failed to call Ollama at {} (and {}) : {}",
+                            endpoint, alt_endpoint, e
+                        )
+                    })?;
 
                 let parsed: OllamaEmbedResponse = alt_resp.into_json()?;
                 if let Some(mut embs) = parsed.embeddings {

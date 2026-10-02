@@ -8,6 +8,7 @@ use std::collections::HashMap;
 pub struct HybridSearchEngine;
 
 impl HybridSearchEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         storage: &Storage,
         embedder: &dyn EmbeddingProvider,
@@ -42,7 +43,8 @@ impl HybridSearchEngine {
                 .collect();
 
             // Sort by cosine similarity descending
-            scored_vectors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored_vectors
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             for (rank_idx, (id, score)) in scored_vectors.into_iter().enumerate() {
                 if let Some(min_sim) = min_similarity {
@@ -72,7 +74,8 @@ impl HybridSearchEngine {
 
         // Sort all unique candidate IDs by RRF score descending
         let mut ranked_candidates: Vec<(String, f32)> = rrf_scores.into_iter().collect();
-        ranked_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked_candidates
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let top_ids: Vec<String> = ranked_candidates
             .into_iter()

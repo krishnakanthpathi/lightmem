@@ -5,7 +5,8 @@ edition = "2021"
 
 [lib]
 name = "lightmem"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
+test = false
 
 [dependencies]
 lightmem-core = { path = "../lightmem-core" }

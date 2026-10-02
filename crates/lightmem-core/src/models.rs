@@ -113,7 +113,10 @@ impl FromStr for MemoryStatus {
         match s.trim().to_lowercase().as_str() {
             "active" => Ok(MemoryStatus::Active),
             "expired" => Ok(MemoryStatus::Expired),
-            other => Err(format!("Unknown status '{}'. Must be 'active' or 'expired'", other)),
+            other => Err(format!(
+                "Unknown status '{}'. Must be 'active' or 'expired'",
+                other
+            )),
         }
     }
 }
@@ -160,7 +163,12 @@ impl MemoryRecord {
 
     /// Format as standardized memory card for embedding and display
     pub fn to_card_text(&self) -> String {
-        let mut out = format!("[{}] {}\n\n{}", self.category.as_str().to_uppercase(), self.title, self.content);
+        let mut out = format!(
+            "[{}] {}\n\n{}",
+            self.category.as_str().to_uppercase(),
+            self.title,
+            self.content
+        );
         if !self.tags.is_empty() {
             out.push_str(&format!("\n\nTags: {}", self.tags.join(", ")));
         }

@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use clap::Parser;
 use colored::*;
-use lightmem_core::{
-    LightMem, LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, Storage,
-};
+use lightmem_core::{LightMem, LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, Storage};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -111,7 +109,12 @@ fn generate_synthetic_memories(count: usize) -> Vec<SyntheticMemory> {
         let cat = categories[i % categories.len()];
         let (base_title, base_desc, base_tags) = topics[i % topics.len()];
 
-        let title = format!("[#{:04}] {} - Subsystem {}", i + 1, base_title, (i / 13) + 1);
+        let title = format!(
+            "[#{:04}] {} - Subsystem {}",
+            i + 1,
+            base_title,
+            (i / 13) + 1
+        );
         let content = format!(
             "{}\n\nArchitecture specification item #{:04}. Category context: {}. Engine operational verification parameter: 0x{:08X}.",
             base_desc, i + 1, cat.as_str(), (i * 2654435761) & 0xFFFFFFFF
@@ -148,9 +151,20 @@ struct IngestionResult {
 }
 
 fn bench_bulk_ingestion(bench_dir: &Path) -> Result<Vec<IngestionResult>> {
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "  BENCHMARK 1: Bulk Ingestion Throughput (100, 500, 1,000 memories)".bold().cyan());
-    println!("{}", "══════════════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "  BENCHMARK 1: Bulk Ingestion Throughput (100, 500, 1,000 memories)"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════".cyan()
+    );
 
     let scales = [100, 500, 1000];
     let mut results = Vec::new();
@@ -166,7 +180,13 @@ fn bench_bulk_ingestion(bench_dir: &Path) -> Result<Vec<IngestionResult>> {
 
         let start = Instant::now();
         for m in &memories {
-            lm.remember(&m.content, Some(m.category), Some(m.title.clone()), m.tags.clone(), Some(m.confidence))?;
+            lm.remember(
+                &m.content,
+                Some(m.category),
+                Some(m.title.clone()),
+                m.tags.clone(),
+                Some(m.confidence),
+            )?;
         }
         let elapsed = start.elapsed();
         let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
@@ -175,8 +195,14 @@ fn bench_bulk_ingestion(bench_dir: &Path) -> Result<Vec<IngestionResult>> {
         let file_size_mb = get_db_total_size_mb(&db_path);
 
         let stat = lm.stats()?;
-        assert_eq!(stat.total_memories, scale, "Total ingested memories must match scale");
-        assert_eq!(stat.total_vectors, scale, "Total vector count must match scale");
+        assert_eq!(
+            stat.total_memories, scale,
+            "Total ingested memories must match scale"
+        );
+        assert_eq!(
+            stat.total_vectors, scale,
+            "Total vector count must match scale"
+        );
 
         println!(
             "  ✔ Ingest {:>4} memories: {:>8.2} ms total | {:>6.2} ms/op | {:>7.1} mem/sec | {:>6.2} MB",
@@ -210,9 +236,20 @@ struct RecallStats {
 }
 
 fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "  BENCHMARK 2: Hybrid Recall Latency & Accuracy (100 queries)".bold().cyan());
-    println!("{}", "══════════════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "  BENCHMARK 2: Hybrid Recall Latency & Accuracy (100 queries)"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════".cyan()
+    );
 
     let db_path = bench_dir.join("ingest_1000.db");
     if !db_path.exists() {
@@ -225,29 +262,77 @@ fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
     // 100 queries: 35 exact keywords, 35 typos, 30 semantic concepts
     let queries = [
         // 35 Exact keyword queries
-        "PostgreSQL 16 streaming replication", "Axum Tower Middleware", "SQLite WAL Concurrency",
-        "FastEmbed ONNX Inference", "Docker Container Persistence", "Tokio Cooperative Scheduling",
-        "Jemalloc Heap Profiling", "Redis Cluster Rate Limiting", "TLS 1.3 Cipher Suites",
-        "OpenAPI v3 Contract Spec", "Kubernetes Pod Eviction Thresholds", "BM25 FTS5 Tokenizer Config",
-        "Reciprocal Rank Fusion RRF", "Kafka Partition Balancing", "eBPF Network Observability",
-        "SIMD Vector Cosine Math", "pg_wal records", "zero-allocation routing", "busy timeout 5000ms",
-        "quantized ONNX transformer", "bind mounts permission", "yield_now async loop",
-        "MALLOC_CONF fragmentation", "ZREMRANGEBYSCORE sliding window", "TLS_AES_256_GCM_SHA384",
-        "json schema validation", "PriorityClass orchestrator", "porter unicode61",
-        "rrf formula ranking", "sticky partitioner snappy", "Cilium eBPF probes",
-        "ARM Neon intrinsics", "replication split-brain", "hyper v1 integration", "readers never block writers",
+        "PostgreSQL 16 streaming replication",
+        "Axum Tower Middleware",
+        "SQLite WAL Concurrency",
+        "FastEmbed ONNX Inference",
+        "Docker Container Persistence",
+        "Tokio Cooperative Scheduling",
+        "Jemalloc Heap Profiling",
+        "Redis Cluster Rate Limiting",
+        "TLS 1.3 Cipher Suites",
+        "OpenAPI v3 Contract Spec",
+        "Kubernetes Pod Eviction Thresholds",
+        "BM25 FTS5 Tokenizer Config",
+        "Reciprocal Rank Fusion RRF",
+        "Kafka Partition Balancing",
+        "eBPF Network Observability",
+        "SIMD Vector Cosine Math",
+        "pg_wal records",
+        "zero-allocation routing",
+        "busy timeout 5000ms",
+        "quantized ONNX transformer",
+        "bind mounts permission",
+        "yield_now async loop",
+        "MALLOC_CONF fragmentation",
+        "ZREMRANGEBYSCORE sliding window",
+        "TLS_AES_256_GCM_SHA384",
+        "json schema validation",
+        "PriorityClass orchestrator",
+        "porter unicode61",
+        "rrf formula ranking",
+        "sticky partitioner snappy",
+        "Cilium eBPF probes",
+        "ARM Neon intrinsics",
+        "replication split-brain",
+        "hyper v1 integration",
+        "readers never block writers",
         // 35 Typo / fuzzy queries
-        "PostgreSQl 16 streamng replcaton", "Axm Towr Middlewre", "SQLte WAL Concurency",
-        "FastEmbd ONX Infernce", "Dokr Contaner Persistnce", "Tokio Cooprative Schedulng",
-        "Jemaloc Heap Proflng", "Rediss Clustr Rate Limtng", "TLS 1.3 Ciphre Suits",
-        "OpenAP v3 Contrat Spec", "Kubernets Pod Evicton", "BM25 FTS5 Toknizr",
-        "Reciprcal Rnk Fusn", "Kafk Partiton Balancng", "eBPFF Netwrk Observablity",
-        "SIMMD Vectr Cosin Math", "pgwal recrds replcatn", "zeroalocatn routng", "busy timout 5000",
-        "quantizd ONX transformr", "bnd munts permisn", "yieldnow asnc lop",
-        "MALLOCCONF fragmntatn", "ZREMRANGEBYSCORE slidng", "TLSAES256 ciphers",
-        "jsn schem validtn", "PriorityClas orchestrtr", "portr unicod61 stemmr",
-        "rrf formul rankng", "stcky partitnr snapy", "Cilum eBPF prob",
-        "ARM Neonn intrsics", "replcaton splitbran", "hypr v1 integratn", "readrs nevr blck writrs",
+        "PostgreSQl 16 streamng replcaton",
+        "Axm Towr Middlewre",
+        "SQLte WAL Concurency",
+        "FastEmbd ONX Infernce",
+        "Dokr Contaner Persistnce",
+        "Tokio Cooprative Schedulng",
+        "Jemaloc Heap Proflng",
+        "Rediss Clustr Rate Limtng",
+        "TLS 1.3 Ciphre Suits",
+        "OpenAP v3 Contrat Spec",
+        "Kubernets Pod Evicton",
+        "BM25 FTS5 Toknizr",
+        "Reciprcal Rnk Fusn",
+        "Kafk Partiton Balancng",
+        "eBPFF Netwrk Observablity",
+        "SIMMD Vectr Cosin Math",
+        "pgwal recrds replcatn",
+        "zeroalocatn routng",
+        "busy timout 5000",
+        "quantizd ONX transformr",
+        "bnd munts permisn",
+        "yieldnow asnc lop",
+        "MALLOCCONF fragmntatn",
+        "ZREMRANGEBYSCORE slidng",
+        "TLSAES256 ciphers",
+        "jsn schem validtn",
+        "PriorityClas orchestrtr",
+        "portr unicod61 stemmr",
+        "rrf formul rankng",
+        "stcky partitnr snapy",
+        "Cilum eBPF prob",
+        "ARM Neonn intrsics",
+        "replcaton splitbran",
+        "hypr v1 integratn",
+        "readrs nevr blck writrs",
         // 30 Semantic concept queries
         "how do we handle database replication and high availability",
         "what async web framework is chosen for rust services",
@@ -311,7 +396,10 @@ fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
     println!("  P95 Recall Latency:   {:>6.2} ms", p95);
     println!("  P99 Recall Latency:   {:>6.2} ms", p99);
     println!("  Mean Recall Latency:  {:>6.2} ms", mean);
-    println!("  Search Hit Rate:      {:>6.1} % ({} of 100 queries matched)", hit_rate, hits);
+    println!(
+        "  Search Hit Rate:      {:>6.1} % ({} of 100 queries matched)",
+        hit_rate, hits
+    );
 
     Ok(RecallStats {
         total_queries: queries.len(),
@@ -337,9 +425,20 @@ struct TemporalResult {
 }
 
 fn bench_temporal_recall(bench_dir: &Path) -> Result<TemporalResult> {
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "  BENCHMARK 3: Temporal Recall Scalability (--as-of point-in-time)".bold().cyan());
-    println!("{}", "══════════════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "  BENCHMARK 3: Temporal Recall Scalability (--as-of point-in-time)"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════".cyan()
+    );
 
     let db_path = bench_dir.join("temporal_stress.db");
     cleanup_db_files(&db_path);
@@ -463,12 +562,17 @@ fn bench_temporal_recall(bench_dir: &Path) -> Result<TemporalResult> {
 
         println!(
             "  Snapshot [{:<28}]: {:>3} returned (expected {:>3}) -> 100% matched",
-            label, returned_ids.len(), expected_count
+            label,
+            returned_ids.len(),
+            expected_count
         );
     }
 
     let accuracy = (correct_verifications as f64 / total_verifications as f64) * 100.0;
-    println!("  Total Point-in-Time Verifications: {}/{} ({:.2}%)", correct_verifications, total_verifications, accuracy);
+    println!(
+        "  Total Point-in-Time Verifications: {}/{} ({:.2}%)",
+        correct_verifications, total_verifications, accuracy
+    );
 
     Ok(TemporalResult {
         total_memories: all_memories.len(),
@@ -494,9 +598,20 @@ struct ContentionResult {
 }
 
 fn bench_wal_contention(bench_dir: &Path) -> Result<ContentionResult> {
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "  BENCHMARK 4: Concurrent Multi-Process Contention (SQLite WAL Stress)".bold().cyan());
-    println!("{}", "══════════════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "  BENCHMARK 4: Concurrent Multi-Process Contention (SQLite WAL Stress)"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════".cyan()
+    );
 
     let db_path = bench_dir.join("wal_contention.db");
     cleanup_db_files(&db_path);
@@ -506,7 +621,13 @@ fn bench_wal_contention(bench_dir: &Path) -> Result<ContentionResult> {
     let lm = LightMem::open_at(&db_path, config)?;
     let seed = generate_synthetic_memories(50);
     for m in seed {
-        lm.remember(&m.content, Some(m.category), Some(m.title), m.tags, Some(m.confidence))?;
+        lm.remember(
+            &m.content,
+            Some(m.category),
+            Some(m.title),
+            m.tags,
+            Some(m.confidence),
+        )?;
     }
     println!("  ✔ Pre-populated database with 50 baseline memories.");
 
@@ -515,7 +636,10 @@ fn bench_wal_contention(bench_dir: &Path) -> Result<ContentionResult> {
     let total_ops = num_processes * ops_per_process;
 
     let current_exe = std::env::current_exe()?;
-    println!("  Spawning {} concurrent worker processes ({} ops each = {} total concurrent ops)...", num_processes, ops_per_process, total_ops);
+    println!(
+        "  Spawning {} concurrent worker processes ({} ops each = {} total concurrent ops)...",
+        num_processes, ops_per_process, total_ops
+    );
 
     let start = Instant::now();
     let mut children = Vec::new();
@@ -523,9 +647,12 @@ fn bench_wal_contention(bench_dir: &Path) -> Result<ContentionResult> {
     for worker_id in 0..num_processes {
         let child = Command::new(&current_exe)
             .args([
-                "--worker", &worker_id.to_string(),
-                "--db", &db_path.to_str().unwrap(),
-                "--ops", &ops_per_process.to_string(),
+                "--worker",
+                &worker_id.to_string(),
+                "--db",
+                &db_path.to_str().unwrap(),
+                "--ops",
+                &ops_per_process.to_string(),
             ])
             .spawn()
             .with_context(|| format!("Failed to spawn worker process {}", worker_id))?;
@@ -553,8 +680,23 @@ fn bench_wal_contention(bench_dir: &Path) -> Result<ContentionResult> {
 
     println!("  Elapsed Contention Time:   {:>8.2} ms", elapsed_ms);
     println!("  Worker Process Failures:   {}", failed_workers);
-    println!("  SQLite Locking Errors:     {} ({})", failed_workers, if failed_workers == 0 { "zero database locks encountered".green() } else { "locks detected".red() });
-    println!("  SQLite PRAGMA Integrity:   {}", if integrity_ok { "ok (passed)".green() } else { "FAILED".red() });
+    println!(
+        "  SQLite Locking Errors:     {} ({})",
+        failed_workers,
+        if failed_workers == 0 {
+            "zero database locks encountered".green()
+        } else {
+            "locks detected".red()
+        }
+    );
+    println!(
+        "  SQLite PRAGMA Integrity:   {}",
+        if integrity_ok {
+            "ok (passed)".green()
+        } else {
+            "FAILED".red()
+        }
+    );
     println!("  Final Total DB Memories:   {}", stat.total_memories);
 
     Ok(ContentionResult {
@@ -579,7 +721,13 @@ fn run_worker_mode(worker_id: usize, db_path: &Path, ops: usize) -> Result<()> {
                 // Write (50% of traffic)
                 let title = format!("Worker-{}-Memory-{}", worker_id, i);
                 let content = format!("Concurrent test memory from worker {} at step {}. Verifying WAL lock-free writes.", worker_id, i);
-                lm.remember(&content, Some(MemoryType::Observation), Some(title), vec!["concurrent".to_string(), format!("worker_{}", worker_id)], Some(0.95))?;
+                lm.remember(
+                    &content,
+                    Some(MemoryType::Observation),
+                    Some(title),
+                    vec!["concurrent".to_string(), format!("worker_{}", worker_id)],
+                    Some(0.95),
+                )?;
             }
             2 => {
                 // Recall / Read (25% of traffic)
@@ -587,7 +735,12 @@ fn run_worker_mode(worker_id: usize, db_path: &Path, ops: usize) -> Result<()> {
             }
             3 => {
                 // List (25% of traffic)
-                let _ = lm.list(Some(MemoryType::Observation), Some(MemoryStatus::Active), None, 10)?;
+                let _ = lm.list(
+                    Some(MemoryType::Observation),
+                    Some(MemoryStatus::Active),
+                    None,
+                    10,
+                )?;
             }
             _ => unreachable!(),
         }
@@ -612,9 +765,20 @@ struct MemoryResult {
 }
 
 fn bench_memory_footprint(bench_dir: &Path) -> Result<MemoryResult> {
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "  BENCHMARK 5: Memory Footprint & RSS (1,000 continuous operations)".bold().cyan());
-    println!("{}", "══════════════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "  BENCHMARK 5: Memory Footprint & RSS (1,000 continuous operations)"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════".cyan()
+    );
 
     let db_path = bench_dir.join("memory_stress.db");
     cleanup_db_files(&db_path);
@@ -636,9 +800,21 @@ fn bench_memory_footprint(bench_dir: &Path) -> Result<MemoryResult> {
     for i in 0..1000 {
         if i % 2 == 0 {
             let m = &test_corpus[(i / 2) % test_corpus.len()];
-            lm.remember(&m.content, Some(m.category), Some(m.title.clone()), m.tags.clone(), Some(m.confidence))?;
+            lm.remember(
+                &m.content,
+                Some(m.category),
+                Some(m.title.clone()),
+                m.tags.clone(),
+                Some(m.confidence),
+            )?;
         } else {
-            let _ = lm.recall("PostgreSQL replication SQLite concurrency", None, None, 10, None)?;
+            let _ = lm.recall(
+                "PostgreSQL replication SQLite concurrency",
+                None,
+                None,
+                10,
+                None,
+            )?;
         }
 
         let curr_rss = get_process_rss_mb();
@@ -667,7 +843,10 @@ fn bench_memory_footprint(bench_dir: &Path) -> Result<MemoryResult> {
     println!("  Peak Process RSS:          {:>6.2} MB", peak_rss);
     println!("  Final Process RSS:         {:>6.2} MB", rss_final);
     println!("  Net RSS Delta:             {:>+6.2} MB", rss_delta);
-    println!("  RAM Leak Status:           {} (bounded within predictable memory profile)", "CLEAN".green().bold());
+    println!(
+        "  RAM Leak Status:           {} (bounded within predictable memory profile)",
+        "CLEAN".green().bold()
+    );
 
     Ok(MemoryResult {
         rss_initial_mb: rss_initial,
@@ -698,9 +877,20 @@ struct OkfResult {
 }
 
 fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".cyan());
-    println!("{}", "  BENCHMARK 6: Roundtrip OKF Data Integrity (Export -> Wipe -> Import)".bold().cyan());
-    println!("{}", "══════════════════════════════════════════════════════════════════════".cyan());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".cyan()
+    );
+    println!(
+        "{}",
+        "  BENCHMARK 6: Roundtrip OKF Data Integrity (Export -> Wipe -> Import)"
+            .bold()
+            .cyan()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════".cyan()
+    );
 
     let db_orig = bench_dir.join("okf_original.db");
     let db_import = bench_dir.join("okf_imported.db");
@@ -716,24 +906,32 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
     let test_memories = generate_synthetic_memories(100);
 
     for m in &test_memories {
-        lm_orig.remember(&m.content, Some(m.category), Some(m.title.clone()), m.tags.clone(), Some(m.confidence))?;
+        lm_orig.remember(
+            &m.content,
+            Some(m.category),
+            Some(m.title.clone()),
+            m.tags.clone(),
+            Some(m.confidence),
+        )?;
     }
     println!("  ✔ Populated original database with 100 memories across all 13 categories.");
 
     // 2. Export via lmem CLI
     // Find lmem binary
-    let lmem_exe = std::env::current_exe()?
-        .parent()
-        .unwrap()
-        .join("lmem");
+    let lmem_exe = std::env::current_exe()?.parent().unwrap().join("lmem");
 
-    println!("  Invoking CLI export: lmem --db {:?} export --okf -o {:?}", db_orig, export_file);
+    println!(
+        "  Invoking CLI export: lmem --db {:?} export --okf -o {:?}",
+        db_orig, export_file
+    );
     let export_status = Command::new(&lmem_exe)
         .args([
-            "--db", db_orig.to_str().unwrap(),
+            "--db",
+            db_orig.to_str().unwrap(),
             "export",
             "--okf",
-            "-o", export_file.to_str().unwrap(),
+            "-o",
+            export_file.to_str().unwrap(),
         ])
         .status()
         .with_context(|| "Failed to execute lmem export")?;
@@ -741,13 +939,20 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
     assert!(export_status.success(), "lmem export CLI failed");
     assert!(export_file.exists(), "Exported OKF bundle does not exist");
     let export_size_kb = fs::metadata(&export_file)?.len() as f64 / 1024.0;
-    println!("  ✔ Exported OKF markdown bundle ({:.1} KB).", export_size_kb);
+    println!(
+        "  ✔ Exported OKF markdown bundle ({:.1} KB).",
+        export_size_kb
+    );
 
     // 3. Import bundle into new clean database
-    println!("  Invoking CLI import: lmem --db {:?} import {:?}", db_import, export_file);
+    println!(
+        "  Invoking CLI import: lmem --db {:?} import {:?}",
+        db_import, export_file
+    );
     let import_status = Command::new(&lmem_exe)
         .args([
-            "--db", db_import.to_str().unwrap(),
+            "--db",
+            db_import.to_str().unwrap(),
             "import",
             export_file.to_str().unwrap(),
         ])
@@ -761,7 +966,11 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
     let orig_list = lm_orig.list(None, None, None, 0)?;
     let imported_list = lm_imported.list(None, None, None, 0)?;
 
-    assert_eq!(orig_list.len(), imported_list.len(), "Memory counts must match exactly");
+    assert_eq!(
+        orig_list.len(),
+        imported_list.len(),
+        "Memory counts must match exactly"
+    );
 
     // Index imported by title
     let mut imported_by_title: HashMap<String, MemoryRecord> = HashMap::new();
@@ -779,7 +988,10 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
         match imported_by_title.get(&orig.title) {
             Some(imp) => {
                 if imp.category != orig.category {
-                    eprintln!("Category mismatch for '{}': {:?} vs {:?}", orig.title, orig.category, imp.category);
+                    eprintln!(
+                        "Category mismatch for '{}': {:?} vs {:?}",
+                        orig.title, orig.category, imp.category
+                    );
                     categories_intact = false;
                 }
 
@@ -788,13 +1000,19 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
                 let mut imp_tags = imp.tags.clone();
                 imp_tags.sort();
                 if orig_tags != imp_tags {
-                    eprintln!("Tags mismatch for '{}': {:?} vs {:?}", orig.title, orig_tags, imp_tags);
+                    eprintln!(
+                        "Tags mismatch for '{}': {:?} vs {:?}",
+                        orig.title, orig_tags, imp_tags
+                    );
                     tags_intact = false;
                 }
 
                 // Confidence formatted with 2 decimal places in OKF markdown, check within 0.02
                 if (imp.confidence - orig.confidence).abs() > 0.02 {
-                    eprintln!("Confidence mismatch for '{}': {:.2} vs {:.2}", orig.title, orig.confidence, imp.confidence);
+                    eprintln!(
+                        "Confidence mismatch for '{}': {:.2} vs {:.2}",
+                        orig.title, orig.confidence, imp.confidence
+                    );
                     confidence_intact = false;
                 }
 
@@ -812,13 +1030,56 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
 
     let recovery_rate = (orig_list.len() as f64 / test_memories.len() as f64) * 100.0;
 
-    println!("  Total Memories Recovered:  {}/{} ({:.1}%)", orig_list.len(), test_memories.len(), recovery_rate);
-    println!("  Titles 100% Preserved:     {}", if titles_intact { "YES".green() } else { "NO".red() });
-    println!("  Categories 100% Preserved: {}", if categories_intact { "YES".green() } else { "NO".red() });
-    println!("  Tags 100% Preserved:       {}", if tags_intact { "YES".green() } else { "NO".red() });
-    println!("  Confidence 100% Preserved: {}", if confidence_intact { "YES".green() } else { "NO".red() });
-    println!("  Content 100% Preserved:    {}", if content_intact { "YES".green() } else { "NO".red() });
-    println!("  OKF Data Corruption:       {}", "0.0% (Zero Corruption)".green().bold());
+    println!(
+        "  Total Memories Recovered:  {}/{} ({:.1}%)",
+        orig_list.len(),
+        test_memories.len(),
+        recovery_rate
+    );
+    println!(
+        "  Titles 100% Preserved:     {}",
+        if titles_intact {
+            "YES".green()
+        } else {
+            "NO".red()
+        }
+    );
+    println!(
+        "  Categories 100% Preserved: {}",
+        if categories_intact {
+            "YES".green()
+        } else {
+            "NO".red()
+        }
+    );
+    println!(
+        "  Tags 100% Preserved:       {}",
+        if tags_intact {
+            "YES".green()
+        } else {
+            "NO".red()
+        }
+    );
+    println!(
+        "  Confidence 100% Preserved: {}",
+        if confidence_intact {
+            "YES".green()
+        } else {
+            "NO".red()
+        }
+    );
+    println!(
+        "  Content 100% Preserved:    {}",
+        if content_intact {
+            "YES".green()
+        } else {
+            "NO".red()
+        }
+    );
+    println!(
+        "  OKF Data Corruption:       {}",
+        "0.0% (Zero Corruption)".green().bold()
+    );
 
     Ok(OkfResult {
         original_count: test_memories.len(),
@@ -848,7 +1109,10 @@ fn generate_markdown_report(
     let mut md = String::new();
 
     md.push_str("# 🧠 LightMem Engine Performance & Stress Benchmark Report\n\n");
-    md.push_str(&format!("**Execution Date:** `{}`  \n", Utc::now().to_rfc3339()));
+    md.push_str(&format!(
+        "**Execution Date:** `{}`  \n",
+        Utc::now().to_rfc3339()
+    ));
     md.push_str("**Environment:** Apple Silicon (macOS) | Rust 1.8x | SQLite 3.4x (WAL Mode) | ONNX bge-small (384d)\n\n");
     md.push_str("---\n\n");
 
@@ -868,7 +1132,10 @@ fn generate_markdown_report(
     md.push_str("| Batch Size | Elapsed Time (ms) | Avg Latency (ms/mem) | Throughput (mem/sec) | DB File Size (MB) |\n");
     md.push_str("|---|---|---|---|---|\n");
     for row in b1 {
-        md.push_str(&format!("| **{:>4}** | {:>8.2} | {:>6.2} | {:>7.1} | {:>6.2} |\n", row.scale, row.elapsed_ms, row.avg_latency_ms, row.throughput_ops_sec, row.file_size_mb));
+        md.push_str(&format!(
+            "| **{:>4}** | {:>8.2} | {:>6.2} | {:>7.1} | {:>6.2} |\n",
+            row.scale, row.elapsed_ms, row.avg_latency_ms, row.throughput_ops_sec, row.file_size_mb
+        ));
     }
     md.push_str("\n---\n\n");
 
@@ -879,8 +1146,15 @@ fn generate_markdown_report(
     md.push_str(&format!("| **P50 (Median)** | **{:.2} ms** |\n", b2.p50_ms));
     md.push_str(&format!("| **P95** | **{:.2} ms** |\n", b2.p95_ms));
     md.push_str(&format!("| **P99** | **{:.2} ms** |\n", b2.p99_ms));
-    md.push_str(&format!("| **Mean Latency** | **{:.2} ms** |\n", b2.mean_ms));
-    md.push_str(&format!("| **Search Hit Rate** | **{:.1}%** ({}/100 queries returned valid ranked results) |\n", b2.hit_rate_pct, (b2.hit_rate_pct as usize)));
+    md.push_str(&format!(
+        "| **Mean Latency** | **{:.2} ms** |\n",
+        b2.mean_ms
+    ));
+    md.push_str(&format!(
+        "| **Search Hit Rate** | **{:.1}%** ({}/100 queries returned valid ranked results) |\n",
+        b2.hit_rate_pct,
+        (b2.hit_rate_pct as usize)
+    ));
     md.push_str("\n---\n\n");
 
     md.push_str("## 3. Temporal Recall Scalability (`--as-of`)\n\n");
@@ -902,30 +1176,69 @@ fn generate_markdown_report(
     md.push_str("Process Resident Set Size (RSS) tracked across 1,000 continuous embedding and hybrid recall operations:\n\n");
     md.push_str("| Milestone | Process RSS (MB) |\n");
     md.push_str("|---|---|\n");
-    md.push_str(&format!("| **Initial Baseline** | {:.2} MB |\n", b5.rss_initial_mb));
-    md.push_str(&format!("| **Operation 250** | {:.2} MB |\n", b5.rss_op250_mb));
-    md.push_str(&format!("| **Operation 500** | {:.2} MB |\n", b5.rss_op500_mb));
-    md.push_str(&format!("| **Operation 750** | {:.2} MB |\n", b5.rss_op750_mb));
-    md.push_str(&format!("| **Operation 1,000** | {:.2} MB |\n", b5.rss_op1000_mb));
-    md.push_str(&format!("| **Peak RSS** | **{:.2} MB** |\n", b5.rss_peak_mb));
-    md.push_str(&format!("| **Final Settled RSS** | {:.2} MB |\n", b5.rss_final_mb));
-    md.push_str(&format!("| **Net RSS Delta** | **{:+0.2} MB** |\n\n", b5.rss_delta_mb));
+    md.push_str(&format!(
+        "| **Initial Baseline** | {:.2} MB |\n",
+        b5.rss_initial_mb
+    ));
+    md.push_str(&format!(
+        "| **Operation 250** | {:.2} MB |\n",
+        b5.rss_op250_mb
+    ));
+    md.push_str(&format!(
+        "| **Operation 500** | {:.2} MB |\n",
+        b5.rss_op500_mb
+    ));
+    md.push_str(&format!(
+        "| **Operation 750** | {:.2} MB |\n",
+        b5.rss_op750_mb
+    ));
+    md.push_str(&format!(
+        "| **Operation 1,000** | {:.2} MB |\n",
+        b5.rss_op1000_mb
+    ));
+    md.push_str(&format!(
+        "| **Peak RSS** | **{:.2} MB** |\n",
+        b5.rss_peak_mb
+    ));
+    md.push_str(&format!(
+        "| **Final Settled RSS** | {:.2} MB |\n",
+        b5.rss_final_mb
+    ));
+    md.push_str(&format!(
+        "| **Net RSS Delta** | **{:+0.2} MB** |\n\n",
+        b5.rss_delta_mb
+    ));
     md.push_str("Memory consumption remains strictly bounded within expectations for localized in-process ONNX model inference without memory leaks.\n\n");
     md.push_str("---\n\n");
 
     md.push_str("## 6. Roundtrip OKF Data Integrity\n\n");
-    md.push_str("1. Populated isolated test database with 100 memories across all 13 categories.\n");
+    md.push_str(
+        "1. Populated isolated test database with 100 memories across all 13 categories.\n",
+    );
     md.push_str("2. Exported via `lmem export --okf -o okf_export_bundle.md`.\n");
     md.push_str("3. Wiped storage and imported into fresh database via `lmem import okf_export_bundle.md`.\n");
     md.push_str("4. Performed deep field-by-field equality validation:\n\n");
     md.push_str("| Field Attribute | Survival Rate | Integrity Status |\n");
     md.push_str("|---|---|---|\n");
-    md.push_str(&format!("| **Total Memories Recovered** | **{}/{} ({:.1}%)** | ✅ PERFECT |\n", b6.imported_count, b6.original_count, b6.recovery_rate_pct));
-    md.push_str(&format!("| **Category Classification** | **100.0%** | ✅ ALL 13 CATEGORIES INTACT |\n"));
-    md.push_str(&format!("| **Titles & Identifiers** | **100.0%** | ✅ PERFECT MATCH |\n"));
-    md.push_str(&format!("| **Tags & Shards** | **100.0%** | ✅ PERFECT MATCH |\n"));
-    md.push_str(&format!("| **Confidence Scores** | **100.0%** | ✅ PRESERVED (< 0.02 delta) |\n"));
-    md.push_str(&format!("| **Content Body** | **100.0%** | ✅ 0 BYTES CORRUPTED |\n\n"));
+    md.push_str(&format!(
+        "| **Total Memories Recovered** | **{}/{} ({:.1}%)** | ✅ PERFECT |\n",
+        b6.imported_count, b6.original_count, b6.recovery_rate_pct
+    ));
+    md.push_str(&format!(
+        "| **Category Classification** | **100.0%** | ✅ ALL 13 CATEGORIES INTACT |\n"
+    ));
+    md.push_str(&format!(
+        "| **Titles & Identifiers** | **100.0%** | ✅ PERFECT MATCH |\n"
+    ));
+    md.push_str(&format!(
+        "| **Tags & Shards** | **100.0%** | ✅ PERFECT MATCH |\n"
+    ));
+    md.push_str(&format!(
+        "| **Confidence Scores** | **100.0%** | ✅ PRESERVED (< 0.02 delta) |\n"
+    ));
+    md.push_str(&format!(
+        "| **Content Body** | **100.0%** | ✅ 0 BYTES CORRUPTED |\n\n"
+    ));
     md.push_str("---\n");
 
     fs::write(target_file, md)?;
@@ -945,7 +1258,12 @@ fn main() -> Result<()> {
         return run_worker_mode(worker_id, &db_path, opts.ops);
     }
 
-    println!("{}", "\n🚀 STARTING LIGHTMEM ENGINE PERFORMANCE & STRESS BENCHMARK HARNESS\n".bold().green());
+    println!(
+        "{}",
+        "\n🚀 STARTING LIGHTMEM ENGINE PERFORMANCE & STRESS BENCHMARK HARNESS\n"
+            .bold()
+            .green()
+    );
 
     let bench_dir = PathBuf::from("/tmp/lightmem_bench");
     fs::create_dir_all(&bench_dir)?;
@@ -976,11 +1294,28 @@ fn main() -> Result<()> {
     let report_path = bench_dir.join("BENCHMARK_REPORT.md");
     generate_markdown_report(&b1, &b2, &b3, &b4, &b5, &b6, &report_path)?;
 
-    println!("{}", "\n══════════════════════════════════════════════════════════════════════".green());
-    println!("{}", "  ALL 6 BENCHMARKS COMPLETED SUCCESSFULLY! 🎉".bold().green());
-    println!("  Total Suite Duration:   {:.2} seconds", total_elapsed.as_secs_f64());
-    println!("  Benchmark Report Saved: {}", report_path.display().to_string().cyan().bold());
-    println!("{}", "══════════════════════════════════════════════════════════════════════\n".green());
+    println!(
+        "{}",
+        "\n══════════════════════════════════════════════════════════════════════".green()
+    );
+    println!(
+        "{}",
+        "  ALL 6 BENCHMARKS COMPLETED SUCCESSFULLY! 🎉"
+            .bold()
+            .green()
+    );
+    println!(
+        "  Total Suite Duration:   {:.2} seconds",
+        total_elapsed.as_secs_f64()
+    );
+    println!(
+        "  Benchmark Report Saved: {}",
+        report_path.display().to_string().cyan().bold()
+    );
+    println!(
+        "{}",
+        "══════════════════════════════════════════════════════════════════════\n".green()
+    );
 
     Ok(())
 }

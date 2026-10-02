@@ -14,11 +14,7 @@ pub struct AnswerResult {
 
 pub trait Reranker: Send + Sync {
     fn name(&self) -> &str;
-    fn answer(
-        &self,
-        question: &str,
-        candidates: &[ScoredMemory],
-    ) -> Result<AnswerResult>;
+    fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult>;
 }
 
 /// Mode 1: Fast / Instant Top-1 Reranker (Default)
@@ -30,11 +26,7 @@ impl Reranker for Top1Reranker {
         "top1"
     }
 
-    fn answer(
-        &self,
-        _question: &str,
-        candidates: &[ScoredMemory],
-    ) -> Result<AnswerResult> {
+    fn answer(&self, _question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
         if candidates.is_empty() {
             return Ok(AnswerResult {
                 answer: "No relevant memories found to answer this question.".to_string(),
@@ -128,7 +120,8 @@ impl NeedleReranker {
         if std::path::Path::new(candidate).exists() {
             return candidate.to_string();
         }
-        let abs = "/Users/krishnakanth/Projects/lightmem/crates/lightmem-core/scripts/needle_picker.py";
+        let abs =
+            "/Users/krishnakanth/Projects/lightmem/crates/lightmem-core/scripts/needle_picker.py";
         if std::path::Path::new(abs).exists() {
             return abs.to_string();
         }
@@ -150,11 +143,7 @@ impl Reranker for NeedleReranker {
         "needle"
     }
 
-    fn answer(
-        &self,
-        question: &str,
-        candidates: &[ScoredMemory],
-    ) -> Result<AnswerResult> {
+    fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
         if candidates.is_empty() {
             return Ok(AnswerResult {
                 answer: "No relevant memories found to answer this question.".to_string(),

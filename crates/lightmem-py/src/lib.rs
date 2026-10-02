@@ -208,7 +208,8 @@ impl PyLightMem {
             CoreLightMem::open_at(Path::new(&path_str), config)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
         } else {
-            CoreLightMem::open_default(global_db).map_err(|e| PyValueError::new_err(e.to_string()))?
+            CoreLightMem::open_default(global_db)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
         };
 
         Ok(Self { engine })

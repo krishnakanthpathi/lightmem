@@ -8,9 +8,10 @@ description = "Fast CLI for lightweight agent memory (lmem)"
 name = "lmem"
 path = "src/main.rs"
 
-[[bin]]
+[[bench]]
 name = "bench_harness"
-path = "src/bin/bench_harness.rs"
+harness = false
+path = "benches/bench_harness.rs"
 
 [dependencies]
 lightmem-core = { path = "../lightmem-core" }

@@ -196,6 +196,16 @@ fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
     Ok(Utc.from_utc_datetime(&naive_dt))
 }
 
+fn format_path(p: &std::path::Path) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        let home_path = std::path::Path::new(&home);
+        if let Ok(rel) = p.strip_prefix(home_path) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    p.display().to_string()
+}
+
 fn open_engine(db_path: Option<&std::path::Path>, global: bool) -> Result<LightMem> {
     if let Some(path) = db_path {
         let config = LightMemConfig::load();
@@ -238,13 +248,15 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let short_id: String = memory.id.chars().take(8).collect();
+            let db_str = format_path(lm.db_path());
             println!(
-                "{} Stored memory [{}] in {}\n  ID: {}\n  Title: {}",
+                "{} Stored [{}] {} ({}) in {}",
                 "✔".green().bold(),
-                memory.category.as_str().cyan(),
-                lm.db_path().display().to_string().dimmed(),
-                memory.id.yellow(),
-                memory.title.bold()
+                memory.category.as_str().cyan().bold(),
+                memory.title.bold(),
+                short_id.yellow(),
+                db_str.dimmed()
             );
         }
 
@@ -272,30 +284,41 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let db_str = format_path(lm.db_path());
+            let count_label = if results.len() == 1 {
+                "memory"
+            } else {
+                "memories"
+            };
             println!(
-                "{} Found {} memories for \"{}\" in {}:",
+                "{} Found {} {} for \"{}\" in {}:",
                 "🔍".bold(),
                 results.len().to_string().cyan().bold(),
+                count_label,
                 query.bold(),
-                lm.db_path().display().to_string().dimmed()
+                db_str.dimmed()
             );
             println!();
 
             for (idx, r) in results.iter().enumerate() {
                 let m = &r.memory;
+                let short_id: String = m.id.chars().take(8).collect();
                 println!(
-                    "{} [{}] {} {}",
-                    format!("{}.", idx + 1).dimmed(),
+                    "{}. [{}] {} {}",
+                    idx + 1,
                     m.category.as_str().cyan().bold(),
                     m.title.bold(),
                     format!("(score: {:.2})", r.score).dimmed()
                 );
-                println!("   {}", m.content.replace('\n', "\n   ").dimmed());
+                println!("   {}", m.content.replace('\n', "\n   "));
+                let mut meta = vec![format!("ID: {}", short_id.yellow())];
                 if !m.tags.is_empty() {
-                    println!("   {} {}", "Tags:".dimmed(), m.tags.join(", ").blue());
+                    meta.push(format!("Tags: {}", m.tags.join(", ").blue()));
                 }
-                println!("   {} {}", "ID:".dimmed(), m.id.dimmed());
-                println!();
+                println!("   {}", meta.join(" | ").dimmed());
+                if idx + 1 < results.len() {
+                    println!();
+                }
             }
         }
 
@@ -323,22 +346,36 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let db_str = format_path(lm.db_path());
+            let count_label = if memories.len() == 1 {
+                "memory"
+            } else {
+                "memories"
+            };
             println!(
-                "{} Displaying {} memories from {}:",
+                "{} Displaying {} {} from {}:",
                 "📋".bold(),
-                memories.len().to_string().cyan(),
-                lm.db_path().display().to_string().dimmed()
+                memories.len().to_string().cyan().bold(),
+                count_label,
+                db_str.dimmed()
             );
             println!();
 
-            for m in memories {
+            for m in &memories {
+                let short_id: String = m.id.chars().take(8).collect();
+                let first_line = m.content.lines().next().unwrap_or("").trim();
+                let snippet = if first_line.len() > 64 {
+                    format!("{}...", &first_line[..61])
+                } else {
+                    first_line.to_string()
+                };
                 println!(
-                    "• [{}] {} {}",
+                    "• [{}] {} {} - {}",
                     m.category.as_str().cyan().bold(),
                     m.title.bold(),
-                    format!("({})", m.id.chars().take(8).collect::<String>()).dimmed()
+                    format!("({})", short_id).yellow(),
+                    snippet.dimmed()
                 );
-                println!("  {}", m.content.lines().next().unwrap_or("").dimmed());
             }
         }
 
@@ -359,10 +396,14 @@ fn main() -> Result<()> {
             }
 
             if ok {
-                let action = if hard { "Permanently deleted" } else { "Retired (soft-expired)" };
-                println!("{} {} memory {}", "✔".green(), action, id.yellow());
+                let action = if hard {
+                    "Permanently deleted"
+                } else {
+                    "Retired (soft-expired)"
+                };
+                println!("{} {} memory {}", "✔".green().bold(), action, id.yellow());
             } else {
-                println!("{} Memory ID '{}' not found", "✖".red(), id);
+                println!("{} Memory '{}' not found", "✖".red().bold(), id);
             }
         }
 
@@ -406,25 +447,26 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let conf_pct = (result.confidence * 100.0).round() as u32;
             println!(
-                "{} Synthesized Answer for \"{}\" [reranker: {}]:",
+                "{} Answer [reranker: {}] (confidence: {}%):",
                 "💡".bold(),
-                question.bold(),
-                result.reranker_used.cyan().bold()
+                result.reranker_used.cyan().bold(),
+                conf_pct
             );
             println!();
             println!("  {}", result.answer.green().bold());
             println!();
 
             if let Some(m) = &result.selected_memory {
+                let short_id: String = m.id.chars().take(8).collect();
                 println!(
-                    "  {} Source Memory: [{}] {} {}",
+                    "  {} Source: [{}] {} {}",
                     "📌".dimmed(),
                     m.category.as_str().cyan(),
                     m.title.bold(),
-                    format!("(ID: {})", m.id.chars().take(8).collect::<String>()).dimmed()
+                    format!("(ID: {})", short_id).dimmed()
                 );
-                println!("     {}", m.content.replace('\n', "\n     ").dimmed());
             }
         }
 
@@ -478,7 +520,10 @@ fn main() -> Result<()> {
             println!("  Reranker:         {}", cfg.reranker.cyan().bold());
             println!("  Ollama URL:       {}", cfg.ollama_url.dimmed());
             println!("  Ollama Model:     {}", cfg.embedding_model.dimmed());
-            println!("  Config File:      {}", LightMemConfig::config_file().display());
+            println!(
+                "  Config File:      {}",
+                LightMemConfig::config_file().display()
+            );
         }
 
         Commands::Stats { json } => {
@@ -490,16 +535,25 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            println!("{} Storage Statistics", "📊".bold());
-            println!("  Database:          {}", lm.db_path().display().to_string().cyan());
-            println!("  Total Memories:    {}", stats.total_memories.to_string().bold());
-            println!("  Active Memories:   {}", stats.active_memories.to_string().green());
-            println!("  Expired Memories:  {}", stats.expired_memories.to_string().yellow());
-            println!("  Embedded Vectors:  {}", stats.total_vectors.to_string().blue());
-            println!();
-            println!("  Breakdown by Category:");
-            for (cat, count) in stats.by_category {
-                println!("    • {:<14} {}", cat.cyan(), count);
+            let db_str = format_path(lm.db_path());
+            println!("{} LightMem Storage Statistics", "📊".bold());
+            println!("  Database:  {}", db_str.cyan().bold());
+            println!(
+                "  Memories:  {} total  ({} active, {} expired)",
+                stats.total_memories.to_string().bold(),
+                stats.active_memories.to_string().green(),
+                stats.expired_memories.to_string().yellow()
+            );
+            println!(
+                "  Vectors:   {} embedded",
+                stats.total_vectors.to_string().blue()
+            );
+            if !stats.by_category.is_empty() {
+                println!();
+                println!("  Breakdown by Category:");
+                for (cat, count) in &stats.by_category {
+                    println!("    • {:<14} {}", cat.cyan(), count);
+                }
             }
         }
     }
