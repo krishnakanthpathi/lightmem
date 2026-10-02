@@ -1,11 +1,11 @@
 package dev.lightmem
 
-import dev.lightmem.uniffi.lightmem_ffi.LightMem as NativeLightMem
-import dev.lightmem.uniffi.lightmem_ffi.FfiMemoryRecord
-import dev.lightmem.uniffi.lightmem_ffi.FfiScoredMemory
-import dev.lightmem.uniffi.lightmem_ffi.FfiAnswerResult
-import dev.lightmem.uniffi.lightmem_ffi.FfiStorageStats
-import dev.lightmem.uniffi.lightmem_ffi.LightMemFfiException
+import uniffi.lightmem_ffi.LightMem as NativeLightMem
+import uniffi.lightmem_ffi.FfiMemoryRecord
+import uniffi.lightmem_ffi.FfiScoredMemory
+import uniffi.lightmem_ffi.FfiAnswerResult
+import uniffi.lightmem_ffi.FfiStorageStats
+import uniffi.lightmem_ffi.LightMemFfiException
 
 typealias MemoryRecord = FfiMemoryRecord
 typealias ScoredMemory = FfiScoredMemory
@@ -56,7 +56,7 @@ class LightMem(dbPath: String? = null, globalDb: Boolean = false) : AutoCloseabl
 
     fun exportOkf(outputPath: String? = null): String = native.exportOkf(outputPath)
 
-    fun importFile(path: String): ULong = native.importFile(path)
+    fun importFile(path: String, needle: Boolean = false): ULong = native.importFile(path, needle)
 
     override fun close() {
         native.destroy()

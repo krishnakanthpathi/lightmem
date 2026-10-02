@@ -91,7 +91,7 @@ impl NeedleReranker {
         }
     }
 
-    fn resolve_python(&self) -> String {
+    pub fn resolve_python(&self) -> String {
         if let Ok(p) = std::env::var("NEEDLE_PYTHON") {
             if !p.trim().is_empty() {
                 return p.trim().to_string();
@@ -107,7 +107,7 @@ impl NeedleReranker {
         "python3".to_string()
     }
 
-    fn resolve_script(&self) -> String {
+    pub fn resolve_script(&self) -> String {
         if let Ok(s) = std::env::var("NEEDLE_SCRIPT") {
             if !s.trim().is_empty() {
                 return s.trim().to_string();

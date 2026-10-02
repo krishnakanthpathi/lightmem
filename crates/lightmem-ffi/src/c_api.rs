@@ -304,6 +304,15 @@ pub unsafe extern "C" fn lmem_import_file(
     handle: *mut LMemHandle,
     file_path: *const c_char,
 ) -> i64 {
+    lmem_import_file_needle(handle, file_path, 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmem_import_file_needle(
+    handle: *mut LMemHandle,
+    file_path: *const c_char,
+    needle: c_int,
+) -> i64 {
     if handle.is_null() || file_path.is_null() {
         set_last_error("Null pointer provided to lmem_import_file".to_string());
         return -1;
@@ -318,7 +327,8 @@ pub unsafe extern "C" fn lmem_import_file(
         }
     };
 
-    match lm.import_file(file_str) {
+    let use_needle = if needle != 0 { Some(true) } else { None };
+    match lm.import_file(file_str, use_needle) {
         Ok(count) => count as i64,
         Err(e) => {
             set_last_error(e.to_string());

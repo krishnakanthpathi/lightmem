@@ -767,7 +767,7 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_lightmem_ffi_fn_method_lightmem_forget(`ptr`: Pointer,`id`: RustBuffer.ByValue,`hard`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_lightmem_ffi_fn_method_lightmem_import_file(`ptr`: Pointer,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_lightmem_ffi_fn_method_lightmem_import_file(`ptr`: Pointer,`path`: RustBuffer.ByValue,`needle`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     fun uniffi_lightmem_ffi_fn_method_lightmem_list(`ptr`: Pointer,`category`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`asOf`: RustBuffer.ByValue,`limit`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -938,7 +938,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_lightmem_ffi_checksum_method_lightmem_forget() != 35660.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_lightmem_ffi_checksum_method_lightmem_import_file() != 1537.toShort()) {
+    if (lib.uniffi_lightmem_ffi_checksum_method_lightmem_import_file() != 6957.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_lightmem_ffi_checksum_method_lightmem_list() != 48006.toShort()) {
@@ -1324,7 +1324,7 @@ public interface LightMemInterface {
     
     fun `forget`(`id`: kotlin.String, `hard`: kotlin.Boolean): kotlin.Boolean
     
-    fun `importFile`(`path`: kotlin.String): kotlin.ULong
+    fun `importFile`(`path`: kotlin.String, `needle`: kotlin.Boolean?): kotlin.ULong
     
     fun `list`(`category`: kotlin.String?, `status`: kotlin.String?, `asOf`: kotlin.String?, `limit`: kotlin.UInt?): List<FfiMemoryRecord>
     
@@ -1477,12 +1477,12 @@ open class LightMem: Disposable, AutoCloseable, LightMemInterface {
     
 
     
-    @Throws(LightMemFfiException::class)override fun `importFile`(`path`: kotlin.String): kotlin.ULong {
+    @Throws(LightMemFfiException::class)override fun `importFile`(`path`: kotlin.String, `needle`: kotlin.Boolean?): kotlin.ULong {
             return FfiConverterULong.lift(
     callWithPointer {
     uniffiRustCallWithError(LightMemFfiException) { _status ->
     UniffiLib.INSTANCE.uniffi_lightmem_ffi_fn_method_lightmem_import_file(
-        it, FfiConverterString.lower(`path`),_status)
+        it, FfiConverterString.lower(`path`),FfiConverterOptionalBoolean.lower(`needle`),_status)
 }
     }
     )

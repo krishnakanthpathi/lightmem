@@ -522,7 +522,7 @@ public protocol LightMemProtocol : AnyObject {
     
     func forget(id: String, hard: Bool) throws  -> Bool
     
-    func importFile(path: String) throws  -> UInt64
+    func importFile(path: String, needle: Bool?) throws  -> UInt64
     
     func list(category: String?, status: String?, asOf: String?, limit: UInt32?) throws  -> [FfiMemoryRecord]
     
@@ -629,10 +629,11 @@ open func forget(id: String, hard: Bool)throws  -> Bool {
 })
 }
     
-open func importFile(path: String)throws  -> UInt64 {
+open func importFile(path: String, needle: Bool?)throws  -> UInt64 {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeLightMemFfiError.lift) {
     uniffi_lightmem_ffi_fn_method_lightmem_import_file(self.uniffiClonePointer(),
-        FfiConverterString.lower(path),$0
+        FfiConverterString.lower(path),
+        FfiConverterOptionBool.lower(needle),$0
     )
 })
 }
@@ -1497,7 +1498,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_lightmem_ffi_checksum_method_lightmem_forget() != 35660) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_lightmem_ffi_checksum_method_lightmem_import_file() != 1537) {
+    if (uniffi_lightmem_ffi_checksum_method_lightmem_import_file() != 6957) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_lightmem_ffi_checksum_method_lightmem_list() != 48006) {

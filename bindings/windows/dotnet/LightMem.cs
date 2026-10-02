@@ -119,6 +119,9 @@ namespace LightMem
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "lmem_import_file")]
         private static extern long NativeImportFile(IntPtr handle, [MarshalAs(UnmanagedType.LPUTF8Str)] string filePath);
 
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, EntryPoint = "lmem_import_file_needle")]
+        private static extern long NativeImportFileNeedle(IntPtr handle, [MarshalAs(UnmanagedType.LPUTF8Str)] string filePath, int needle);
+
         public LightMemClient(string? dbPath = null, bool globalDb = false)
         {
             _handle = NativeOpen(dbPath, globalDb ? 1 : 0);
@@ -261,10 +264,12 @@ namespace LightMem
             return PtrToStringAndFree(ptr);
         }
 
-        public long ImportFile(string filePath)
+        public long ImportFile(string filePath, bool needle = false)
         {
             EnsureNotDisposed();
-            var count = NativeImportFile(_handle, filePath);
+            var count = needle
+                ? NativeImportFileNeedle(_handle, filePath, 1)
+                : NativeImportFile(_handle, filePath);
             if (count < 0)
             {
                 throw new InvalidOperationException($"ImportFile failed: {GetLastError()}");

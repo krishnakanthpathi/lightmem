@@ -32,8 +32,133 @@ def tokenize(text: str) -> set:
     return {w for w in words if w not in stop_words and len(w) > 1}
 
 
+def extract_memory(title: str, content: str, category: str, tags: list):
+    """Extract standard LightMem card slots.
+    category must be one of: fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password.
+    content is the main factual statement or secret value.
+    title is a concise 2-6 word headline.
+    tags is a list of relevant lowercase keyword strings.
+    """
+    return {"title": title, "content": content, "category": category, "tags": tags}
+
+
+VALID_CATEGORIES = {
+    "fact", "decision", "instruction", "preference", "learning", "goal",
+    "commitment", "artifact", "event", "relationship", "observation",
+    "error", "context", "password"
+}
+
+CATEGORY_SYNONYMS = {
+    "credential": "password",
+    "credentials": "password",
+    "secret": "password",
+    "token": "password",
+    "key": "password",
+    "api_key": "password",
+    "passwords": "password",
+    "rule": "instruction",
+    "procedure": "instruction",
+    "runbook": "instruction",
+    "guideline": "instruction",
+    "construction": "instruction",
+    "decision": "decision",
+    "decisions": "decision",
+    "choice": "decision",
+    "pref": "preference",
+    "preferences": "preference",
+    "like": "preference",
+    "lesson": "learning",
+    "learnings": "learning",
+    "insight": "learning",
+    "target": "goal",
+    "goals": "goal",
+    "objective": "goal",
+    "todo": "commitment",
+    "task": "commitment",
+    "promise": "commitment",
+    "code": "artifact",
+    "doc": "artifact",
+    "document": "artifact",
+    "incident": "event",
+    "meeting": "event",
+    "bug": "error",
+    "issue": "error",
+    "exception": "error",
+    "failure": "error",
+    "background": "context",
+}
+
+def normalize_category(cat: str) -> str:
+    if not cat:
+        return "fact"
+    c = cat.strip().lower()
+    if c in VALID_CATEGORIES:
+        return c
+    return CATEGORY_SYNONYMS.get(c, "fact")
+
+def handle_extract(data):
+    objects = data.get("objects", [])
+    if not objects:
+        print(json.dumps({"results": []}))
+        return
+
+    extracted_results = []
+    try:
+        agent = needle.Needle(generation=3, tools=[extract_memory], stateless=True)
+    except Exception as e:
+        agent = None
+
+    for obj in objects:
+        raw_str = obj if isinstance(obj, str) else json.dumps(obj)
+        if not agent:
+            extracted_results.append({
+                "title": raw_str[:40],
+                "content": raw_str,
+                "category": "fact",
+                "tags": []
+            })
+            continue
+
+        prompt = (
+            f"Analyze this raw data object and extract a standardized LightMem memory:\n"
+            f"Raw Data: {raw_str}\n\n"
+            f"Call extract_memory with the extracted fields. category must strictly be one of: "
+            f"fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password."
+        )
+        try:
+            res = agent.run(prompt, strict=False)
+            results = res.get("results", [])
+            valid_item = None
+            for item in results:
+                if isinstance(item, dict) and item.get("content"):
+                    item["category"] = normalize_category(item.get("category", "fact"))
+                    valid_item = item
+                    break
+            if valid_item:
+                extracted_results.append(valid_item)
+            else:
+                extracted_results.append({
+                    "title": raw_str[:40],
+                    "content": raw_str,
+                    "category": "fact",
+                    "tags": []
+                })
+        except Exception:
+            extracted_results.append({
+                "title": raw_str[:40],
+                "content": raw_str,
+                "category": "fact",
+                "tags": []
+            })
+
+    print(json.dumps({"results": extracted_results}))
+
+
 def main():
-    raw_input = sys.stdin.read().strip()
+    if len(sys.argv) > 1 and sys.argv[1].strip():
+        raw_input = sys.argv[1].strip()
+    else:
+        raw_input = sys.stdin.read().strip()
     if not raw_input:
         sys.exit(0)
 
@@ -42,6 +167,10 @@ def main():
     except Exception as e:
         print(json.dumps({"error": f"Invalid JSON: {e}"}))
         sys.exit(1)
+
+    if data.get("action") == "extract" or "objects" in data:
+        handle_extract(data)
+        return
 
     question = data.get("question", "").strip()
     candidates = data.get("candidates", [])

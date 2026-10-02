@@ -148,6 +148,15 @@ char* lmem_export_okf(LMemHandle* handle, const char* output_path);
  */
 long long lmem_import_file(LMemHandle* handle, const char* file_path);
 
+/**
+ * @brief Import memories with optional Needle 3 Action SLM entity extraction.
+ * @param handle Active LightMem instance.
+ * @param file_path File path to import.
+ * @param needle Set to 1 to use Needle 3 extraction, 0 for fast deterministic fallback.
+ * @return Number of memories imported on success, -1 on failure.
+ */
+long long lmem_import_file_needle(LMemHandle* handle, const char* file_path, int needle);
+
 #ifdef __cplusplus
 }
 #endif

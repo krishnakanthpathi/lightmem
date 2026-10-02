@@ -401,9 +401,11 @@ impl PyLightMem {
         Ok(out.display().to_string())
     }
 
-    fn import_file(&self, file_path: String) -> PyResult<usize> {
+    #[pyo3(signature = (file_path, needle=None))]
+    fn import_file(&self, file_path: String, needle: Option<bool>) -> PyResult<usize> {
+        let use_needle = needle.unwrap_or(false);
         self.engine
-            .import_file(Path::new(&file_path))
+            .import_file(Path::new(&file_path), use_needle)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 }

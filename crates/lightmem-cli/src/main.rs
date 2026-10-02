@@ -128,6 +128,10 @@ enum Commands {
     Import {
         /// Path to import file
         file: PathBuf,
+
+        /// Toggle: Use Needle 3 Action SLM for entity matching and slot extraction
+        #[arg(long)]
+        needle: bool,
     },
 
     /// Ask a question and synthesize/extract the factual answer (with toggleable Needle 3 precision reranker)
@@ -417,9 +421,9 @@ fn main() -> Result<()> {
             );
         }
 
-        Commands::Import { file } => {
+        Commands::Import { file, needle } => {
             let lm = open_engine(effective_db, global)?;
-            let count = lm.import_file(&file)?;
+            let count = lm.import_file(&file, needle)?;
             println!(
                 "{} Successfully imported {} memories from {:?}",
                 "✔".green().bold(),

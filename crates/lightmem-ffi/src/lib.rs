@@ -162,8 +162,10 @@ impl LightMem {
         Ok(out.display().to_string())
     }
 
-    pub fn import_file(&self, path: String) -> Result<u64, LightMemFfiError> {
-        let count = self.engine.import_file(Path::new(&path))?;
+    pub fn import_file(&self, path: String, needle: Option<bool>) -> Result<u64, LightMemFfiError> {
+        let count = self
+            .engine
+            .import_file(Path::new(&path), needle.unwrap_or(false))?;
         Ok(count as u64)
     }
 }

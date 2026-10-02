@@ -288,7 +288,7 @@ int8_t uniffi_lightmem_ffi_fn_method_lightmem_forget(void*_Nonnull ptr, RustBuff
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_LIGHTMEM_FFI_FN_METHOD_LIGHTMEM_IMPORT_FILE
 #define UNIFFI_FFIDEF_UNIFFI_LIGHTMEM_FFI_FN_METHOD_LIGHTMEM_IMPORT_FILE
-uint64_t uniffi_lightmem_ffi_fn_method_lightmem_import_file(void*_Nonnull ptr, RustBuffer path, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_lightmem_ffi_fn_method_lightmem_import_file(void*_Nonnull ptr, RustBuffer path, RustBuffer needle, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_LIGHTMEM_FFI_FN_METHOD_LIGHTMEM_LIST

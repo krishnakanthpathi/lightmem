@@ -70,6 +70,7 @@ LIGHTMEM_API int lmem_forget(LMemHandle* handle, const char* id, int hard);
 LIGHTMEM_API char* lmem_stats(LMemHandle* handle);
 LIGHTMEM_API char* lmem_export_okf(LMemHandle* handle, const char* output_path);
 LIGHTMEM_API long long lmem_import_file(LMemHandle* handle, const char* file_path);
+LIGHTMEM_API long long lmem_import_file_needle(LMemHandle* handle, const char* file_path, int needle);
 
 #ifdef __cplusplus
 }

@@ -23,3 +23,5 @@ dist/
 bindings/**/Frameworks/
 bindings/**/jniLibs/
 bindings/**/.build/
+.gradle/
+**/.gradle/

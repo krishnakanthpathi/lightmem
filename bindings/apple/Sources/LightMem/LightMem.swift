@@ -45,4 +45,9 @@ public extension LightMem {
     ) throws -> AnswerResult {
         try self.answer(question: question, needle: needle, category: category, asOf: asOf, limit: limit)
     }
+
+    /// Convenience importFile
+    func importFile(_ path: String, needle: Bool = false) throws -> UInt64 {
+        try self.importFile(path: path, needle: needle)
+    }
 }

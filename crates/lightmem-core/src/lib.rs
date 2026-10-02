@@ -169,12 +169,18 @@ impl LightMem {
     }
 
     /// Import memories from an external file (.json or .md/.okf)
-    pub fn import_file(&self, file_path: &Path) -> Result<usize> {
+    pub fn import_file(&self, file_path: &Path, use_needle: bool) -> Result<usize> {
         let raw = std::fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read import file {:?}", file_path))?;
 
-        let candidates = if file_path.extension().and_then(|s| s.to_str()) == Some("json") {
-            JsonMemoryImporter.parse(&raw)?
+        let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let is_json = ext.eq_ignore_ascii_case("json")
+            || ext.eq_ignore_ascii_case("jsonl")
+            || raw.trim_start().starts_with('{')
+            || raw.trim_start().starts_with('[');
+
+        let candidates = if is_json {
+            JsonMemoryImporter.parse_flexible(&raw, use_needle)?
         } else {
             OkfMemoryImporter.parse(&raw)?
         };
