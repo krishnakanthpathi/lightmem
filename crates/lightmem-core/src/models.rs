@@ -20,6 +20,7 @@ pub enum MemoryType {
     Observation,
     Error,
     Context,
+    Password,
 }
 
 impl MemoryType {
@@ -37,6 +38,7 @@ impl MemoryType {
         MemoryType::Observation,
         MemoryType::Error,
         MemoryType::Context,
+        MemoryType::Password,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -54,6 +56,7 @@ impl MemoryType {
             MemoryType::Observation => "observation",
             MemoryType::Error => "error",
             MemoryType::Context => "context",
+            MemoryType::Password => "password",
         }
     }
 }
@@ -82,8 +85,9 @@ impl FromStr for MemoryType {
             "observation" => Ok(MemoryType::Observation),
             "error" => Ok(MemoryType::Error),
             "context" => Ok(MemoryType::Context),
+            "password" | "passwords" => Ok(MemoryType::Password),
             other => Err(format!(
-                "Unknown memory type '{}'. Valid types: fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context",
+                "Unknown memory type '{}'. Valid types: fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password",
                 other
             )),
         }

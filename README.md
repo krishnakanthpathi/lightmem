@@ -26,12 +26,21 @@ lmem remember "Use Next.js App Router exclusively; Pages Router is deprecated" \
   --tags "nextjs,react,routing" \
   --confidence 1.0
 
+# Store a secure token or credential
+lmem remember "ghp_xxxxxxxxxxxxxxxxxxxx" \
+  --type password \
+  --title "GitHub Deployment Token" \
+  --tags "auth,token,github"
+
 # Store a global personal preference across all projects (-g)
 lmem remember "Always format shell commands in copyable fenced code blocks" \
   --type preference \
   --tags "formatting,cli,shell" \
   --global
 ```
+
+> **Supported Categories (14):** `fact`, `decision`, `instruction`, `preference`, `learning`, `goal`, `commitment`, `artifact`, `event`, `relationship`, `observation`, `error`, `context`, `password`.
+
 
 ### 2. Recall Memories (Hybrid Search)
 ```bash
@@ -124,7 +133,7 @@ lmem config --backend hash
 │   │   │   ├── embeddings.rs  # Local ONNX + Ollama + Hash fallback providers
 │   │   │   ├── exporter.rs    # OKF bundle generation
 │   │   │   ├── importer.rs    # Integratable JSON & OKF parsing pipeline
-│   │   │   ├── models.rs      # 13 MemoryTypes, MemoryRecord, ScoredMemory
+│   │   │   ├── models.rs      # 14 MemoryTypes, MemoryRecord, ScoredMemory
 │   │   │   ├── reranker.rs    # Top1 & Needle 3 precision reranker engines
 │   │   │   ├── search.rs      # Hybrid search & Reciprocal Rank Fusion (RRF)
 │   │   │   └── storage.rs     # SQLite WAL mode, FTS5 sync triggers, BLOB vectors

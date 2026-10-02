@@ -85,3 +85,66 @@ fn test_core_lifecycle() {
     let imported_count = lm.import_file(&exported).expect("import failed");
     assert!(imported_count >= 1);
 }
+
+#[test]
+fn test_password_category() {
+    use std::str::FromStr;
+
+    // Test FromStr and as_str
+    assert_eq!(MemoryType::from_str("password").unwrap(), MemoryType::Password);
+    assert_eq!(MemoryType::from_str("passwords").unwrap(), MemoryType::Password);
+    assert_eq!(MemoryType::Password.as_str(), "password");
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("password_test.db");
+
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+
+    let lm = LightMem::open_at(&db_path, config).expect("Failed to open LightMem");
+
+    // Remember a password
+    let mem = lm
+        .remember(
+            "ghp_test_secret_token_1234567890",
+            Some(MemoryType::Password),
+            Some("GitHub Token".to_string()),
+            vec!["github".to_string(), "token".to_string(), "api".to_string()],
+            Some(1.0),
+        )
+        .expect("remember password failed");
+
+    assert_eq!(mem.category, MemoryType::Password);
+
+    // Recall filtering by Password category
+    let recalled = lm
+        .recall("GitHub secret token", Some(MemoryType::Password), None, 5, None)
+        .expect("recall failed");
+    assert!(!recalled.is_empty());
+    assert_eq!(recalled[0].memory.id, mem.id);
+    assert_eq!(recalled[0].memory.category, MemoryType::Password);
+
+    // Verify stats
+    let stats = lm.stats().expect("stats failed");
+    let pass_count = stats
+        .by_category
+        .iter()
+        .find(|(cat, _)| cat == "password")
+        .map(|(_, count)| *count)
+        .unwrap_or(0);
+    assert_eq!(pass_count, 1);
+
+    // Export OKF and verify Password category heading
+    let okf_path = dir.path().join("passwords.okf");
+    let exported = lm.export_okf(Some(&okf_path)).expect("export failed");
+    let okf_content = std::fs::read_to_string(&exported).expect("read okf failed");
+    assert!(okf_content.contains("## PASSWORD"));
+    assert!(okf_content.contains("### GitHub Token"));
+
+    // Import OKF back
+    let imported_count = lm.import_file(&exported).expect("import failed");
+    assert_eq!(imported_count, 1);
+}
+

@@ -29,7 +29,7 @@ enum Commands {
         /// Content of the memory
         content: String,
 
-        /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, error)
+        /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, password, error, context)
         #[arg(short = 't', long = "type")]
         category: Option<String>,
 

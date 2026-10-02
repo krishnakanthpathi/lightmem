@@ -900,7 +900,7 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
     cleanup_db_files(&db_import);
     let _ = fs::remove_file(&export_file);
 
-    // 1. Populate original database with 100 memories across all 13 categories
+    // 1. Populate original database with 100 memories across all 14 categories
     let config = LightMemConfig::load();
     let lm_orig = LightMem::open_at(&db_orig, config.clone())?;
     let test_memories = generate_synthetic_memories(100);
@@ -914,7 +914,7 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
             Some(m.confidence),
         )?;
     }
-    println!("  ✔ Populated original database with 100 memories across all 13 categories.");
+    println!("  ✔ Populated original database with 100 memories across all 14 categories.");
 
     // 2. Export via lmem CLI
     // Find lmem binary
@@ -1128,7 +1128,7 @@ fn generate_markdown_report(
     md.push_str("\n---\n\n");
 
     md.push_str("## 1. Bulk Ingestion Throughput\n\n");
-    md.push_str("Synthetic memories across all 13 categories (Fact, Decision, Instruction, Preference, Learning, Goal, Commitment, Artifact, Event, Relationship, Observation, Error, Context) were inserted with ONNX vector embeddings and FTS5 synchronization.\n\n");
+    md.push_str("Synthetic memories across all 14 categories (Fact, Decision, Instruction, Preference, Learning, Goal, Commitment, Artifact, Event, Relationship, Observation, Error, Context, Password) were inserted with ONNX vector embeddings and FTS5 synchronization.\n\n");
     md.push_str("| Batch Size | Elapsed Time (ms) | Avg Latency (ms/mem) | Throughput (mem/sec) | DB File Size (MB) |\n");
     md.push_str("|---|---|---|---|---|\n");
     for row in b1 {
@@ -1213,7 +1213,7 @@ fn generate_markdown_report(
 
     md.push_str("## 6. Roundtrip OKF Data Integrity\n\n");
     md.push_str(
-        "1. Populated isolated test database with 100 memories across all 13 categories.\n",
+        "1. Populated isolated test database with 100 memories across all 14 categories.\n",
     );
     md.push_str("2. Exported via `lmem export --okf -o okf_export_bundle.md`.\n");
     md.push_str("3. Wiped storage and imported into fresh database via `lmem import okf_export_bundle.md`.\n");
@@ -1225,7 +1225,7 @@ fn generate_markdown_report(
         b6.imported_count, b6.original_count, b6.recovery_rate_pct
     ));
     md.push_str(&format!(
-        "| **Category Classification** | **100.0%** | ✅ ALL 13 CATEGORIES INTACT |\n"
+        "| **Category Classification** | **100.0%** | ✅ ALL 14 CATEGORIES INTACT |\n"
     ));
     md.push_str(&format!(
         "| **Titles & Identifiers** | **100.0%** | ✅ PERFECT MATCH |\n"
