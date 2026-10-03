@@ -279,19 +279,37 @@ impl NeedleReranker {
 
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
-        let tools_schema = serde_json::json!([{
-            "name": "extract_facts",
-            "description": "Extract structured entities and facts from the memory",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "application": {"type": "string", "description": "Application, service, or tool name"},
-                    "port": {"type": "integer", "description": "Network port number"},
-                    "os": {"type": "string", "description": "Operating system (e.g. linux, windows, macos)"}
-                },
-                "required": ["application", "port", "os"]
-            }
-        }]);
+        let q_lower = question.to_lowercase();
+        let is_identity_query =
+            q_lower.starts_with("who ") || q_lower.contains(" who ") || q_lower.contains("name");
+
+        let tools_schema = if is_identity_query {
+            serde_json::json!([{
+                "name": "extract_identity",
+                "description": "Extract the person or user name from the memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "person_name": {"type": "string", "description": "Full name or handle of the user or person"}
+                    },
+                    "required": ["person_name"]
+                }
+            }])
+        } else {
+            serde_json::json!([{
+                "name": "extract_facts",
+                "description": "Extract structured entities and facts from the memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "application": {"type": "string", "description": "Application, service, or tool name"},
+                        "port": {"type": "integer", "description": "Network port number"},
+                        "os": {"type": "string", "description": "Operating system (e.g. linux, windows, macos)"}
+                    },
+                    "required": ["application", "port", "os"]
+                }
+            }])
+        };
 
         let raw_json_str = Self::run_needle_query(tools_schema.to_string(), content.to_string())?;
 
@@ -319,7 +337,15 @@ impl NeedleReranker {
             .or_else(|| envelope.get("suppressed_calls").and_then(|v| v.as_array()))?;
         let args = calls.first()?.get("arguments")?.as_object()?;
 
-        let q_lower = question.to_lowercase();
+        if is_identity_query {
+            if let Some(name) = args.get("person_name").and_then(|v| v.as_str()) {
+                let clean = name.trim();
+                if !clean.is_empty() {
+                    return Some((clean.to_string(), conf));
+                }
+            }
+        }
+
         if q_lower.contains("port") {
             if let Some(p) = args.get("port") {
                 let s = if let Some(n) = p.as_i64() {

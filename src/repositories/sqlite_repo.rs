@@ -134,6 +134,13 @@ impl Storage {
         let tags_str = memory.tags.join(",");
         let expired_str = memory.expired_at.map(|dt| dt.to_rfc3339());
 
+        if memory.status == MemoryStatus::Active {
+            tx.execute(
+                "DELETE FROM memories WHERE status = 'active' AND id != ?1 AND LOWER(TRIM(content)) = LOWER(TRIM(?2))",
+                params![memory.id, memory.content],
+            )?;
+        }
+
         tx.execute(
             r#"
             INSERT OR REPLACE INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at)
