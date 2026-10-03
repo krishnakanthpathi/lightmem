@@ -1,9 +1,7 @@
 use crate::models::{MemoryRecord, MemoryType};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportCandidate {
@@ -141,8 +139,10 @@ fn parse_category_lenient(cat_opt: Option<&str>, content: &str) -> MemoryType {
     MemoryType::Fact
 }
 
-/// Parse a single JSON value into an ImportCandidate using the Fallback Ladder
+/// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Pure-Rust Heuristic
 pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidate> {
+    let mut heuristic_tags = Vec::new();
+
     let content = get_str_field(
         val,
         &[
@@ -156,7 +156,43 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
             "data",
             "statement",
         ],
-    )?;
+    )
+    .or_else(|| {
+        // Pure-Rust heuristic fallback for arbitrary unknown keys:
+        // Pick the longest descriptive string field as content, and collect short string fields as tags.
+        let obj = val.as_object()?;
+        let reserved = [
+            "id", "memory_id", "uuid", "_id", "title", "name", "summary", "heading", "subject",
+            "category", "memory_type", "type", "kind", "type_name", "provenance", "source",
+            "created_at", "timestamp", "date", "created",
+        ];
+        let mut best_content: Option<String> = None;
+        for (k, v) in obj {
+            if reserved.contains(&k.as_str()) {
+                continue;
+            }
+            if let Some(s) = v.as_str() {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if best_content
+                    .as_ref()
+                    .map(|b| trimmed.len() > b.len())
+                    .unwrap_or(true)
+                {
+                    if let Some(prev) = best_content.replace(trimmed.to_string()) {
+                        if prev.len() <= 32 {
+                            heuristic_tags.push(prev.to_lowercase());
+                        }
+                    }
+                } else if trimmed.len() <= 32 {
+                    heuristic_tags.push(trimmed.to_lowercase());
+                }
+            }
+        }
+        best_content
+    })?;
 
     let title = get_str_field(val, &["title", "name", "summary", "heading", "subject"])
         .unwrap_or_else(|| {
@@ -212,6 +248,9 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
                 }
             }
         }
+    }
+    if tags.is_empty() && !heuristic_tags.is_empty() {
+        tags = heuristic_tags;
     }
 
     let confidence = get_str_field(val, &["confidence", "score", "weight"])
@@ -278,77 +317,12 @@ pub fn extract_raw_json_values(raw: &str) -> Vec<serde_json::Value> {
     out
 }
 
-/// Needle 3 Action SLM Entity Extractor for intelligent JSON ingestion
-pub struct NeedleEntityExtractor;
-
-impl NeedleEntityExtractor {
-    pub fn extract(items: &[serde_json::Value]) -> Result<Vec<ImportCandidate>> {
-        let reranker = crate::reranker::NeedleReranker::new();
-        let python = reranker.resolve_python();
-        let script = reranker.resolve_script();
-
-        let payload = serde_json::json!({
-            "action": "extract",
-            "objects": items,
-        });
-
-        let mut child = Command::new(&python)
-            .arg(&script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("Failed to spawn Needle extractor via {}", python))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            let json_bytes = serde_json::to_vec(&payload)?;
-            stdin.write_all(&json_bytes)?;
-        }
-
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            anyhow::bail!("Needle extraction script failed with status {}", output.status);
-        }
-
-        let out_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        let mut candidates = Vec::new();
-
-        if let Some(results) = out_json.get("results").and_then(|v| v.as_array()) {
-            for (idx, res) in results.iter().enumerate() {
-                if let Some(c) = parse_single_json_value(res) {
-                    candidates.push(c);
-                } else if idx < items.len() {
-                    if let Some(fallback) = parse_single_json_value(&items[idx]) {
-                        candidates.push(fallback);
-                    }
-                }
-            }
-        }
-
-        Ok(candidates)
-    }
-}
-
 /// Ingests JSON exports (Memanto, Mem0, Letta, LangChain, raw logs, JSONL, or wrapped objects)
 pub struct JsonMemoryImporter;
 
 impl JsonMemoryImporter {
-    pub fn parse_flexible(&self, raw: &str, use_needle: bool) -> Result<Vec<ImportCandidate>> {
+    pub fn parse_flexible(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
         let raw_values = extract_raw_json_values(raw);
-        if raw_values.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // If Needle extraction is requested, invoke Needle 3
-        if use_needle {
-            if let Ok(needle_candidates) = NeedleEntityExtractor::extract(&raw_values) {
-                if !needle_candidates.is_empty() {
-                    return Ok(needle_candidates);
-                }
-            }
-        }
-
-        // Universal Fallback Ladder
         let mut out = Vec::with_capacity(raw_values.len());
         for val in &raw_values {
             if let Some(candidate) = parse_single_json_value(val) {
@@ -365,7 +339,7 @@ impl MemoryImporter for JsonMemoryImporter {
     }
 
     fn parse(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
-        self.parse_flexible(raw, false)
+        self.parse_flexible(raw)
     }
 }
 

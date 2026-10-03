@@ -19,7 +19,7 @@ pub use embeddings::{
 pub use exporter::Exporter;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
 pub use models::{MemoryRecord, MemoryStatus, MemoryType, ScoredMemory};
-pub use reranker::{AnswerResult, NeedleReranker, Reranker, Top1Reranker};
+pub use reranker::{AnswerResult, PrecisionReranker, Reranker, Top1Reranker};
 pub use search::HybridSearchEngine;
 pub use storage::{Storage, StorageStats};
 
@@ -168,8 +168,8 @@ impl LightMem {
         Exporter::export_okf(&self.storage, target_path)
     }
 
-    /// Import memories from an external file (.json or .md/.okf)
-    pub fn import_file(&self, file_path: &Path, use_needle: bool) -> Result<usize> {
+    /// Import memories from an external file (.json, .jsonl, or .md/.okf)
+    pub fn import_file(&self, file_path: &Path) -> Result<usize> {
         let raw = std::fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read import file {:?}", file_path))?;
 
@@ -180,7 +180,7 @@ impl LightMem {
             || raw.trim_start().starts_with('[');
 
         let candidates = if is_json {
-            JsonMemoryImporter.parse_flexible(&raw, use_needle)?
+            JsonMemoryImporter.parse_flexible(&raw)?
         } else {
             OkfMemoryImporter.parse(&raw)?
         };
@@ -202,21 +202,22 @@ impl LightMem {
     }
 
     /// Answer a natural language question using retrieved memory candidates
-    /// and either Top-1 direct selection (0ms) or Needle 3 precision disambiguation.
+    /// and either Top-1 direct selection (0ms) or Pure-Rust precision disambiguation & slot extraction.
     pub fn answer(
         &self,
         question: &str,
         category: Option<MemoryType>,
         as_of: Option<DateTime<Utc>>,
         limit: usize,
-        use_needle: bool,
+        use_precision: bool,
     ) -> Result<AnswerResult> {
         let candidates = self.recall(question, category, as_of, limit, None)?;
 
-        let needle_enabled = use_needle || self.config.reranker.eq_ignore_ascii_case("needle");
+        let precision_enabled =
+            use_precision || self.config.reranker.eq_ignore_ascii_case("precision");
 
-        if needle_enabled {
-            let reranker = NeedleReranker::default();
+        if precision_enabled {
+            let reranker = PrecisionReranker::default();
             reranker.answer(question, &candidates)
         } else {
             let reranker = Top1Reranker;

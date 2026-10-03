@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use lightmem_core::{LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use lightmem::{LightMem, LightMemConfig, MemoryStatus, MemoryType};
 use tempfile::tempdir;
 
 #[test]
@@ -48,12 +48,19 @@ fn test_core_lifecycle() {
     assert!(fetched.is_some());
     assert_eq!(fetched.unwrap().id, mem1.id);
 
-    // 4. Answer (Top-1 fallback)
+    // 4a. Answer (Top-1 fallback)
     let ans = lm
         .answer("what port does redis use?", None, None, 5, false)
         .expect("answer failed");
     assert_eq!(ans.reranker_used, "top1");
     assert!(ans.selected_memory.is_some());
+
+    // 4b. Answer (Pure-Rust PrecisionReranker slot extraction)
+    let ans_prec = lm
+        .answer("what port does redis use?", None, None, 5, true)
+        .expect("precision answer failed");
+    assert_eq!(ans_prec.reranker_used, "precision-rust");
+    assert_eq!(ans_prec.answer, "6379");
 
     // 5. Stats
     let stats = lm.stats().expect("stats failed");
@@ -82,7 +89,7 @@ fn test_core_lifecycle() {
     let exported = lm.export_okf(Some(&okf_path)).expect("export failed");
     assert!(exported.exists());
 
-    let imported_count = lm.import_file(&exported, false).expect("import failed");
+    let imported_count = lm.import_file(&exported).expect("import failed");
     assert!(imported_count >= 1);
 }
 
@@ -144,7 +151,7 @@ fn test_password_category() {
     assert!(okf_content.contains("### GitHub Token"));
 
     // Import OKF back
-    let imported_count = lm.import_file(&exported, false).expect("import failed");
+    let imported_count = lm.import_file(&exported).expect("import failed");
     assert_eq!(imported_count, 1);
 }
 
@@ -179,13 +186,18 @@ fn test_universal_json_importers() {
         }
     ]"#;
     std::fs::write(&mem0_path, mem0_json).unwrap();
-    let imported_mem0 = lm.import_file(&mem0_path, false).expect("Mem0 import failed");
+    let imported_mem0 = lm.import_file(&mem0_path).expect("Mem0 import failed");
     assert_eq!(imported_mem0, 2);
 
     // Verify verbatim password content preservation
-    let pass_mem = lm.recall("AWS_SECRET_ACCESS_KEY", Some(MemoryType::Password), None, 1, None).unwrap();
+    let pass_mem = lm
+        .recall("AWS_SECRET_ACCESS_KEY", Some(MemoryType::Password), None, 1, None)
+        .unwrap();
     assert!(!pass_mem.is_empty());
-    assert_eq!(pass_mem[0].memory.content, "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+    assert_eq!(
+        pass_mem[0].memory.content,
+        "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    );
     assert_eq!(pass_mem[0].memory.category, MemoryType::Password);
 
     // 2. Wrapped JSON object format (e.g. {"memories": [...]})
@@ -202,14 +214,14 @@ fn test_universal_json_importers() {
         ]
     }"#;
     std::fs::write(&wrapped_path, wrapped_json).unwrap();
-    let imported_wrapped = lm.import_file(&wrapped_path, false).expect("Wrapped JSON import failed");
+    let imported_wrapped = lm.import_file(&wrapped_path).expect("Wrapped JSON import failed");
     assert_eq!(imported_wrapped, 1);
 
     // 3. Line-delimited JSONL format
     let jsonl_path = dir.path().join("stream.jsonl");
     let jsonl_content = "{\"text\": \"Always run cargo test before git commit\", \"title\": \"Commit Checklist\"}\n{\"document\": \"Team decided to adopt Rust 2024 edition in Q2\", \"type\": \"decision\", \"tags\": \"rust, architecture\"}\n";
     std::fs::write(&jsonl_path, jsonl_content).unwrap();
-    let imported_jsonl = lm.import_file(&jsonl_path, false).expect("JSONL import failed");
+    let imported_jsonl = lm.import_file(&jsonl_path).expect("JSONL import failed");
     assert_eq!(imported_jsonl, 2);
 
     // 4. Single raw JSON object
@@ -219,27 +231,23 @@ fn test_universal_json_importers() {
         "category": "runbook"
     }"#;
     std::fs::write(&single_path, single_json).unwrap();
-    let imported_single = lm.import_file(&single_path, false).expect("Single JSON import failed");
+    let imported_single = lm.import_file(&single_path).expect("Single JSON import failed");
     assert_eq!(imported_single, 1);
 
-    // 5. Needle SLM extraction test
-    let needle_venv = "/Users/krishnakanth/Projects/needle3-mac-bench/.venv/bin/python";
-    if std::path::Path::new(needle_venv).exists() {
-        let needle_test_path = dir.path().join("needle_test.json");
-        let needle_json = r#"[
-            {
-                "unstructured_log": "Meeting notes with Bob: we agreed to migrate to Postgres 16 next Monday",
-                "department": "Engineering"
-            }
-        ]"#;
-        std::fs::write(&needle_test_path, needle_json).unwrap();
-        let imported_needle = lm.import_file(&needle_test_path, true).expect("Needle import failed");
-        assert_eq!(imported_needle, 1);
-    }
+    // 5. Pure-Rust heuristic extraction for unstructured arbitrary JSON keys
+    let unstructured_path = dir.path().join("unstructured.json");
+    let unstructured_json = r#"[
+        {
+            "unstructured_log": "We decided to migrate to Postgres 16 next Monday",
+            "department": "Engineering"
+        }
+    ]"#;
+    std::fs::write(&unstructured_path, unstructured_json).unwrap();
+    let imported_unstructured = lm
+        .import_file(&unstructured_path)
+        .expect("Unstructured import failed");
+    assert_eq!(imported_unstructured, 1);
 
     let stats = lm.stats().unwrap();
-    assert!(stats.total_memories >= 6);
+    assert_eq!(stats.total_memories, 7);
 }
-
-
-

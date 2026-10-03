@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use colored::*;
-use lightmem_core::{LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use lightmem::{LightMem, LightMemConfig, MemoryStatus, MemoryType};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -124,24 +124,20 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Import external memories from file (.json or .okf/.md)
+    /// Import external memories from file (.json, .jsonl, or .okf/.md)
     Import {
         /// Path to import file
         file: PathBuf,
-
-        /// Toggle: Use Needle 3 Action SLM for entity matching and slot extraction
-        #[arg(long)]
-        needle: bool,
     },
 
-    /// Ask a question and synthesize/extract the factual answer (with toggleable Needle 3 precision reranker)
+    /// Ask a question and synthesize/extract the factual answer (with toggleable pure-Rust precision reranker)
     Answer {
         /// The question to answer
         question: String,
 
-        /// Toggle: Force use of Needle 3 precision reranker & factual slot extractor
+        /// Toggle: Force use of pure-Rust precision reranker & factual slot extractor
         #[arg(long)]
-        needle: bool,
+        precision: bool,
 
         /// Filter candidate memories by category
         #[arg(short = 't', long = "type")]
@@ -178,7 +174,7 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
 
-        /// Default reranker: 'top1' (0ms instant) or 'needle' (Needle 3 precision SLM)
+        /// Default reranker: 'top1' (0ms instant) or 'precision' (pure-Rust slot extractor)
         #[arg(long)]
         reranker: Option<String>,
     },
@@ -421,9 +417,9 @@ fn main() -> Result<()> {
             );
         }
 
-        Commands::Import { file, needle } => {
+        Commands::Import { file } => {
             let lm = open_engine(effective_db, global)?;
-            let count = lm.import_file(&file, needle)?;
+            let count = lm.import_file(&file)?;
             println!(
                 "{} Successfully imported {} memories from {:?}",
                 "✔".green().bold(),
@@ -434,7 +430,7 @@ fn main() -> Result<()> {
 
         Commands::Answer {
             question,
-            needle,
+            precision,
             category,
             as_of,
             limit,
@@ -444,7 +440,7 @@ fn main() -> Result<()> {
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
-            let result = lm.answer(&question, cat, as_of_dt, limit, needle)?;
+            let result = lm.answer(&question, cat, as_of_dt, limit, precision)?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);
@@ -502,11 +498,11 @@ fn main() -> Result<()> {
             }
             if let Some(r) = reranker {
                 let lower = r.to_lowercase();
-                if lower == "needle" || lower == "top1" {
+                if lower == "precision" || lower == "top1" {
                     cfg.reranker = lower;
                     changed = true;
                 } else {
-                    eprintln!("Invalid reranker '{}'. Choose 'top1' or 'needle'.", r);
+                    eprintln!("Invalid reranker '{}'. Choose 'top1' or 'precision'.", r);
                 }
             }
 

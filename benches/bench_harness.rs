@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use clap::Parser;
 use colored::*;
-use lightmem_core::{LightMem, LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, Storage};
+use lightmem::{LightMem, LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, Storage};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::fs;

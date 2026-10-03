@@ -1,4 +1,0 @@
-module lightmem_ffiFFI {
-    header "lightmem_ffiFFI.h"
-    export *
-}
