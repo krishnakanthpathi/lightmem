@@ -19,7 +19,7 @@ pub use embeddings::{
 pub use exporter::Exporter;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
 pub use models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory};
-pub use reranker::{AnswerResult, PrecisionReranker, Reranker, Top1Reranker};
+pub use reranker::{AnswerResult, NeedleReranker, PrecisionReranker, Reranker, Top1Reranker};
 pub use search::HybridSearchEngine;
 pub use storage::{Storage, StorageStats};
 
@@ -240,22 +240,23 @@ impl LightMem {
     }
 
     /// Answer a natural language question using retrieved memory candidates
-    /// and either Top-1 direct selection (0ms) or Pure-Rust precision disambiguation & slot extraction.
+    /// and either Top-1 direct selection (0ms) or Native Needle 3 precision disambiguation & slot extraction.
     pub fn answer(
         &self,
         question: &str,
         category: Option<MemoryType>,
         as_of: Option<DateTime<Utc>>,
         limit: usize,
-        use_precision: bool,
+        use_needle: bool,
     ) -> Result<AnswerResult> {
         let candidates = self.recall(question, category, as_of, limit, None)?;
 
-        let precision_enabled =
-            use_precision || self.config.reranker.eq_ignore_ascii_case("precision");
+        let needle_enabled = use_needle
+            || self.config.reranker.eq_ignore_ascii_case("needle")
+            || self.config.reranker.eq_ignore_ascii_case("precision");
 
-        if precision_enabled {
-            let reranker = PrecisionReranker::default();
+        if needle_enabled {
+            let reranker = NeedleReranker::default();
             reranker.answer(question, &candidates)
         } else {
             let reranker = Top1Reranker;

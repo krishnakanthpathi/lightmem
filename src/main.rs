@@ -143,8 +143,8 @@ enum Commands {
         /// The question to answer
         question: String,
 
-        /// Toggle: Force use of pure-Rust precision reranker & factual slot extractor
-        #[arg(long)]
+        /// Toggle: Force use of precision reranker & factual slot extractor
+        #[arg(long, alias = "needle")]
         precision: bool,
 
         /// Filter candidate memories by category
@@ -538,11 +538,14 @@ fn main() -> Result<()> {
             }
             if let Some(r) = reranker {
                 let lower = r.to_lowercase();
-                if lower == "precision" || lower == "top1" {
+                if lower == "needle" || lower == "precision" || lower == "top1" {
                     cfg.reranker = lower;
                     changed = true;
                 } else {
-                    eprintln!("Invalid reranker '{}'. Choose 'top1' or 'precision'.", r);
+                    eprintln!(
+                        "Invalid reranker '{}'. Choose 'top1' or 'needle'.",
+                        r
+                    );
                 }
             }
 

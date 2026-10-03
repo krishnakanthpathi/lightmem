@@ -55,11 +55,11 @@ fn test_core_lifecycle() {
     assert_eq!(ans.reranker_used, "top1");
     assert!(ans.selected_memory.is_some());
 
-    // 4b. Answer (Pure-Rust PrecisionReranker slot extraction)
+    // 4b. Answer (Native Needle 3 C-FFI slot extraction)
     let ans_prec = lm
         .answer("what port does redis use?", None, None, 5, true)
         .expect("precision answer failed");
-    assert_eq!(ans_prec.reranker_used, "precision-rust");
+    assert_eq!(ans_prec.reranker_used, "needle-3");
     assert_eq!(ans_prec.answer, "6379");
 
     // 5. Stats
