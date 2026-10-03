@@ -10,21 +10,31 @@ NEEDLE_CACHE_DIR="$HOME/.cache/cactus-needle/v3/3.1.0"
 
 printf "\033[1;31m❖\033[0m \033[1;37mInstalling LightMem (lmem)...\033[0m\n"
 
-# Single-line live percentage downloader (0% -> 100%)
+# Unbuffered live percentage downloader (polls actual bytes written on disk every 0.2s)
 download_with_pct() {
     url="$1"
     dest="$2"
     label="$3"
+    expected_bytes="${4:-12500000}"
     rm -f "$dest"
     printf "  \033[1;31m▸\033[0m %s... \033[1;31m0%%\033[0m" "$label"
-    curl -fL "$url" -o "$dest" 2>&1 | tr '\r' '\n' | awk -v label="$label" '
-        /^[[:space:]]*[0-9]+/ {
-            if ($2 != "0" && $1 ~ /^[0-9]+$/) {
-                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%s%%\033[0m   ", label, $1;
-            }
-        }
-    '
-    if [ -s "$dest" ]; then
+
+    curl -fsSL "$url" -o "$dest" 2>/dev/null &
+    dl_pid=$!
+
+    while kill -0 "$dl_pid" 2>/dev/null; do
+        if [ -f "$dest" ]; then
+            cur_bytes="$(wc -c < "$dest" 2>/dev/null | tr -d ' ')"
+            if [ -n "$cur_bytes" ] && [ "$expected_bytes" -gt 0 ]; then
+                pct=$(( cur_bytes * 100 / expected_bytes ))
+                if [ "$pct" -gt 99 ]; then pct=99; fi
+                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$pct"
+            fi
+        fi
+        sleep 0.2
+    done
+
+    if wait "$dl_pid" && [ -s "$dest" ]; then
         printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$label"
         return 0
     else
@@ -77,14 +87,14 @@ esac
 TARGET="${ARCH_TARGET}-${OS_TARGET}"
 mkdir -p "$INSTALL_DIR"
 
-# 1. Download pre-built binary from GitHub Releases with percentage progress
+# 1. Download pre-built binary from GitHub Releases with unbuffered percentage progress
 RELEASE_URL="https://github.com/${REPO}/releases/latest/download/lmem-${TARGET}.tar.gz"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 INSTALLED_BIN=0
 if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
-    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})"; then
+    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})" 12467430; then
         tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR"
         mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem"
         chmod +x "$INSTALL_DIR/lmem"
@@ -111,37 +121,36 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
     printf "  \033[1;32m◈\033[0m Built and installed lmem binary... \033[1;32m100%%\033[0m\n"
 fi
 
-# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact) with percentage progress
+# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact) with unbuffered percentage progress
 if [ ! -f "$NEEDLE_CACHE_DIR/$NEEDLE_LIB" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/$NEEDLE_LIB" ]; then
     mkdir -p "$NEEDLE_CACHE_DIR"
-    if download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" "$TMP_DIR/needle.whl" "Downloading Needle 3 C-FFI runtime (${NEEDLE_LIB})"; then
+    if download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" "$TMP_DIR/needle.whl" "Downloading Needle 3 C-FFI runtime (${NEEDLE_LIB})" 530108; then
         unzip -q -j "$TMP_DIR/needle.whl" "needle/${NEEDLE_LIB}" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
     fi
 fi
 
 if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/needle3.cact" ]; then
     mkdir -p "$NEEDLE_CACHE_DIR"
-    download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" "$NEEDLE_CACHE_DIR/needle3.cact" "Downloading Needle 3 model weights (needle3.cact)" || true
+    download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" "$NEEDLE_CACHE_DIR/needle3.cact" "Downloading Needle 3 model weights (needle3.cact)" 35500000 || true
 fi
 
-# 4. Pre-warm ONNX embedding model (~/.lightmem/models) with percentage progress
+# 4. Pre-warm ONNX embedding model (~/.lightmem/models) with unbuffered percentage progress
 ONNX_LABEL="Verifying ONNX embedding model"
 printf "  \033[1;31m▸\033[0m %s... \033[1;31m0%%\033[0m" "$ONNX_LABEL"
-"$INSTALL_DIR/lmem" recall "init" --limit 1 --json 2>&1 >/dev/null | tr '\r' '\n' | awk -v label="$ONNX_LABEL" '
-    /MiB\// {
-        if (match($0, /[0-9.]+\s*MiB\/[0-9.]+\s*MiB/)) {
-            s = substr($0, RSTART, RLENGTH);
-            split(s, parts, "/");
-            cur = parts[1] + 0;
-            tot = parts[2] + 0;
-            if (tot > 0) {
-                pct = int((cur / tot) * 100);
-                if (pct > 100) pct = 100;
-                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   ", label, pct;
-            }
-        }
-    }
-' || true
+"$INSTALL_DIR/lmem" recall "init" --limit 1 --json >/dev/null 2>&1 &
+onnx_pid=$!
+while kill -0 "$onnx_pid" 2>/dev/null; do
+    if [ -d "$HOME/.lightmem/models" ]; then
+        cur_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
+        if [ -n "$cur_kb" ]; then
+            pct=$(( cur_kb * 100 / 130000 ))
+            if [ "$pct" -gt 99 ]; then pct=99; fi
+            printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$ONNX_LABEL" "$pct"
+        fi
+    fi
+    sleep 0.2
+done
+wait "$onnx_pid" || true
 printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$ONNX_LABEL"
 
 printf "\n\033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n"
