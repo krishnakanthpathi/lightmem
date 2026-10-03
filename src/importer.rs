@@ -80,63 +80,58 @@ fn parse_category_lenient(cat_opt: Option<&str>, content: &str) -> MemoryType {
         if let Ok(matched) = trimmed.parse::<MemoryType>() {
             return matched;
         }
-        if trimmed.contains("pass") || trimmed.contains("secret") || trimmed.contains("token") {
+        if trimmed.contains("pass")
+            || trimmed.contains("secret")
+            || trimmed.contains("token")
+            || trimmed.contains("cred")
+            || trimmed.contains("key")
+        {
             return MemoryType::Password;
         }
-        if trimmed.contains("decis") {
+        if trimmed.contains("instruct")
+            || trimmed.contains("rule")
+            || trimmed.contains("runbook")
+            || trimmed.contains("proc")
+        {
+            return MemoryType::Instruction;
+        }
+        if trimmed.contains("decis") || trimmed.contains("choice") {
             return MemoryType::Decision;
         }
-        if trimmed.contains("pref") {
+        if trimmed.contains("pref") || trimmed.contains("like") {
             return MemoryType::Preference;
         }
-        if trimmed.contains("learn") {
+        if trimmed.contains("learn") || trimmed.contains("lesson") || trimmed.contains("insight") {
             return MemoryType::Learning;
         }
-        if trimmed.contains("goal") {
+        if trimmed.contains("goal") || trimmed.contains("target") || trimmed.contains("objective") {
             return MemoryType::Goal;
         }
-        if trimmed.contains("commit") {
+        if trimmed.contains("commit") || trimmed.contains("todo") || trimmed.contains("task") {
             return MemoryType::Commitment;
         }
-        if trimmed.contains("artif") {
+        if trimmed.contains("artif") || trimmed.contains("code") || trimmed.contains("doc") {
             return MemoryType::Artifact;
         }
-        if trimmed.contains("event") {
+        if trimmed.contains("event") || trimmed.contains("incident") || trimmed.contains("meeting")
+        {
             return MemoryType::Event;
         }
-        if trimmed.contains("relat") {
+        if trimmed.contains("relat") || trimmed.contains("team") || trimmed.contains("owner") {
             return MemoryType::Relationship;
         }
-        if trimmed.contains("obser") {
+        if trimmed.contains("obser") || trimmed.contains("metric") {
             return MemoryType::Observation;
         }
-        if trimmed.contains("error") {
+        if trimmed.contains("error") || trimmed.contains("bug") || trimmed.contains("issue") {
             return MemoryType::Error;
         }
-        if trimmed.contains("context") {
+        if trimmed.contains("context") || trimmed.contains("background") {
             return MemoryType::Context;
         }
     }
 
-    // Inspect content keywords if category wasn't explicit
-    let lower_content = content.to_lowercase();
-    if lower_content.starts_with("ghp_")
-        || lower_content.starts_with("sk-")
-        || lower_content.starts_with("glpat-")
-        || lower_content.contains("password:")
-        || lower_content.contains("token:")
-        || lower_content.contains("api_key:")
-    {
-        return MemoryType::Password;
-    }
-    if lower_content.contains("we decided") || lower_content.contains("decision:") {
-        return MemoryType::Decision;
-    }
-    if lower_content.contains("user prefers") || lower_content.contains("preference:") {
-        return MemoryType::Preference;
-    }
-
-    MemoryType::Fact
+    MemoryType::infer(content)
 }
 
 /// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Pure-Rust Heuristic

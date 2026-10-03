@@ -333,3 +333,95 @@ fn test_pagination_and_counts() {
     assert!(!page3.has_more);
 }
 
+#[test]
+fn test_auto_categorization_all_14_types() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("categorization_test.db");
+
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(&db_path, config).expect("Failed to open LightMem");
+
+    let examples: Vec<(&str, MemoryType)> = vec![
+        (
+            "Production Stripe API key is sk_live_9988776655",
+            MemoryType::Password,
+        ),
+        (
+            "Fix panic and connection timeout bug when SQLite pool is exhausted",
+            MemoryType::Error,
+        ),
+        (
+            "How to deploy: step 1 run cargo build --release, step 2 restart systemd",
+            MemoryType::Instruction,
+        ),
+        (
+            "We decided to migrate from Python wrappers to pure Rust single crate",
+            MemoryType::Decision,
+        ),
+        (
+            "Always prefer concise single-line answers with zero fluff",
+            MemoryType::Preference,
+        ),
+        (
+            "Q4 roadmap objective: achieve sub-5ms P95 hybrid search latency",
+            MemoryType::Goal,
+        ),
+        (
+            "Deadline is Friday at 18:00, promised to deliver the benchmark report",
+            MemoryType::Commitment,
+        ),
+        (
+            "Learned that SQLite FTS5 external content triggers require exact rowid sync",
+            MemoryType::Learning,
+        ),
+        (
+            "Incident occurred on 2026-10-01 during the v0.2.0 production release",
+            MemoryType::Event,
+        ),
+        (
+            "Arjun is the lead backend engineer and reports to Priya on the infra team",
+            MemoryType::Relationship,
+        ),
+        (
+            "Observed that RSS memory stays flat at 218 MB after 1000 ONNX queries",
+            MemoryType::Observation,
+        ),
+        (
+            "Architecture specification saved in /Users/krishnakanth/Projects/lightmem/README.md",
+            MemoryType::Artifact,
+        ),
+        (
+            "Currently working on the macOS arm64 local environment setup",
+            MemoryType::Context,
+        ),
+        (
+            "Kokoro TTS service runs inside a Linux Docker container on port 8880",
+            MemoryType::Fact,
+        ),
+    ];
+
+    for (text, expected_category) in &examples {
+        // Call remember with category = None to test automatic categorization!
+        let record = lm
+            .remember(text, None, None, vec![], Some(0.9))
+            .expect("Failed to store auto-categorized memory");
+        assert_eq!(
+            record.category, *expected_category,
+            "Failed auto-categorization for input: '{}'. Expected {:?}, got {:?}",
+            text, expected_category, record.category
+        );
+    }
+
+    let stats = lm.stats().unwrap();
+    assert_eq!(stats.total_memories, 14);
+    assert_eq!(
+        stats.by_category.len(),
+        14,
+        "All 14 categories should have 1 memory each"
+    );
+}
+
+

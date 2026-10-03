@@ -93,7 +93,7 @@ impl LightMem {
             anyhow::bail!("Memory content cannot be blank");
         }
 
-        let resolved_type = category.unwrap_or(MemoryType::Fact);
+        let resolved_type = category.unwrap_or_else(|| MemoryType::infer(&clean_content));
         let resolved_title = title.unwrap_or_else(|| {
             clean_content
                 .lines()
