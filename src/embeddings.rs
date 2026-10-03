@@ -30,7 +30,11 @@ impl OnnxEmbeddingProvider {
             _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5"),
         };
 
-        let options = TextInitOptions::new(selected_model).with_show_download_progress(true);
+        let cache_dir = crate::config::LightMemConfig::config_dir().join("models");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let options = TextInitOptions::new(selected_model)
+            .with_cache_dir(cache_dir)
+            .with_show_download_progress(true);
         let model = TextEmbedding::try_new(options)
             .map_err(|e| anyhow::anyhow!("Failed to initialize ONNX embedding model: {}", e))?;
 
