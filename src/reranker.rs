@@ -115,64 +115,82 @@ impl NeedleReranker {
         None
     }
 
+    fn get_needle_complete() -> Option<&'static std::sync::Mutex<NeedleCompleteFn>> {
+        static NEEDLE_ENGINE: std::sync::OnceLock<Option<std::sync::Mutex<NeedleCompleteFn>>> =
+            std::sync::OnceLock::new();
+
+        NEEDLE_ENGINE
+            .get_or_init(|| {
+                let (lib_path, weights_path) = Self::find_needle_assets()?;
+                // Leak weights once for process lifetime in case libneedle holds a zero-copy pointer
+                let weights_data: &'static [u8] =
+                    Box::leak(std::fs::read(&weights_path).ok()?.into_boxed_slice());
+
+                let tools_schema = serde_json::json!([{
+                    "name": "extract_facts",
+                    "description": "Extract structured entities and facts from the memory",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "application": {"type": "string", "description": "Application, service, or tool name"},
+                            "port": {"type": "integer", "description": "Network port number"},
+                            "os": {"type": "string", "description": "Operating system (e.g. linux, windows, macos)"}
+                        },
+                        "required": ["application", "port", "os"]
+                    }
+                }]);
+
+                let lib_cstr = CString::new(lib_path.to_string_lossy().as_bytes()).ok()?;
+                let sys_cstr = CString::new("").ok()?;
+                let tools_cstr = CString::new(tools_schema.to_string()).ok()?;
+
+                unsafe {
+                    let handle = dlopen(lib_cstr.as_ptr(), RTLD_LAZY);
+                    if handle.is_null() {
+                        return None;
+                    }
+
+                    let load_sym = CString::new("needle_load").ok()?;
+                    let init_sym = CString::new("needle_init").ok()?;
+                    let comp_sym = CString::new("needle_complete").ok()?;
+
+                    let load_ptr = dlsym(handle, load_sym.as_ptr());
+                    let init_ptr = dlsym(handle, init_sym.as_ptr());
+                    let comp_ptr = dlsym(handle, comp_sym.as_ptr());
+
+                    if load_ptr.is_null() || init_ptr.is_null() || comp_ptr.is_null() {
+                        return None;
+                    }
+
+                    let needle_load: NeedleLoadFn = std::mem::transmute(load_ptr);
+                    let needle_init: NeedleInitFn = std::mem::transmute(init_ptr);
+                    let needle_complete: NeedleCompleteFn = std::mem::transmute(comp_ptr);
+
+                    if needle_load(
+                        weights_data.as_ptr() as *const c_char,
+                        weights_data.len() as u64,
+                    ) < 0
+                    {
+                        return None;
+                    }
+
+                    if needle_init(sys_cstr.as_ptr(), tools_cstr.as_ptr(), std::ptr::null()) < 0 {
+                        return None;
+                    }
+
+                    Some(std::sync::Mutex::new(needle_complete))
+                }
+            })
+            .as_ref()
+    }
+
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
-        let (lib_path, weights_path) = Self::find_needle_assets()?;
-        let weights_data = std::fs::read(&weights_path).ok()?;
-
-        let tools_schema = serde_json::json!([{
-            "name": "extract_facts",
-            "description": "Extract structured entities and facts from the memory",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "application": {"type": "string", "description": "Application, service, or tool name"},
-                    "port": {"type": "integer", "description": "Network port number"},
-                    "os": {"type": "string", "description": "Operating system (e.g. linux, windows, macos)"}
-                },
-                "required": ["application", "port", "os"]
-            }
-        }]);
-
-        let lib_cstr = CString::new(lib_path.to_string_lossy().as_bytes()).ok()?;
-        let sys_cstr = CString::new("").ok()?;
-        let tools_cstr = CString::new(tools_schema.to_string()).ok()?;
+        let comp_mutex = Self::get_needle_complete()?;
+        let needle_complete = *comp_mutex.lock().ok()?;
         let text_cstr = CString::new(content).ok()?;
 
         let raw_json_str = unsafe {
-            let handle = dlopen(lib_cstr.as_ptr(), RTLD_LAZY);
-            if handle.is_null() {
-                return None;
-            }
-
-            let load_sym = CString::new("needle_load").ok()?;
-            let init_sym = CString::new("needle_init").ok()?;
-            let comp_sym = CString::new("needle_complete").ok()?;
-
-            let load_ptr = dlsym(handle, load_sym.as_ptr());
-            let init_ptr = dlsym(handle, init_sym.as_ptr());
-            let comp_ptr = dlsym(handle, comp_sym.as_ptr());
-
-            if load_ptr.is_null() || init_ptr.is_null() || comp_ptr.is_null() {
-                return None;
-            }
-
-            let needle_load: NeedleLoadFn = std::mem::transmute(load_ptr);
-            let needle_init: NeedleInitFn = std::mem::transmute(init_ptr);
-            let needle_complete: NeedleCompleteFn = std::mem::transmute(comp_ptr);
-
-            if needle_load(
-                weights_data.as_ptr() as *const c_char,
-                weights_data.len() as u64,
-            ) < 0
-            {
-                return None;
-            }
-
-            if needle_init(sys_cstr.as_ptr(), tools_cstr.as_ptr(), std::ptr::null()) < 0 {
-                return None;
-            }
-
             let mut out_buf = vec![0u8; 65536];
             let rc = needle_complete(
                 text_cstr.as_ptr(),

@@ -147,6 +147,10 @@ enum Commands {
         #[arg(long, alias = "needle")]
         precision: bool,
 
+        /// Override reranker mode for this query ("top1" or "needle")
+        #[arg(short = 'r', long)]
+        reranker: Option<String>,
+
         /// Filter candidate memories by category
         #[arg(short = 't', long = "type")]
         category: Option<String>,
@@ -471,6 +475,7 @@ fn main() -> Result<()> {
         Commands::Answer {
             question,
             precision,
+            reranker,
             category,
             as_of,
             limit,
@@ -480,7 +485,13 @@ fn main() -> Result<()> {
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
-            let result = lm.answer(&question, cat, as_of_dt, limit, precision)?;
+            let override_mode = if precision {
+                Some("needle")
+            } else {
+                reranker.as_deref()
+            };
+
+            let result = lm.answer_with_reranker(&question, cat, as_of_dt, limit, override_mode)?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&result)?);

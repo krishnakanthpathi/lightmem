@@ -10,7 +10,7 @@ pub mod storage;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub use config::LightMemConfig;
 pub use embeddings::{
@@ -25,7 +25,7 @@ pub use storage::{Storage, StorageStats};
 
 pub struct LightMem {
     storage: Arc<Storage>,
-    embedder: Arc<dyn EmbeddingProvider>,
+    embedder: OnceLock<Arc<dyn EmbeddingProvider>>,
     config: LightMemConfig,
 }
 
@@ -37,19 +37,34 @@ impl LightMem {
         Self::open_at(&db_path, config)
     }
 
-    /// Open database at a specific path
+    /// Open database at a specific path (embedding model is loaded lazily on first use)
     pub fn open_at(db_path: &Path, config: LightMemConfig) -> Result<Self> {
         let storage = Storage::open(db_path)?;
 
-        let embedder: Arc<dyn EmbeddingProvider> = match config.backend.as_str() {
+        Ok(Self {
+            storage: Arc::new(storage),
+            embedder: OnceLock::new(),
+            config,
+        })
+    }
+
+    fn embedder(&self) -> Result<&Arc<dyn EmbeddingProvider>> {
+        if let Some(emb) = self.embedder.get() {
+            return Ok(emb);
+        }
+
+        let created: Arc<dyn EmbeddingProvider> = match self.config.backend.as_str() {
             "onnx" => {
-                let model_str = config.onnx_model.as_deref().unwrap_or("bge-small");
+                let model_str = self.config.onnx_model.as_deref().unwrap_or("bge-small");
                 let path = std::path::Path::new(model_str);
                 if path.is_dir() {
                     match OnnxEmbeddingProvider::new_custom_dir(path) {
                         Ok(p) => Arc::new(p),
                         Err(e) => {
-                            eprintln!("Warning: Failed to load custom ONNX model from {:?}: {}. Falling back to default bge-small", path, e);
+                            eprintln!(
+                                "Warning: Failed to load custom ONNX model from {:?}: {}. Falling back to default bge-small",
+                                path, e
+                            );
                             Arc::new(OnnxEmbeddingProvider::new(Some("bge-small"))?)
                         }
                     }
@@ -58,17 +73,14 @@ impl LightMem {
                 }
             }
             "ollama" => Arc::new(OllamaEmbeddingProvider::new(
-                config.ollama_url.clone(),
-                config.embedding_model.clone(),
+                self.config.ollama_url.clone(),
+                self.config.embedding_model.clone(),
             )),
             _ => Arc::new(HashEmbeddingProvider),
         };
 
-        Ok(Self {
-            storage: Arc::new(storage),
-            embedder,
-            config,
-        })
+        let _ = self.embedder.set(created);
+        Ok(self.embedder.get().unwrap())
     }
 
     pub fn db_path(&self) -> &Path {
@@ -115,7 +127,7 @@ impl LightMem {
         );
 
         let card_text = memory.to_card_text();
-        let vector = self.embedder.embed(&card_text).ok();
+        let vector = self.embedder()?.embed(&card_text).ok();
 
         self.storage.insert_memory(&memory, vector.as_deref())?;
         Ok(memory)
@@ -132,7 +144,7 @@ impl LightMem {
     ) -> Result<Vec<ScoredMemory>> {
         HybridSearchEngine::search(
             &self.storage,
-            self.embedder.as_ref(),
+            self.embedder()?.as_ref(),
             query,
             category,
             Some(MemoryStatus::Active),
@@ -224,10 +236,11 @@ impl LightMem {
         };
 
         let count = candidates.len();
+        let embedder = self.embedder()?;
         for candidate in candidates {
             let memory = candidate.to_memory_record();
             let card_text = memory.to_card_text();
-            let vector = self.embedder.embed(&card_text).ok();
+            let vector = embedder.embed(&card_text).ok();
             self.storage.insert_memory(&memory, vector.as_deref())?;
         }
 
@@ -249,11 +262,24 @@ impl LightMem {
         limit: usize,
         use_needle: bool,
     ) -> Result<AnswerResult> {
+        let override_reranker = if use_needle { Some("needle") } else { None };
+        self.answer_with_reranker(question, category, as_of, limit, override_reranker)
+    }
+
+    /// Answer with an explicit per-query reranker override ("top1" or "needle")
+    pub fn answer_with_reranker(
+        &self,
+        question: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+        reranker_override: Option<&str>,
+    ) -> Result<AnswerResult> {
         let candidates = self.recall(question, category, as_of, limit, None)?;
 
-        let needle_enabled = use_needle
-            || self.config.reranker.eq_ignore_ascii_case("needle")
-            || self.config.reranker.eq_ignore_ascii_case("precision");
+        let active_reranker = reranker_override.unwrap_or(&self.config.reranker);
+        let needle_enabled = active_reranker.eq_ignore_ascii_case("needle")
+            || active_reranker.eq_ignore_ascii_case("precision");
 
         if needle_enabled {
             let reranker = NeedleReranker::default();
