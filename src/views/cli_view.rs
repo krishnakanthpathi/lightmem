@@ -6,9 +6,227 @@ use anyhow::Result;
 use colored::*;
 use std::path::Path;
 
+/// 22x38 pixel matrix of the LightMem Crimson Cloud emblem (`W` = White outline/swirl, `R` = Crimson fill, ` ` = Transparent).
+/// Rendered via Unicode half-blocks (`▀`, `▄`, `█`) into 11 terminal rows.
+const CLOUD_LOGO_MATRIX: [&str; 22] = [
+    "                     WWWWWW           ",
+    "                   WWWRRRRWWW         ",
+    "                  WRRRRRRRRRWW        ",
+    "              WWWWRRRRRRRRRRRWWW      ",
+    "             WWRRWRRRRRWWRRRRWWWWWW   ",
+    "            WRRRWWRRRRRRWRRRRRRRRRWW  ",
+    "           WWRRRWWRRRRRRWRRRRRRRRRRWW ",
+    "           WRRRRRWRRRRRRWRRRRRRRRRRRW ",
+    "           WRRRRRRWWWRWWWRRRRRRRRRRRWW",
+    "        WWWWRRRRRRRRWWWRRRRRRRRRRRRRRW",
+    "W      WWRRRRRRRRRRRRRRRRRRRRRRRRRRRRW",
+    "WWW  WWRRRRRRRRRRRRRRRRRRRRWWWWRRRRRRW",
+    "WWWWWWRRRRRRRRRRRRRRRRRRRRWWRRRRRRRRWW",
+    " WRRRRRRRRRRRRRRRRRRRRRRRRWRRRRRRRRRW ",
+    " WWRRRRRRRRWWWWWRRRRRRRRRRWRRRRRRRRWW ",
+    "  WRRRRRRRWRRRRWWRRRRRRRRRWWRRRRRRWW  ",
+    "   WRRRRRWRRRRRRWRRRRRRRRRRWWRRRRWW   ",
+    "    WRRRRWRRRRRRRRRRRRRRRRRRWWWWWW    ",
+    "     WWWWWWRRRRRRRRRRRRRRRRRRW        ",
+    "          WRRRRRRRRWRRRRRRRRW         ",
+    "          WWRRRRRWWWWWRRRWWW          ",
+    "            WWWWWW   WWWWW            ",
+];
+
 pub struct CliView;
 
 impl CliView {
+    // Theme palette (24-bit TrueColor)
+    fn crimson(s: &str) -> ColoredString {
+        s.truecolor(220, 38, 38)
+    }
+
+    fn crimson_bold(s: &str) -> ColoredString {
+        s.truecolor(220, 38, 38).bold()
+    }
+
+    fn rose(s: &str) -> ColoredString {
+        s.truecolor(248, 113, 113)
+    }
+
+    fn violet_bold(s: &str) -> ColoredString {
+        s.truecolor(167, 139, 250).bold()
+    }
+
+    fn gold(s: &str) -> ColoredString {
+        s.truecolor(251, 191, 36)
+    }
+
+    fn white_bold(s: &str) -> ColoredString {
+        s.truecolor(248, 250, 252).bold()
+    }
+
+    fn slate(s: &str) -> ColoredString {
+        s.truecolor(113, 113, 122)
+    }
+
+    fn emerald_bold(s: &str) -> ColoredString {
+        s.truecolor(52, 211, 153).bold()
+    }
+
+    /// Render a single pair of vertical pixel rows from `CLOUD_LOGO_MATRIX` using Unicode half-blocks.
+    fn render_logo_row(pair_idx: usize) -> String {
+        let top_row = CLOUD_LOGO_MATRIX[pair_idx * 2].as_bytes();
+        let bot_row = CLOUD_LOGO_MATRIX[pair_idx * 2 + 1].as_bytes();
+        let width = top_row.len().min(bot_row.len());
+
+        let mut out = String::from("  ");
+        for x in 0..width {
+            let t = top_row[x] as char;
+            let b = bot_row[x] as char;
+
+            let color_rgb = |c: char| -> Option<(u8, u8, u8)> {
+                match c {
+                    'W' => Some((248, 250, 252)),
+                    'R' => Some((204, 36, 36)),
+                    _ => None,
+                }
+            };
+
+            match (color_rgb(t), color_rgb(b)) {
+                (None, None) => out.push(' '),
+                (Some((r, g, bl)), None) => {
+                    out.push_str(&format!("\x1b[38;2;{};{};{}m▀\x1b[0m", r, g, bl));
+                }
+                (None, Some((r, g, bl))) => {
+                    out.push_str(&format!("\x1b[38;2;{};{};{}m▄\x1b[0m", r, g, bl));
+                }
+                (Some((r1, g1, b1)), Some((r2, g2, b2))) => {
+                    if (r1, g1, b1) == (r2, g2, b2) {
+                        out.push_str(&format!("\x1b[38;2;{};{};{}m█\x1b[0m", r1, g1, b1));
+                    } else {
+                        out.push_str(&format!(
+                            "\x1b[38;2;{};{};{};48;2;{};{};{}m▀\x1b[0m",
+                            r1, g1, b1, r2, g2, b2
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Returns the multi-line Crimson Cloud intro banner string (used in `--help` and intro HUD).
+    pub fn banner_string(db_path: Option<&Path>, stats: Option<&StorageStats>) -> String {
+        let cfg = LightMemConfig::load();
+        let db_display = db_path
+            .map(Self::format_path)
+            .unwrap_or_else(|| "~/.lightmem/memories.db".to_string());
+
+        let mem_summary = if let Some(s) = stats {
+            format!(
+                "{} active  {}  {} vectors",
+                s.active_memories,
+                Self::slate("·"),
+                s.total_vectors
+            )
+        } else {
+            format!("hybrid SQLite FTS5 + vector store")
+        };
+
+        let right_lines: [String; 11] = [
+            String::new(),
+            format!(
+                "{}  {}  {}",
+                Self::crimson_bold("❖"),
+                Self::white_bold("L I G H T M E M"),
+                Self::slate(&format!("v{}", env!("CARGO_PKG_VERSION")))
+            ),
+            format!(
+                "{}",
+                Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            ),
+            format!(
+                "{} {}",
+                Self::crimson_bold("▸"),
+                "Ultra-Fast Local Agent Memory Engine".truecolor(228, 228, 231)
+            ),
+            format!(
+                "  {} {:<10} {}",
+                Self::slate("◫"),
+                Self::slate("Vault"),
+                Self::white_bold(&db_display)
+            ),
+            format!(
+                "  {} {:<10} {}",
+                Self::slate("◈"),
+                Self::slate("Status"),
+                mem_summary.truecolor(212, 212, 216)
+            ),
+            format!(
+                "  {} {:<10} {} {} {}",
+                Self::slate("✦"),
+                Self::slate("Engines"),
+                Self::violet_bold(&cfg.backend),
+                Self::slate("+"),
+                Self::crimson_bold(&cfg.reranker)
+            ),
+            format!(
+                "{}",
+                Self::slate("────────────────────────────────────────────────")
+            ),
+            format!(
+                "  {} {:<12} {} {:<12} {} {}",
+                Self::crimson_bold("◈"),
+                "remember",
+                Self::crimson_bold("⌖"),
+                "recall",
+                Self::crimson_bold("✦"),
+                "answer"
+            ),
+            format!(
+                "  {} {:<12} {} {:<12} {} {}",
+                Self::crimson_bold("≡"),
+                "list",
+                Self::crimson_bold("◫"),
+                "stats",
+                Self::crimson_bold("⇄"),
+                "import / export"
+            ),
+            String::new(),
+        ];
+
+        let mut lines = Vec::with_capacity(13);
+        lines.push(String::new());
+        for i in 0..11 {
+            let logo_part = Self::render_logo_row(i);
+            lines.push(format!("{}   {}", logo_part, right_lines[i]));
+        }
+        lines.join("\n")
+    }
+
+    /// Render the full interactive intro screen when `lmem` is invoked with no subcommand.
+    pub fn render_intro(db_path: &Path, stats: &StorageStats) {
+        println!("{}", Self::banner_string(Some(db_path), Some(stats)));
+        println!();
+        println!(
+            "  {} {}",
+            Self::crimson_bold("╭─"),
+            Self::white_bold("QUICK COMMANDS")
+        );
+        let cmds = [
+            ("│", "lmem remember \"<fact>\" -t decision", "Store a categorized memory"),
+            ("│", "lmem recall \"<query>\" --limit 5", "Hybrid BM25 + vector search"),
+            ("│", "lmem answer \"<question>\"", "Factual extraction via Needle 3 FFI"),
+            ("│", "lmem list --page 1 --limit 20", "Paginated chronological index"),
+            ("╰─", "lmem stats  |  lmem --help", "Inspect vault telemetry & flags"),
+        ];
+        for (branch, cmd, desc) in cmds {
+            println!(
+                "  {:<2} {:<36} {}",
+                Self::crimson_bold(branch),
+                cmd.truecolor(248, 250, 252),
+                Self::slate(desc)
+            );
+        }
+        println!();
+    }
+
     pub fn format_path(p: &Path) -> String {
         if let Ok(home) = std::env::var("HOME") {
             let home_path = Path::new(&home);
@@ -17,6 +235,17 @@ impl CliView {
             }
         }
         p.display().to_string()
+    }
+
+    fn confidence_bar(score: f32) -> String {
+        let clamped = score.clamp(0.0, 1.0);
+        let filled = (clamped * 10.0).round() as usize;
+        let empty = 10usize.saturating_sub(filled);
+        format!(
+            "{}{}",
+            "▰".repeat(filled).truecolor(220, 38, 38),
+            "▱".repeat(empty).truecolor(82, 82, 91)
+        )
     }
 
     pub fn render_remembered(memory: &MemoryRecord, db_path: &Path, json: bool) -> Result<()> {
@@ -28,12 +257,14 @@ impl CliView {
         let short_id: String = memory.id.chars().take(8).collect();
         let db_str = Self::format_path(db_path);
         println!(
-            "{} Stored [{}] {} ({}) in {}",
-            "✔".green().bold(),
-            memory.category.as_str().cyan().bold(),
-            memory.title.bold(),
-            short_id.yellow(),
-            db_str.dimmed()
+            "{} {} [{}] {} {} {} {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold("Stored"),
+            Self::violet_bold(memory.category.as_str()),
+            Self::white_bold(&memory.title),
+            Self::gold(&format!("({})", short_id)),
+            Self::slate("in"),
+            Self::slate(&db_str)
         );
         Ok(())
     }
@@ -50,7 +281,11 @@ impl CliView {
         }
 
         if results.is_empty() {
-            println!("{}", "No relevant memories found.".dimmed());
+            println!(
+                "{} {}",
+                Self::crimson_bold("⌖"),
+                Self::slate("No relevant memories found.")
+            );
             return Ok(());
         }
 
@@ -61,12 +296,13 @@ impl CliView {
             "memories"
         };
         println!(
-            "{} Found {} {} for \"{}\" in {}:",
-            "🔍".bold(),
-            results.len().to_string().cyan().bold(),
+            "{} Found {} {} for {} {} {}",
+            Self::crimson_bold("⌖"),
+            Self::crimson_bold(&results.len().to_string()),
             count_label,
-            query.bold(),
-            db_str.dimmed()
+            Self::white_bold(&format!("\"{}\"", query)),
+            Self::slate("in"),
+            Self::slate(&db_str)
         );
         println!();
 
@@ -74,18 +310,31 @@ impl CliView {
             let m = &r.memory;
             let short_id: String = m.id.chars().take(8).collect();
             println!(
-                "{}. [{}] {} {}",
-                idx + 1,
-                m.category.as_str().cyan().bold(),
-                m.title.bold(),
-                format!("(score: {:.2})", r.score).dimmed()
+                "  {} [{}] {} {} {}",
+                Self::crimson_bold(&format!("{:02}.", idx + 1)),
+                Self::violet_bold(m.category.as_str()),
+                Self::white_bold(&m.title),
+                Self::confidence_bar(r.score),
+                Self::rose(&format!("{:.2}", r.score))
             );
-            println!("   {}", m.content.replace('\n', "\n   "));
-            let mut meta = vec![format!("ID: {}", short_id.yellow())];
+            println!(
+                "     {} {}",
+                Self::slate("│"),
+                m.content.replace('\n', &format!("\n     {} ", Self::slate("│")))
+            );
+            let mut meta = vec![format!("{} {}", Self::slate("ID:"), Self::gold(&short_id))];
             if !m.tags.is_empty() {
-                meta.push(format!("Tags: {}", m.tags.join(", ").blue()));
+                meta.push(format!(
+                    "{} {}",
+                    Self::slate("Tags:"),
+                    m.tags.join(", ").truecolor(167, 139, 250)
+                ));
             }
-            println!("   {}", meta.join(" | ").dimmed());
+            println!(
+                "     {} {}",
+                Self::slate("╰─▸"),
+                meta.join(&format!(" {} ", Self::slate("·")))
+            );
             if idx + 1 < results.len() {
                 println!();
             }
@@ -106,15 +355,15 @@ impl CliView {
         if paginated.items.is_empty() {
             if paginated.total > 0 {
                 println!(
-                    "{}",
-                    format!(
+                    "{} {}",
+                    Self::crimson_bold("≡"),
+                    Self::slate(&format!(
                         "No memories on this page/offset (total matching: {}, offset: {}).",
                         paginated.total, paginated.offset
-                    )
-                    .dimmed()
+                    ))
                 );
             } else {
-                println!("{}", "No memories found.".dimmed());
+                println!("{} {}", Self::crimson_bold("≡"), Self::slate("No memories found."));
             }
             return Ok(());
         }
@@ -123,15 +372,16 @@ impl CliView {
         let start_idx = paginated.offset + 1;
         let end_idx = paginated.offset + paginated.items.len();
         println!(
-            "{} Displaying {}–{} of {} memories (page {}/{}, offset {}) from {}:",
-            "📋".bold(),
-            start_idx.to_string().cyan().bold(),
-            end_idx.to_string().cyan().bold(),
-            paginated.total.to_string().bold(),
-            paginated.page.to_string().cyan(),
-            paginated.total_pages.to_string().cyan(),
-            paginated.offset,
-            db_str.dimmed()
+            "{} Displaying {}–{} of {} memories {} {}",
+            Self::crimson_bold("≡"),
+            Self::crimson_bold(&start_idx.to_string()),
+            Self::crimson_bold(&end_idx.to_string()),
+            Self::white_bold(&paginated.total.to_string()),
+            Self::slate(&format!(
+                "(page {}/{}, offset {})",
+                paginated.page, paginated.total_pages, paginated.offset
+            )),
+            Self::slate(&format!("from {}", db_str))
         );
         println!();
 
@@ -144,11 +394,13 @@ impl CliView {
                 first_line.to_string()
             };
             println!(
-                "• [{}] {} {} - {}",
-                m.category.as_str().cyan().bold(),
-                m.title.bold(),
-                format!("({})", short_id).yellow(),
-                snippet.dimmed()
+                "  {} [{}] {} {} {} {}",
+                Self::crimson_bold("▪"),
+                Self::violet_bold(m.category.as_str()),
+                Self::white_bold(&m.title),
+                Self::gold(&format!("({})", short_id)),
+                Self::slate("─"),
+                Self::slate(&snippet)
             );
         }
 
@@ -157,12 +409,12 @@ impl CliView {
             let next_page = paginated.page + 1;
             println!();
             println!(
-                "  {}",
-                format!(
-                    "↳ More memories available (next: --page {} -l {}  or  --offset {} -l {})",
+                "  {} {}",
+                Self::crimson_bold("╰─▸"),
+                Self::slate(&format!(
+                    "More memories available (next: --page {} -l {}  or  --offset {} -l {})",
                     next_page, paginated.limit, next_offset, paginated.limit
-                )
-                .dimmed()
+                ))
             );
         }
         Ok(())
@@ -187,27 +439,37 @@ impl CliView {
             } else {
                 "Retired (soft-expired)"
             };
-            println!("{} {} memory {}", "✔".green().bold(), action, id.yellow());
+            println!(
+                "{} {} memory {}",
+                Self::crimson_bold("◈"),
+                Self::white_bold(action),
+                Self::gold(id)
+            );
         } else {
-            println!("{} Memory '{}' not found", "✖".red().bold(), id);
+            println!(
+                "{} Memory '{}' not found",
+                Self::crimson_bold("✕"),
+                Self::gold(id)
+            );
         }
         Ok(())
     }
 
     pub fn render_export(exported_path: &Path) {
         println!(
-            "{} Exported OKF bundle to: {}",
-            "✔".green().bold(),
-            exported_path.display().to_string().cyan().bold()
+            "{} Exported OKF bundle {} {}",
+            Self::crimson_bold("⇄"),
+            Self::slate("▸"),
+            Self::white_bold(&exported_path.display().to_string())
         );
     }
 
     pub fn render_import(count: usize, file: &Path) {
         println!(
-            "{} Successfully imported {} memories from {:?}",
-            "✔".green().bold(),
-            count.to_string().cyan().bold(),
-            file
+            "{} Imported {} memories from {}",
+            Self::crimson_bold("⇄"),
+            Self::crimson_bold(&count.to_string()),
+            Self::white_bold(&file.display().to_string())
         );
     }
 
@@ -219,23 +481,30 @@ impl CliView {
 
         let conf_pct = (result.confidence * 100.0).round() as u32;
         println!(
-            "{} Answer [reranker: {}] (confidence: {}%):",
-            "💡".bold(),
-            result.reranker_used.cyan().bold(),
-            conf_pct
+            "{} {} {} {} {}%",
+            Self::crimson_bold("✦"),
+            Self::white_bold("Answer"),
+            Self::slate(&format!("[reranker: {}]", result.reranker_used)),
+            Self::confidence_bar(result.confidence),
+            Self::rose(&conf_pct.to_string())
         );
         println!();
-        println!("  {}", result.answer.green().bold());
+        println!(
+            "  {} {}",
+            Self::crimson_bold("▸"),
+            Self::white_bold(&result.answer)
+        );
         println!();
 
         if let Some(m) = &result.selected_memory {
             let short_id: String = m.id.chars().take(8).collect();
             println!(
-                "  {} Source: [{}] {} {}",
-                "📌".dimmed(),
-                m.category.as_str().cyan(),
-                m.title.bold(),
-                format!("(ID: {})", short_id).dimmed()
+                "  {} {} [{}] {} {}",
+                Self::slate("╰─▸"),
+                Self::slate("Source:"),
+                Self::violet_bold(m.category.as_str()),
+                Self::white_bold(&m.title),
+                Self::gold(&format!("({})", short_id))
             );
         }
         Ok(())
@@ -243,21 +512,54 @@ impl CliView {
 
     pub fn render_config(cfg: &LightMemConfig, updated: bool) {
         if updated {
-            println!("{} Configuration updated successfully!", "✔".green().bold());
+            println!(
+                "{} {}",
+                Self::crimson_bold("◈"),
+                Self::emerald_bold("Configuration updated")
+            );
+            println!();
         }
 
-        println!("Current Configuration:");
-        println!("  Backend:          {}", cfg.backend.cyan().bold());
         println!(
-            "  ONNX Model/Path:  {}",
-            cfg.onnx_model.as_deref().unwrap_or("bge-small").cyan()
+            "{} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("LightMem Configuration")
         );
-        println!("  Reranker:         {}", cfg.reranker.cyan().bold());
-        println!("  Ollama URL:       {}", cfg.ollama_url.dimmed());
-        println!("  Ollama Model:     {}", cfg.embedding_model.dimmed());
         println!(
-            "  Config File:      {}",
-            LightMemConfig::config_file().display()
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("Backend"),
+            Self::violet_bold(&cfg.backend)
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("ONNX Model"),
+            Self::white_bold(cfg.onnx_model.as_deref().unwrap_or("bge-small"))
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("Reranker"),
+            Self::crimson_bold(&cfg.reranker)
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("Ollama URL"),
+            Self::slate(&cfg.ollama_url)
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("Ollama Model"),
+            Self::slate(&cfg.embedding_model)
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("╰─"),
+            Self::slate("Config File"),
+            Self::slate(&LightMemConfig::config_file().display().to_string())
         );
     }
 
@@ -267,24 +569,65 @@ impl CliView {
             return Ok(());
         }
 
+        println!("{}", Self::banner_string(Some(db_path), Some(stats)));
+        println!();
+
         let db_str = Self::format_path(db_path);
-        println!("{} LightMem Storage Statistics", "📊".bold());
-        println!("  Database:  {}", db_str.cyan().bold());
         println!(
-            "  Memories:  {} total  ({} active, {} expired)",
-            stats.total_memories.to_string().bold(),
-            stats.active_memories.to_string().green(),
-            stats.expired_memories.to_string().yellow()
+            "  {} {}",
+            Self::crimson_bold("◫"),
+            Self::white_bold("Vault Storage Telemetry")
         );
         println!(
-            "  Vectors:   {} embedded",
-            stats.total_vectors.to_string().blue()
+            "  {} {:<14} {}",
+            Self::slate("├─"),
+            Self::slate("Database"),
+            Self::white_bold(&db_str)
         );
+        println!(
+            "  {} {:<14} {} total  ({} active, {} expired)",
+            Self::slate("├─"),
+            Self::slate("Memories"),
+            Self::white_bold(&stats.total_memories.to_string()),
+            Self::emerald_bold(&stats.active_memories.to_string()),
+            Self::gold(&stats.expired_memories.to_string())
+        );
+        println!(
+            "  {} {:<14} {} embedded",
+            Self::slate("╰─"),
+            Self::slate("Vectors"),
+            Self::violet_bold(&stats.total_vectors.to_string())
+        );
+
         if !stats.by_category.is_empty() {
             println!();
-            println!("  Breakdown by Category:");
-            for (cat, count) in &stats.by_category {
-                println!("    • {:<14} {}", cat.cyan(), count);
+            println!(
+                "  {} {}",
+                Self::crimson_bold("≡"),
+                Self::white_bold("Category Distribution")
+            );
+            let max_count = stats
+                .by_category
+                .iter()
+                .map(|(_, c)| *c)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            for (idx, (cat, count)) in stats.by_category.iter().enumerate() {
+                let branch = if idx + 1 == stats.by_category.len() {
+                    "╰─"
+                } else {
+                    "├─"
+                };
+                let bar_len = ((*count as f32 / max_count as f32) * 16.0).round() as usize;
+                let bar = "▰".repeat(bar_len.max(1)).truecolor(220, 38, 38);
+                println!(
+                    "  {} {:<14} {:>4}  {}",
+                    Self::slate(branch),
+                    Self::violet_bold(cat),
+                    Self::white_bold(&count.to_string()),
+                    bar
+                );
             }
         }
         Ok(())

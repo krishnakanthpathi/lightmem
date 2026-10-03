@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(name = "lmem")]
 #[command(
-    about = "🧠 LightMem - Ultra-fast, lightweight agent memory engine",
-    long_about = None
+    about = "❖ LightMem - Ultra-fast, lightweight agent memory engine",
+    long_about = None,
+    before_help = CliView::banner_string(None, None)
 )]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 
     /// Force use of global database (~/.lightmem/memories.db)
     #[arg(short = 'g', long, global = true)]
@@ -225,7 +226,14 @@ fn main() -> Result<()> {
     let effective_db = cli.db.as_deref().or(env_db.as_deref());
     let global = cli.global;
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        let lm = open_controller(effective_db, global)?;
+        let stats = lm.stats()?;
+        CliView::render_intro(lm.db_path(), &stats);
+        return Ok(());
+    };
+
+    match command {
         Commands::Remember {
             content,
             category,
