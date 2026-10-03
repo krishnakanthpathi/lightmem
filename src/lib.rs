@@ -218,8 +218,54 @@ impl LightMem {
         Exporter::export_okf(&self.storage, target_path)
     }
 
-    /// Import memories from an external file (.json, .jsonl, or .md/.okf)
+    /// Import memories from an external file (.json, .jsonl, or .md/.okf) or an OKF bundle directory
     pub fn import_file(&self, file_path: &Path) -> Result<usize> {
+        if file_path.is_dir() {
+            let root = if file_path.join("memories").is_dir() {
+                file_path.join("memories")
+            } else {
+                file_path.to_path_buf()
+            };
+            let mut files = Vec::new();
+            Self::collect_importable_files(&root, &mut files)?;
+            files.sort();
+
+            let mut total = 0;
+            for f in files {
+                total += self.import_single_file(&f)?;
+            }
+            return Ok(total);
+        }
+
+        self.import_single_file(file_path)
+    }
+
+    fn collect_importable_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)
+            .with_context(|| format!("Failed to read directory {:?}", dir))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                Self::collect_importable_files(&path, out)?;
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.eq_ignore_ascii_case("index.md") || name.starts_with('.') {
+                    continue;
+                }
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext.eq_ignore_ascii_case("md")
+                    || ext.eq_ignore_ascii_case("okf")
+                    || ext.eq_ignore_ascii_case("json")
+                    || ext.eq_ignore_ascii_case("jsonl")
+                {
+                    out.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn import_single_file(&self, file_path: &Path) -> Result<usize> {
         let raw = std::fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read import file {:?}", file_path))?;
 

@@ -338,8 +338,99 @@ impl MemoryImporter for JsonMemoryImporter {
     }
 }
 
-/// Ingests OKF (Open Knowledge Format) markdown bundles
+/// Ingests OKF (Open Knowledge Format) markdown bundles, Memanto `memory.md` exports, and YAML-frontmatter `.md` files
 pub struct OkfMemoryImporter;
+
+impl OkfMemoryImporter {
+    /// Parse a single YAML-frontmatter OKF markdown file (e.g. Memanto `--okf` directory item)
+    fn parse_yaml_frontmatter_file(raw: &str) -> Option<ImportCandidate> {
+        let trimmed = raw.trim_start();
+        if !trimmed.starts_with("---") {
+            return None;
+        }
+        let after_first = &trimmed[3..];
+        let end_idx = after_first.find("\n---")?;
+        let frontmatter = &after_first[..end_idx];
+        let body = after_first[end_idx + 4..].trim();
+        if body.is_empty() || body.starts_with("# ") && body.contains(" — OKF bundle") {
+            return None;
+        }
+
+        let mut cat_str: Option<String> = None;
+        let mut title: Option<String> = None;
+        let mut id: Option<String> = None;
+        let mut confidence = 0.9f32;
+        let mut provenance = "imported:okf".to_string();
+        let mut tags = Vec::new();
+        let mut created_at: Option<DateTime<Utc>> = None;
+        let mut in_tags = false;
+
+        for line in frontmatter.lines() {
+            let t = line.trim();
+            if t.starts_with("- ") && in_tags {
+                let tag = t.trim_start_matches("- ").trim().trim_matches('\'').trim_matches('"');
+                if !tag.is_empty() {
+                    tags.push(tag.to_string());
+                }
+                continue;
+            } else if !line.starts_with(' ') && !line.starts_with('-') {
+                in_tags = false;
+            }
+
+            if let Some(rest) = t.strip_prefix("type:") {
+                cat_str = Some(rest.trim().trim_matches('\'').trim_matches('"').to_string());
+            } else if let Some(rest) = t.strip_prefix("title:") {
+                title = Some(rest.trim().trim_matches('\'').trim_matches('"').to_string());
+            } else if t == "tags:" {
+                in_tags = true;
+            } else if let Some(rest) = t.strip_prefix("id:") {
+                id = Some(rest.trim().trim_matches('\'').trim_matches('"').to_string());
+            } else if let Some(rest) = t.strip_prefix("confidence:") {
+                if let Ok(c) = rest.trim().parse::<f32>() {
+                    confidence = c;
+                }
+            } else if let Some(rest) = t.strip_prefix("provenance:") {
+                let p = rest.trim().trim_matches('\'').trim_matches('"');
+                if !p.is_empty() {
+                    provenance = p.to_string();
+                }
+            } else if let Some(rest) = t.strip_prefix("at:") {
+                let ts = rest.trim().trim_matches('\'').trim_matches('"');
+                if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+                    created_at = Some(dt.with_timezone(&Utc));
+                }
+            }
+        }
+
+        // Only treat as a YAML-frontmatter memory card if it had `type:` or `title:` in frontmatter
+        if cat_str.is_none() && title.is_none() {
+            return None;
+        }
+
+        let content = body.to_string();
+        let resolved_cat = parse_category_lenient(cat_str.as_deref(), &content);
+        let resolved_title = title.unwrap_or_else(|| {
+            content
+                .lines()
+                .next()
+                .unwrap_or("Imported Memory")
+                .chars()
+                .take(80)
+                .collect()
+        });
+
+        Some(ImportCandidate {
+            id,
+            category: Some(resolved_cat),
+            title: resolved_title,
+            content,
+            tags,
+            confidence,
+            provenance,
+            created_at,
+        })
+    }
+}
 
 impl MemoryImporter for OkfMemoryImporter {
     fn name(&self) -> &str {
@@ -347,94 +438,209 @@ impl MemoryImporter for OkfMemoryImporter {
     }
 
     fn parse(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
+        // 1. Check if this is a single YAML-frontmatter OKF file (from `memanto memory export --okf`)
+        if !raw.contains("\n### ") {
+            if let Some(single) = Self::parse_yaml_frontmatter_file(raw) {
+                return Ok(vec![single]);
+            }
+        }
+
+        // 2. Parse multi-section Markdown / OKF bundle (handles both LightMem OKF and Memanto `memory.md` exports)
         let mut candidates = Vec::new();
         let mut current_category = MemoryType::Fact;
 
-        let sections = raw.split("---");
-        for section in sections {
-            let trimmed = section.trim();
-            if trimmed.is_empty() {
+        let mut active_title: Option<String> = None;
+        let mut active_id: Option<String> = None;
+        let mut active_tags: Vec<String> = Vec::new();
+        let mut active_conf: f32 = 0.9;
+        let mut active_created: Option<DateTime<Utc>> = None;
+        let mut active_lines: Vec<String> = Vec::new();
+
+        let flush_active = |candidates: &mut Vec<ImportCandidate>,
+                            cat: MemoryType,
+                            title: &mut Option<String>,
+                            id: &mut Option<String>,
+                            tags: &mut Vec<String>,
+                            conf: &mut f32,
+                            created: &mut Option<DateTime<Utc>>,
+                            lines: &mut Vec<String>| {
+            if let Some(t) = title.take() {
+                let content = lines.join("\n").trim().to_string();
+                if !content.is_empty() {
+                    candidates.push(ImportCandidate {
+                        id: id.take(),
+                        category: Some(cat),
+                        title: t,
+                        content,
+                        tags: std::mem::take(tags),
+                        confidence: *conf,
+                        provenance: "imported:okf".to_string(),
+                        created_at: created.take(),
+                    });
+                }
+            }
+            *id = None;
+            tags.clear();
+            *conf = 0.9;
+            *created = None;
+            lines.clear();
+        };
+
+        for line in raw.lines() {
+            let trimmed = line.trim();
+
+            // Category header (e.g. `## DECISION` or `## Decisions` or `## Instructions`)
+            if let Some(h2) = trimmed.strip_prefix("## ") {
+                flush_active(
+                    &mut candidates,
+                    current_category,
+                    &mut active_title,
+                    &mut active_id,
+                    &mut active_tags,
+                    &mut active_conf,
+                    &mut active_created,
+                    &mut active_lines,
+                );
+                let h2_clean = h2.trim().to_lowercase();
+                current_category = match h2_clean.as_str() {
+                    "instructions" | "instruction" => MemoryType::Instruction,
+                    "facts" | "fact" => MemoryType::Fact,
+                    "decisions" | "decision" => MemoryType::Decision,
+                    "goals" | "goal" => MemoryType::Goal,
+                    "commitments" | "commitment" => MemoryType::Commitment,
+                    "preferences" | "preference" => MemoryType::Preference,
+                    "context" | "contexts" => MemoryType::Context,
+                    "events" | "event" => MemoryType::Event,
+                    "learnings" | "learning" => MemoryType::Learning,
+                    "observations" | "observation" => MemoryType::Observation,
+                    "artifacts" | "artifact" => MemoryType::Artifact,
+                    "errors" | "error" => MemoryType::Error,
+                    "relationships" | "relationship" => MemoryType::Relationship,
+                    "passwords" | "password" => MemoryType::Password,
+                    other => parse_category_lenient(Some(other), ""),
+                };
                 continue;
             }
 
-            // Check if section defines a category header e.g. ## DECISION
-            for line in trimmed.lines() {
-                if line.starts_with("## ") {
-                    let cat_str = line.trim_start_matches("## ").trim().to_lowercase();
-                    if let Ok(cat) = cat_str.parse::<MemoryType>() {
-                        current_category = cat;
-                    }
+            // Memory card header (`### Title`)
+            if let Some(h3) = trimmed.strip_prefix("### ") {
+                flush_active(
+                    &mut candidates,
+                    current_category,
+                    &mut active_title,
+                    &mut active_id,
+                    &mut active_tags,
+                    &mut active_conf,
+                    &mut active_created,
+                    &mut active_lines,
+                );
+                let title_clean = h3.trim();
+                if !title_clean.is_empty() {
+                    active_title = Some(title_clean.to_string());
                 }
+                continue;
             }
 
-            // Parse ### Title blocks
-            if let Some(idx) = trimmed.find("### ") {
-                let block = &trimmed[idx..];
-                let mut lines = block.lines();
-                let title_line = lines.next().unwrap_or("").trim_start_matches("### ").trim();
-                if title_line.is_empty() {
-                    continue;
+            if active_title.is_none() {
+                continue;
+            }
+
+            if trimmed == "---" {
+                flush_active(
+                    &mut candidates,
+                    current_category,
+                    &mut active_title,
+                    &mut active_id,
+                    &mut active_tags,
+                    &mut active_conf,
+                    &mut active_created,
+                    &mut active_lines,
+                );
+                continue;
+            }
+
+            // LightMem OKF metadata bullets
+            if let Some(rest) = trimmed.strip_prefix("- **ID:**") {
+                active_id = Some(rest.replace('`', "").trim().to_string());
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("- **Tags:**") {
+                active_tags = rest
+                    .replace('`', "")
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("- **Confidence:**") {
+                if let Ok(c) = rest.replace('`', "").trim().parse::<f32>() {
+                    active_conf = c;
                 }
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("- **Created:**") {
+                let ts_str = rest.replace('`', "").trim().to_string();
+                if let Ok(dt) = DateTime::parse_from_rfc3339(&ts_str) {
+                    active_created = Some(dt.with_timezone(&Utc));
+                }
+                continue;
+            }
+            if trimmed.starts_with("- **") {
+                continue;
+            }
 
-                let mut id = None;
-                let mut tags = Vec::new();
-                let mut confidence = 0.9f32;
-                let mut created_at = None;
-                let mut content_lines = Vec::new();
-
-                for line in lines {
-                    if line.starts_with("- **ID:**") {
-                        id = Some(
-                            line.trim_start_matches("- **ID:**")
-                                .replace('`', "")
-                                .trim()
-                                .to_string(),
-                        );
-                    } else if line.starts_with("- **Tags:**") {
-                        let tag_part = line.trim_start_matches("- **Tags:**").replace('`', "");
-                        tags = tag_part
+            // Memanto `memory.md` italic metadata footer:
+            // `*Confidence: 1.0 | Status: active | Created: 2026-09-21T07:07:16 | Tags: `youtube`, `transcription`*`
+            if trimmed.starts_with("*Confidence:") && trimmed.ends_with('*') {
+                let inner = trimmed.trim_matches('*');
+                for part in inner.split('|') {
+                    let p = part.trim();
+                    if let Some(c_str) = p.strip_prefix("Confidence:") {
+                        if let Ok(c) = c_str.trim().parse::<f32>() {
+                            active_conf = c;
+                        }
+                    } else if let Some(cr_str) = p.strip_prefix("Created:") {
+                        let ts = cr_str.trim();
+                        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+                            active_created = Some(dt.with_timezone(&Utc));
+                        } else if let Ok(ndt) =
+                            chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S")
+                        {
+                            active_created = Some(ndt.and_utc());
+                        }
+                    } else if let Some(t_str) = p.strip_prefix("Tags:") {
+                        active_tags = t_str
+                            .replace('`', "")
                             .split(',')
                             .map(|s| s.trim().to_string())
                             .filter(|s| !s.is_empty())
                             .collect();
-                    } else if line.starts_with("- **Confidence:**") {
-                        let conf_str = line
-                            .trim_start_matches("- **Confidence:**")
-                            .replace('`', "")
-                            .trim()
-                            .to_string();
-                        if let Ok(c) = conf_str.parse::<f32>() {
-                            confidence = c;
-                        }
-                    } else if line.starts_with("- **Created:**") {
-                        let ts_str = line
-                            .trim_start_matches("- **Created:**")
-                            .replace('`', "")
-                            .trim()
-                            .to_string();
-                        if let Ok(dt) = DateTime::parse_from_rfc3339(&ts_str) {
-                            created_at = Some(dt.with_timezone(&Utc));
-                        }
-                    } else if !line.starts_with("- **") {
-                        content_lines.push(line);
                     }
                 }
+                continue;
+            }
 
-                let content = content_lines.join("\n").trim().to_string();
-                if !content.is_empty() {
-                    candidates.push(ImportCandidate {
-                        id,
-                        category: Some(current_category),
-                        title: title_line.to_string(),
-                        content,
-                        tags,
-                        confidence,
-                        provenance: "imported:okf".to_string(),
-                        created_at,
-                    });
-                }
+            // Strip Memanto `> ` blockquote prefix from content lines
+            if let Some(quoted) = line.strip_prefix("> ") {
+                active_lines.push(quoted.to_string());
+            } else if trimmed == ">" {
+                active_lines.push(String::new());
+            } else {
+                active_lines.push(line.to_string());
             }
         }
+
+        flush_active(
+            &mut candidates,
+            current_category,
+            &mut active_title,
+            &mut active_id,
+            &mut active_tags,
+            &mut active_conf,
+            &mut active_created,
+            &mut active_lines,
+        );
 
         Ok(candidates)
     }
