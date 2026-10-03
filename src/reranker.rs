@@ -115,51 +115,38 @@ impl NeedleReranker {
         None
     }
 
-    fn get_needle_complete() -> Option<&'static std::sync::Mutex<NeedleCompleteFn>> {
-        static NEEDLE_ENGINE: std::sync::OnceLock<Option<std::sync::Mutex<NeedleCompleteFn>>> =
+    fn run_needle_query(tools_json: String, input_text: String) -> Option<String> {
+        type Req = (String, String, std::sync::mpsc::Sender<Option<String>>);
+        static NEEDLE_WORKER: std::sync::OnceLock<Option<std::sync::Mutex<std::sync::mpsc::Sender<Req>>>> =
             std::sync::OnceLock::new();
 
-        NEEDLE_ENGINE
+        let tx_mutex = NEEDLE_WORKER
             .get_or_init(|| {
                 let (lib_path, weights_path) = Self::find_needle_assets()?;
-                // Leak weights once for process lifetime in case libneedle holds a zero-copy pointer
-                let weights_data: &'static [u8] =
-                    Box::leak(std::fs::read(&weights_path).ok()?.into_boxed_slice());
-
-                let tools_schema = serde_json::json!([{
-                    "name": "extract_facts",
-                    "description": "Extract structured entities and facts from the memory",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "application": {"type": "string", "description": "Application, service, or tool name"},
-                            "port": {"type": "integer", "description": "Network port number"},
-                            "os": {"type": "string", "description": "Operating system (e.g. linux, windows, macos)"}
-                        },
-                        "required": ["application", "port", "os"]
-                    }
-                }]);
-
+                let weights_data = std::fs::read(&weights_path).ok()?;
                 let lib_cstr = CString::new(lib_path.to_string_lossy().as_bytes()).ok()?;
-                let sys_cstr = CString::new("").ok()?;
-                let tools_cstr = CString::new(tools_schema.to_string()).ok()?;
 
-                unsafe {
+                let (req_tx, req_rx) = std::sync::mpsc::channel::<Req>();
+                let (init_tx, init_rx) = std::sync::mpsc::channel::<bool>();
+
+                std::thread::spawn(move || unsafe {
                     let handle = dlopen(lib_cstr.as_ptr(), RTLD_LAZY);
                     if handle.is_null() {
-                        return None;
+                        let _ = init_tx.send(false);
+                        return;
                     }
 
-                    let load_sym = CString::new("needle_load").ok()?;
-                    let init_sym = CString::new("needle_init").ok()?;
-                    let comp_sym = CString::new("needle_complete").ok()?;
+                    let load_sym = CString::new("needle_load").unwrap();
+                    let init_sym = CString::new("needle_init").unwrap();
+                    let comp_sym = CString::new("needle_complete").unwrap();
 
                     let load_ptr = dlsym(handle, load_sym.as_ptr());
                     let init_ptr = dlsym(handle, init_sym.as_ptr());
                     let comp_ptr = dlsym(handle, comp_sym.as_ptr());
 
                     if load_ptr.is_null() || init_ptr.is_null() || comp_ptr.is_null() {
-                        return None;
+                        let _ = init_tx.send(false);
+                        return;
                     }
 
                     let needle_load: NeedleLoadFn = std::mem::transmute(load_ptr);
@@ -171,41 +158,146 @@ impl NeedleReranker {
                         weights_data.len() as u64,
                     ) < 0
                     {
-                        return None;
+                        let _ = init_tx.send(false);
+                        return;
                     }
 
-                    if needle_init(sys_cstr.as_ptr(), tools_cstr.as_ptr(), std::ptr::null()) < 0 {
-                        return None;
-                    }
+                    let _ = init_tx.send(true);
+                    let sys_cstr = CString::new("").unwrap();
+                    let mut last_tools = String::new();
 
-                    Some(std::sync::Mutex::new(needle_complete))
+                    while let Ok((tools_str, text_str, reply_tx)) = req_rx.recv() {
+                        let res = (|| -> Option<String> {
+                            if tools_str != last_tools {
+                                let tools_cstr = CString::new(tools_str.as_str()).ok()?;
+                                if needle_init(
+                                    sys_cstr.as_ptr(),
+                                    tools_cstr.as_ptr(),
+                                    std::ptr::null(),
+                                ) < 0
+                                {
+                                    return None;
+                                }
+                                last_tools = tools_str;
+                            }
+                            let text_cstr = CString::new(text_str.as_str()).ok()?;
+                            let mut out_buf = vec![0u8; 65536];
+                            let rc = needle_complete(
+                                text_cstr.as_ptr(),
+                                256,
+                                out_buf.as_mut_ptr() as *mut c_char,
+                                out_buf.len() as c_int,
+                            );
+                            if rc < 0 {
+                                return None;
+                            }
+                            Some(
+                                CStr::from_ptr(out_buf.as_ptr() as *const c_char)
+                                    .to_string_lossy()
+                                    .into_owned(),
+                            )
+                        })();
+                        let _ = reply_tx.send(res);
+                    }
+                });
+
+                if init_rx.recv().ok()? {
+                    Some(std::sync::Mutex::new(req_tx))
+                } else {
+                    None
                 }
             })
-            .as_ref()
+            .as_ref()?;
+
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        tx_mutex
+            .lock()
+            .ok()?
+            .send((tools_json, input_text, reply_tx))
+            .ok()?;
+        reply_rx.recv().ok()?
+    }
+
+    /// Use Native Needle 3 C-FFI to extract structured (content, title, category, tags) from an imported JSON or text record
+    pub fn extract_import_record_via_needle(
+        raw_input: &str,
+    ) -> Option<(String, Option<String>, Option<String>, Vec<String>)> {
+        let tools_schema = serde_json::json!([{
+            "name": "extract_memory",
+            "description": "Extract memory content, title, category, and tags from raw JSON or text",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Primary text or fact of the memory"},
+                    "title": {"type": "string", "description": "Short summary title"},
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "fact", "decision", "instruction", "preference", "learning",
+                            "goal", "commitment", "artifact", "event", "relationship",
+                            "observation", "error", "context", "password"
+                        ]
+                    },
+                    "tags": {"type": "string", "description": "Comma-separated tags"}
+                },
+                "required": ["content", "title", "category"]
+            }
+        }]);
+
+        let raw_json_str = Self::run_needle_query(tools_schema.to_string(), raw_input.to_string())?;
+
+        let envelope: serde_json::Value = serde_json::from_str(&raw_json_str).ok()?;
+        let calls = envelope
+            .get("function_calls")
+            .or_else(|| envelope.get("tool_calls"))?
+            .as_array()?;
+        let args = calls.first()?.get("arguments")?;
+
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        let title = args
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let category = args
+            .get("category")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut tags = Vec::new();
+        if let Some(t_str) = args.get("tags").and_then(|v| v.as_str()) {
+            for part in t_str.split(',') {
+                let clean = part.trim();
+                if !clean.is_empty() {
+                    tags.push(clean.to_string());
+                }
+            }
+        }
+
+        Some((content, title, category, tags))
     }
 
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
-        let comp_mutex = Self::get_needle_complete()?;
-        let needle_complete = *comp_mutex.lock().ok()?;
-        let text_cstr = CString::new(content).ok()?;
-
-        let raw_json_str = unsafe {
-            let mut out_buf = vec![0u8; 65536];
-            let rc = needle_complete(
-                text_cstr.as_ptr(),
-                512,
-                out_buf.as_mut_ptr() as *mut c_char,
-                out_buf.len() as c_int,
-            );
-            if rc < 0 {
-                return None;
+        let tools_schema = serde_json::json!([{
+            "name": "extract_facts",
+            "description": "Extract structured entities and facts from the memory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "application": {"type": "string", "description": "Application, service, or tool name"},
+                    "port": {"type": "integer", "description": "Network port number"},
+                    "os": {"type": "string", "description": "Operating system (e.g. linux, windows, macos)"}
+                },
+                "required": ["application", "port", "os"]
             }
+        }]);
 
-            CStr::from_ptr(out_buf.as_ptr() as *const c_char)
-                .to_string_lossy()
-                .into_owned()
-        };
+        let raw_json_str = Self::run_needle_query(tools_schema.to_string(), content.to_string())?;
 
         let envelope: serde_json::Value = serde_json::from_str(&raw_json_str).ok()?;
         let ungrounded_empty = envelope

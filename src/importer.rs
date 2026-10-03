@@ -134,9 +134,11 @@ fn parse_category_lenient(cat_opt: Option<&str>, content: &str) -> MemoryType {
     MemoryType::infer(content)
 }
 
-/// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Pure-Rust Heuristic
+/// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Native Needle 3 C-FFI + Pure-Rust Heuristic
 pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidate> {
     let mut heuristic_tags = Vec::new();
+    let mut needle_title: Option<String> = None;
+    let mut needle_cat: Option<String> = None;
 
     let content = get_str_field(
         val,
@@ -153,7 +155,17 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         ],
     )
     .or_else(|| {
-        // Pure-Rust heuristic fallback for arbitrary unknown keys:
+        // Tier 2: Native Needle 3 C-FFI structured extraction for arbitrary/unstructured JSON objects
+        if let Some((n_content, n_title, n_cat, n_tags)) =
+            crate::reranker::NeedleReranker::extract_import_record_via_needle(&val.to_string())
+        {
+            needle_title = n_title;
+            needle_cat = n_cat;
+            heuristic_tags = n_tags;
+            return Some(n_content);
+        }
+
+        // Tier 3: Pure-Rust heuristic fallback for arbitrary unknown keys:
         // Pick the longest descriptive string field as content, and collect short string fields as tags.
         let obj = val.as_object()?;
         let reserved = [
@@ -189,7 +201,30 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         best_content
     })?;
 
+    let mut cat_str = get_str_field(
+        val,
+        &["category", "memory_type", "type", "kind", "type_name"],
+    )
+    .or(needle_cat);
+
+    // If category was not explicitly provided in JSON and rule inference defaults to Fact,
+    // use Native Needle 3 C-FFI to extract category, title, and tags from the memory text.
+    if cat_str.is_none() && MemoryType::infer(&content) == MemoryType::Fact {
+        if let Some((_, n_title, n_cat, n_tags)) =
+            crate::reranker::NeedleReranker::extract_import_record_via_needle(&content)
+        {
+            if needle_title.is_none() {
+                needle_title = n_title;
+            }
+            cat_str = n_cat;
+            if heuristic_tags.is_empty() {
+                heuristic_tags = n_tags;
+            }
+        }
+    }
+
     let title = get_str_field(val, &["title", "name", "summary", "heading", "subject"])
+        .or(needle_title)
         .unwrap_or_else(|| {
             content
                 .lines()
@@ -200,10 +235,6 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
                 .collect()
         });
 
-    let cat_str = get_str_field(
-        val,
-        &["category", "memory_type", "type", "kind", "type_name"],
-    );
     let category = Some(parse_category_lenient(cat_str.as_deref(), &content));
 
     let mut tags = Vec::new();
