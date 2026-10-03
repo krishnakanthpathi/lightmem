@@ -25,7 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
-fastembed = "7.1.0"
+fastembed = { version = "7.1.0", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 ureq = { version = "2.10", features = ["json"] }
 regex = "1.10"
 dirs = "5.0"
