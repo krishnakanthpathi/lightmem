@@ -13,7 +13,7 @@ pub struct LightMemConfig {
 }
 
 fn default_reranker() -> String {
-    "top1".to_string()
+    "needle".to_string()
 }
 
 impl Default for LightMemConfig {

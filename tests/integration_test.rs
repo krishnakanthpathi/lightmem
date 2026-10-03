@@ -48,16 +48,16 @@ fn test_core_lifecycle() {
     assert!(fetched.is_some());
     assert_eq!(fetched.unwrap().id, mem1.id);
 
-    // 4a. Answer (Top-1 fallback)
+    // 4a. Answer (Top-1 explicit override)
     let ans = lm
-        .answer("what port does redis use?", None, None, 5, false)
+        .answer_with_reranker("what port does redis use?", None, None, 5, Some("top1"))
         .expect("answer failed");
     assert_eq!(ans.reranker_used, "top1");
     assert!(ans.selected_memory.is_some());
 
-    // 4b. Answer (Native Needle 3 C-FFI slot extraction)
+    // 4b. Answer (Default Native Needle 3 C-FFI slot extraction)
     let ans_prec = lm
-        .answer("what port does redis use?", None, None, 5, true)
+        .answer("what port does redis use?", None, None, 5, false)
         .expect("precision answer failed");
     assert_eq!(ans_prec.reranker_used, "needle-3");
     assert_eq!(ans_prec.answer, "6379");
