@@ -164,21 +164,17 @@ impl NeedleReranker {
 
                     let _ = init_tx.send(true);
                     let sys_cstr = CString::new("").unwrap();
-                    let mut last_tools = String::new();
 
                     while let Ok((tools_str, text_str, reply_tx)) = req_rx.recv() {
                         let res = (|| -> Option<String> {
-                            if tools_str != last_tools {
-                                let tools_cstr = CString::new(tools_str.as_str()).ok()?;
-                                if needle_init(
-                                    sys_cstr.as_ptr(),
-                                    tools_cstr.as_ptr(),
-                                    std::ptr::null(),
-                                ) < 0
-                                {
-                                    return None;
-                                }
-                                last_tools = tools_str;
+                            let tools_cstr = CString::new(tools_str.as_str()).ok()?;
+                            if needle_init(
+                                sys_cstr.as_ptr(),
+                                tools_cstr.as_ptr(),
+                                std::ptr::null(),
+                            ) < 0
+                            {
+                                return None;
                             }
                             let text_cstr = CString::new(text_str.as_str()).ok()?;
                             let mut out_buf = vec![0u8; 65536];

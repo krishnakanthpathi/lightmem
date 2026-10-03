@@ -91,7 +91,7 @@ impl MemoryType {
             || lower.starts_with("bug:")
             || lower.contains("panic:")
             || lower.contains("fix panic")
-            || lower.contains("panicked at")
+            || lower.contains("panicked")
             || lower.contains("segfault")
             || lower.contains("stack trace")
             || lower.contains("failed with")

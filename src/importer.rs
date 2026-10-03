@@ -155,18 +155,7 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         ],
     )
     .or_else(|| {
-        // Tier 2: Native Needle 3 C-FFI structured extraction for arbitrary/unstructured JSON objects
-        if let Some((n_content, n_title, n_cat, n_tags)) =
-            crate::reranker::NeedleReranker::extract_import_record_via_needle(&val.to_string())
-        {
-            needle_title = n_title;
-            needle_cat = n_cat;
-            heuristic_tags = n_tags;
-            return Some(n_content);
-        }
-
-        // Tier 3: Pure-Rust heuristic fallback for arbitrary unknown keys:
-        // Pick the longest descriptive string field as content, and collect short string fields as tags.
+        // Extract the primary descriptive string field verbatim as content, and collect short string fields as tags.
         let obj = val.as_object()?;
         let reserved = [
             "id", "memory_id", "uuid", "_id", "title", "name", "summary", "heading", "subject",
@@ -201,29 +190,41 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         best_content
     })?;
 
+    let explicit_title = get_str_field(val, &["title", "name", "summary", "heading", "subject"]);
     let mut cat_str = get_str_field(
         val,
         &["category", "memory_type", "type", "kind", "type_name"],
-    )
-    .or(needle_cat);
+    );
 
-    // If category was not explicitly provided in JSON and rule inference defaults to Fact,
-    // use Native Needle 3 C-FFI to extract category, title, and tags from the memory text.
-    if cat_str.is_none() && MemoryType::infer(&content) == MemoryType::Fact {
+    // Consult Native Needle 3 C-FFI when category or title is omitted on the imported JSON record
+    if cat_str.is_none() || explicit_title.is_none() {
         if let Some((_, n_title, n_cat, n_tags)) =
             crate::reranker::NeedleReranker::extract_import_record_via_needle(&content)
         {
-            if needle_title.is_none() {
-                needle_title = n_title;
-            }
-            cat_str = n_cat;
-            if heuristic_tags.is_empty() {
-                heuristic_tags = n_tags;
+            needle_title = n_title;
+            needle_cat = n_cat;
+            for t in n_tags {
+                if !heuristic_tags.contains(&t) {
+                    heuristic_tags.push(t);
+                }
             }
         }
     }
 
-    let title = get_str_field(val, &["title", "name", "summary", "heading", "subject"])
+    // Rule inference (MemoryType::infer) takes priority for unambiguous signals (password, panic, we decided, always...),
+    // and falls back to Needle 3's extracted category when rule inference defaults to Fact.
+    let inferred_rule_cat = MemoryType::infer(&content);
+    let category = if let Some(explicit_c) = cat_str.as_deref() {
+        Some(parse_category_lenient(Some(explicit_c), &content))
+    } else if inferred_rule_cat != MemoryType::Fact {
+        Some(inferred_rule_cat)
+    } else if let Some(nc) = needle_cat.as_deref() {
+        Some(parse_category_lenient(Some(nc), &content))
+    } else {
+        Some(MemoryType::Fact)
+    };
+
+    let title = explicit_title
         .or(needle_title)
         .unwrap_or_else(|| {
             content
@@ -234,8 +235,6 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
                 .take(80)
                 .collect()
         });
-
-    let category = Some(parse_category_lenient(cat_str.as_deref(), &content));
 
     let mut tags = Vec::new();
     // Check tags at root or metadata
