@@ -204,6 +204,13 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Smart-merge duplicate memories (union tags, keep max confidence & earliest created_at) and remove redundant copies
+    Dedup {
+        /// Output deduplication result as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
@@ -392,6 +399,12 @@ fn main() -> Result<()> {
             let lm = open_controller(effective_db, global)?;
             let stats = lm.stats()?;
             CliView::render_stats(&stats, lm.db_path(), json)?;
+        }
+
+        Commands::Dedup { json } => {
+            let lm = open_controller(effective_db, global)?;
+            let merged = lm.deduplicate()?;
+            CliView::render_dedup(merged, lm.db_path(), json)?;
         }
     }
 

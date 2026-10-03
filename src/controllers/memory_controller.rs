@@ -205,6 +205,11 @@ impl LightMem {
         self.storage.forget_memory(id, hard_delete)
     }
 
+    /// Scan active memories, smart-merge duplicate content (union tags, max confidence, best title, earliest created_at), and delete redundant rows
+    pub fn deduplicate(&self) -> Result<usize> {
+        self.storage.deduplicate_and_merge()
+    }
+
     /// Export memories to an OKF bundle
     pub fn export_okf(&self, target_path: Option<&Path>) -> Result<PathBuf> {
         Exporter::export_okf(&self.storage, target_path)

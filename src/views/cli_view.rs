@@ -455,6 +455,38 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_dedup(merged_count: usize, db_path: &Path, json: bool) -> Result<()> {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "merged_duplicates": merged_count,
+                    "database": db_path.display().to_string(),
+                })
+            );
+            return Ok(());
+        }
+
+        let db_str = Self::format_path(db_path);
+        if merged_count > 0 {
+            println!(
+                "{} {} {} duplicate memories (tags unioned, max confidence & earliest created_at preserved) in {}",
+                Self::crimson_bold("◈"),
+                Self::emerald_bold("Smart-merged & removed"),
+                Self::crimson_bold(&merged_count.to_string()),
+                Self::slate(&db_str)
+            );
+        } else {
+            println!(
+                "{} {} in {}",
+                Self::crimson_bold("◈"),
+                Self::white_bold("No duplicate memories found"),
+                Self::slate(&db_str)
+            );
+        }
+        Ok(())
+    }
+
     pub fn render_export(exported_path: &Path) {
         println!(
             "{} Exported OKF bundle {} {}",

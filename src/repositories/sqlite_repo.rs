@@ -131,15 +131,56 @@ impl Storage {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        let tags_str = memory.tags.join(",");
-        let expired_str = memory.expired_at.map(|dt| dt.to_rfc3339());
+        let mut merged_tags = memory.tags.clone();
+        let mut merged_conf = memory.confidence;
+        let mut merged_title = memory.title.clone();
+        let mut merged_created = memory.created_at;
 
         if memory.status == MemoryStatus::Active {
+            // Inspect existing active duplicates to smart-merge tags, confidence, title, and created_at
+            let mut dup_stmt = tx.prepare(
+                r#"
+                SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at
+                FROM memories
+                WHERE status = 'active' AND id != ?1 AND LOWER(TRIM(content)) = LOWER(TRIM(?2))
+                "#,
+            )?;
+            let dup_rows = dup_stmt.query_map(params![memory.id, memory.content], row_to_memory)?;
+            for existing in dup_rows.flatten() {
+                if existing.confidence > merged_conf {
+                    merged_conf = existing.confidence;
+                }
+                if existing.created_at < merged_created {
+                    merged_created = existing.created_at;
+                }
+                // Prefer explicit non-truncated title over auto-truncated snippet
+                let cur_is_auto = merged_title.ends_with("...")
+                    || merged_title.trim().eq_ignore_ascii_case(memory.content.trim());
+                let ext_is_auto = existing.title.ends_with("...")
+                    || existing
+                        .title
+                        .trim()
+                        .eq_ignore_ascii_case(existing.content.trim());
+                if cur_is_auto && !ext_is_auto && !existing.title.trim().is_empty() {
+                    merged_title = existing.title;
+                }
+                // Union tags (case-insensitive deduplication)
+                for t in existing.tags {
+                    if !merged_tags.iter().any(|mt| mt.eq_ignore_ascii_case(&t)) {
+                        merged_tags.push(t);
+                    }
+                }
+            }
+            drop(dup_stmt);
+
             tx.execute(
                 "DELETE FROM memories WHERE status = 'active' AND id != ?1 AND LOWER(TRIM(content)) = LOWER(TRIM(?2))",
                 params![memory.id, memory.content],
             )?;
         }
+
+        let tags_str = merged_tags.join(",");
+        let expired_str = memory.expired_at.map(|dt| dt.to_rfc3339());
 
         tx.execute(
             r#"
@@ -149,13 +190,13 @@ impl Storage {
             params![
                 memory.id,
                 memory.category.as_str(),
-                memory.title,
+                merged_title,
                 memory.content,
                 tags_str,
-                memory.confidence,
+                merged_conf,
                 memory.status.as_str(),
                 memory.provenance,
-                memory.created_at.to_rfc3339(),
+                merged_created.to_rfc3339(),
                 memory.updated_at.to_rfc3339(),
                 expired_str,
             ],
@@ -171,6 +212,88 @@ impl Storage {
 
         tx.commit()?;
         Ok(())
+    }
+
+    /// Scan all active memories, smart-merge duplicates (union tags, max confidence, best title, earliest created_at),
+    /// and delete redundant duplicate rows. Returns the number of duplicate records merged & removed.
+    pub fn deduplicate_and_merge(&self) -> Result<usize> {
+        let all_active = self.list_memories(None, Some(MemoryStatus::Active), None, 100_000)?;
+        let mut groups: std::collections::HashMap<String, Vec<MemoryRecord>> =
+            std::collections::HashMap::new();
+
+        for mem in all_active {
+            let key = mem
+                .content
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            groups.entry(key).or_default().push(mem);
+        }
+
+        let mut removed_count = 0usize;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        for (_key, mut records) in groups {
+            if records.len() <= 1 {
+                continue;
+            }
+
+            // Keep the newest record ID as primary, merging metadata from all duplicates
+            let mut primary = records.remove(0);
+            for dup in &records {
+                if dup.confidence > primary.confidence {
+                    primary.confidence = dup.confidence;
+                }
+                if dup.created_at < primary.created_at {
+                    primary.created_at = dup.created_at;
+                }
+                if dup.updated_at > primary.updated_at {
+                    primary.updated_at = dup.updated_at;
+                }
+                let pri_is_auto = primary.title.ends_with("...")
+                    || primary
+                        .title
+                        .trim()
+                        .eq_ignore_ascii_case(primary.content.trim());
+                let dup_is_auto = dup.title.ends_with("...")
+                    || dup.title.trim().eq_ignore_ascii_case(dup.content.trim());
+                if pri_is_auto && !dup_is_auto && !dup.title.trim().is_empty() {
+                    primary.title = dup.title.clone();
+                }
+                for t in &dup.tags {
+                    if !primary.tags.iter().any(|pt| pt.eq_ignore_ascii_case(t)) {
+                        primary.tags.push(t.clone());
+                    }
+                }
+            }
+
+            let tags_str = primary.tags.join(",");
+            tx.execute(
+                r#"
+                UPDATE memories
+                SET title = ?1, tags = ?2, confidence = ?3, created_at = ?4, updated_at = ?5
+                WHERE id = ?6
+                "#,
+                params![
+                    primary.title,
+                    tags_str,
+                    primary.confidence,
+                    primary.created_at.to_rfc3339(),
+                    primary.updated_at.to_rfc3339(),
+                    primary.id,
+                ],
+            )?;
+
+            for dup in records {
+                tx.execute("DELETE FROM memories WHERE id = ?1", params![dup.id])?;
+                removed_count += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(removed_count)
     }
 
     pub fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>> {

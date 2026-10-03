@@ -424,4 +424,48 @@ fn test_auto_categorization_all_14_types() {
     );
 }
 
+#[test]
+fn test_smart_merge_deduplication() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(tmp.path(), config).expect("Failed to open temp LightMem");
+
+    // 1. Insert initial record with explicit title and tags ["profile", "legal-name"]
+    let first = lm
+        .remember(
+            "The user's name is Krishna Kanth.",
+            Some(MemoryType::Fact),
+            Some("User Identity".to_string()),
+            vec!["profile".to_string(), "legal-name".to_string()],
+            Some(0.85),
+        )
+        .unwrap();
+
+    // 2. Insert duplicate content with auto-title, higher confidence (0.98), and new tag ["kk"]
+    let _second = lm
+        .remember(
+            "The user's name is Krishna Kanth.",
+            Some(MemoryType::Fact),
+            None,
+            vec!["kk".to_string(), "profile".to_string()],
+            Some(0.98),
+        )
+        .unwrap();
+
+    // Verify only 1 active record exists and its fields were smart-merged!
+    let all = lm.list(None, None, None, 10).unwrap();
+    assert_eq!(all.len(), 1, "Duplicate active record should be smart-merged into 1");
+    let merged = &all[0];
+    assert_eq!(merged.title, "User Identity", "Explicit title should be preserved over auto-title");
+    assert!((merged.confidence - 0.98).abs() < 1e-4, "Max confidence should be preserved");
+    assert_eq!(merged.created_at, first.created_at, "Earliest created_at should be preserved");
+    assert!(merged.tags.contains(&"profile".to_string()));
+    assert!(merged.tags.contains(&"legal-name".to_string()));
+    assert!(merged.tags.contains(&"kk".to_string()));
+    assert_eq!(merged.tags.len(), 3, "Tags should be unioned without duplicates");
+}
+
 
