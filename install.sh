@@ -105,4 +105,11 @@ if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-need
     curl -fL --progress-bar "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" -o "$NEEDLE_CACHE_DIR/needle3.cact" || true
 fi
 
+# 4. Pre-warm ONNX embedding model (~/.lightmem/models) so first CLI query is instant
+if [ -z "$(ls -A "$HOME/.lightmem/models" 2>/dev/null)" ]; then
+    printf "  \033[1;31m▸\033[0m Pre-downloading ONNX embedding model into ~/.lightmem/models...\n"
+    "$INSTALL_DIR/lmem" recall "init" --limit 1 --json >/dev/null || true
+    printf "  \033[1;32m◈\033[0m ONNX embedding model ready in ~/.lightmem/models\n"
+fi
+
 printf "\n\033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n"
