@@ -55,8 +55,16 @@ type NeedleInitFn = unsafe extern "C" fn(
     tools_json: *const c_char,
     tool_index_path: *const c_char,
 ) -> c_int;
-type NeedleCompleteFn = unsafe extern "C" fn(
+type NeedleCompleteV30Fn = unsafe extern "C" fn(
     text: *const c_char,
+    max_new_tokens: c_int,
+    out_buf: *mut c_char,
+    buf_len: c_int,
+) -> c_int;
+type NeedleCompleteV31Fn = unsafe extern "C" fn(
+    text: *const c_char,
+    audio_data: *const std::ffi::c_void,
+    audio_len: u64,
     max_new_tokens: c_int,
     out_buf: *mut c_char,
     buf_len: c_int,
@@ -91,7 +99,12 @@ impl NeedleReranker {
     fn find_needle_assets() -> Option<(PathBuf, PathBuf)> {
         let home = dirs::home_dir()?;
         let base_dir = home.join(".cache").join("cactus-needle").join("v3");
-        let lib_names = ["libneedle.dylib", "libneedle.so"];
+        let lib_names = [
+            "libneedle3.dylib",
+            "libneedle.dylib",
+            "libneedle3.so",
+            "libneedle.so",
+        ];
 
         // Check known version folders first, then scan any version directory inside ~/.cache/cactus-needle/v3/
         let mut candidate_dirs = vec![base_dir.join("3.1.0"), base_dir.join("3.0.1")];
@@ -139,10 +152,12 @@ impl NeedleReranker {
                     let load_sym = CString::new("needle_load").unwrap();
                     let init_sym = CString::new("needle_init").unwrap();
                     let comp_sym = CString::new("needle_complete").unwrap();
+                    let trans_sym = CString::new("needle_transcribe").unwrap();
 
                     let load_ptr = dlsym(handle, load_sym.as_ptr());
                     let init_ptr = dlsym(handle, init_sym.as_ptr());
                     let comp_ptr = dlsym(handle, comp_sym.as_ptr());
+                    let is_v31 = !dlsym(handle, trans_sym.as_ptr()).is_null();
 
                     if load_ptr.is_null() || init_ptr.is_null() || comp_ptr.is_null() {
                         let _ = init_tx.send(false);
@@ -151,7 +166,8 @@ impl NeedleReranker {
 
                     let needle_load: NeedleLoadFn = std::mem::transmute(load_ptr);
                     let needle_init: NeedleInitFn = std::mem::transmute(init_ptr);
-                    let needle_complete: NeedleCompleteFn = std::mem::transmute(comp_ptr);
+                    let needle_complete_v30: NeedleCompleteV30Fn = std::mem::transmute(comp_ptr);
+                    let needle_complete_v31: NeedleCompleteV31Fn = std::mem::transmute(comp_ptr);
 
                     if needle_load(
                         weights_data.as_ptr() as *const c_char,
@@ -178,12 +194,23 @@ impl NeedleReranker {
                             }
                             let text_cstr = CString::new(text_str.as_str()).ok()?;
                             let mut out_buf = vec![0u8; 65536];
-                            let rc = needle_complete(
-                                text_cstr.as_ptr(),
-                                256,
-                                out_buf.as_mut_ptr() as *mut c_char,
-                                out_buf.len() as c_int,
-                            );
+                            let rc = if is_v31 {
+                                needle_complete_v31(
+                                    text_cstr.as_ptr(),
+                                    std::ptr::null(),
+                                    0,
+                                    256,
+                                    out_buf.as_mut_ptr() as *mut c_char,
+                                    out_buf.len() as c_int,
+                                )
+                            } else {
+                                needle_complete_v30(
+                                    text_cstr.as_ptr(),
+                                    256,
+                                    out_buf.as_mut_ptr() as *mut c_char,
+                                    out_buf.len() as c_int,
+                                )
+                            };
                             if rc < 0 {
                                 return None;
                             }
@@ -245,8 +272,10 @@ impl NeedleReranker {
         let envelope: serde_json::Value = serde_json::from_str(&raw_json_str).ok()?;
         let calls = envelope
             .get("function_calls")
-            .or_else(|| envelope.get("tool_calls"))?
-            .as_array()?;
+            .and_then(|v| v.as_array())
+            .filter(|a| !a.is_empty())
+            .or_else(|| envelope.get("tool_calls").and_then(|v| v.as_array()).filter(|a| !a.is_empty()))
+            .or_else(|| envelope.get("suppressed_calls").and_then(|v| v.as_array()).filter(|a| !a.is_empty()))?;
         let args = calls.first()?.get("arguments")?;
 
         let content = args
@@ -334,7 +363,13 @@ impl NeedleReranker {
         let calls = envelope
             .get("function_calls")
             .and_then(|v| v.as_array())
-            .or_else(|| envelope.get("suppressed_calls").and_then(|v| v.as_array()))?;
+            .filter(|a| !a.is_empty())
+            .or_else(|| {
+                envelope
+                    .get("suppressed_calls")
+                    .and_then(|v| v.as_array())
+                    .filter(|a| !a.is_empty())
+            })?;
         let args = calls.first()?.get("arguments")?.as_object()?;
 
         if is_identity_query {
@@ -346,24 +381,13 @@ impl NeedleReranker {
             }
         }
 
-        if q_lower.contains("port") {
-            if let Some(p) = args.get("port") {
-                let s = if let Some(n) = p.as_i64() {
-                    n.to_string()
-                } else {
-                    p.as_str().unwrap_or("").to_string()
-                };
-                if !s.is_empty() && s != "0" {
-                    return Some((s, conf));
-                }
-            }
-        }
-
-        if q_lower.contains("app")
+        let asks_app = q_lower.contains("app")
             || q_lower.contains("service")
             || q_lower.contains("tool")
             || q_lower.contains("what is running")
-        {
+            || q_lower.starts_with("what runs");
+
+        if asks_app {
             if let Some(app) = args.get("application").and_then(|v| v.as_str()) {
                 if !app.trim().is_empty() {
                     return Some((app.trim().to_string(), conf));
@@ -383,14 +407,32 @@ impl NeedleReranker {
             }
         }
 
+        if q_lower.contains("port") && !asks_app {
+            if let Some(p) = args.get("port") {
+                let s = if let Some(n) = p.as_i64() {
+                    n.to_string()
+                } else {
+                    p.as_str().unwrap_or("").to_string()
+                };
+                if !s.is_empty() && s != "0" {
+                    return Some((s, conf));
+                }
+            }
+        }
+
         None
     }
 
     /// Pure-Rust regex fallback for slots (ports, URLs, tokens)
     fn extract_slot_regex(question: &str, content: &str) -> String {
         let q_lower = question.to_lowercase();
+        let asks_app = q_lower.contains("app")
+            || q_lower.contains("service")
+            || q_lower.contains("tool")
+            || q_lower.contains("what is running")
+            || q_lower.starts_with("what runs");
 
-        if q_lower.contains("port") {
+        if q_lower.contains("port") && !asks_app {
             if let Ok(re) = Regex::new(r"(?i)(?:port\s*[:=]?\s*|:)(\d{2,5})\b") {
                 if let Some(caps) = re.captures(content) {
                     if let Some(m) = caps.get(1) {
@@ -403,7 +445,7 @@ impl NeedleReranker {
         if q_lower.contains("url") || q_lower.contains("endpoint") || q_lower.contains("uri") {
             if let Ok(re) = Regex::new(r"(https?://[^\s]+|[a-zA-Z0-9+.-]+://[^\s]+)") {
                 if let Some(m) = re.find(content) {
-                    return m.as_str().to_string();
+                    return m.as_str().trim_end_matches('.').to_string();
                 }
             }
         }
@@ -414,11 +456,11 @@ impl NeedleReranker {
             || q_lower.contains("api key")
         {
             if let Ok(re) = Regex::new(
-                r"(?:=\s*|:\s*)(ghp_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|glpat-[A-Za-z0-9_-]+|[^\s]+)",
+                r"(?:is\s+|=\s*|:\s*)(whsec_[A-Za-z0-9_]+|ghp_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|glpat-[A-Za-z0-9_-]+|[^\s.]+)",
             ) {
                 if let Some(caps) = re.captures(content) {
                     if let Some(m) = caps.get(1) {
-                        return m.as_str().to_string();
+                        return m.as_str().trim_end_matches('.').to_string();
                     }
                 }
             }
@@ -443,6 +485,26 @@ impl Reranker for NeedleReranker {
             });
         }
 
+        let generic_slot_words: HashSet<&str> = [
+            "operating",
+            "system",
+            "port",
+            "application",
+            "app",
+            "service",
+            "tool",
+            "url",
+            "endpoint",
+            "run",
+            "runs",
+            "running",
+            "use",
+            "uses",
+            "used",
+        ]
+        .into_iter()
+        .collect();
+
         let q_tokens = Self::tokenize(question);
         let mut best_candidate = &candidates[0];
         let mut highest_score = f32::MIN;
@@ -455,10 +517,18 @@ impl Reranker for NeedleReranker {
                 cand.memory.tags.join(" ")
             );
             let doc_tokens = Self::tokenize(&doc_text);
-            let overlap = q_tokens.intersection(&doc_tokens).count() as f32;
+            let mut overlap_score = 0.0f32;
+            for tok in q_tokens.intersection(&doc_tokens) {
+                if generic_slot_words.contains(tok.as_str()) {
+                    overlap_score += 0.5;
+                } else {
+                    // Specific entity match (e.g. "kokoro", "qdrant", "grafana") gets strong weight
+                    overlap_score += 3.5;
+                }
+            }
 
             let rank_bonus = 1.0 / ((idx + 1) as f32);
-            let combined = (cand.score * 2.0) + (overlap * 1.5) + (rank_bonus * 0.25);
+            let combined = (cand.score * 2.0) + overlap_score + (rank_bonus * 0.25);
 
             if combined > highest_score {
                 highest_score = combined;

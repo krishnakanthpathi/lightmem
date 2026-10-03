@@ -195,7 +195,13 @@ fi
 if [ ! -f "$NEEDLE_CACHE_DIR/$NEEDLE_LIB" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/$NEEDLE_LIB" ]; then
     mkdir -p "$NEEDLE_CACHE_DIR"
     if download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" "$TMP_DIR/needle.whl" "Downloading Needle 3 C-FFI runtime (${NEEDLE_LIB})" 530108; then
-        unzip -q -j "$TMP_DIR/needle.whl" "needle/${NEEDLE_LIB}" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
+        unzip -q -j "$TMP_DIR/needle.whl" "needle/*" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
+        if [ -f "$NEEDLE_CACHE_DIR/libneedle3.dylib" ]; then
+            cp "$NEEDLE_CACHE_DIR/libneedle3.dylib" "$NEEDLE_CACHE_DIR/libneedle.dylib"
+        fi
+        if [ -f "$NEEDLE_CACHE_DIR/libneedle3.so" ]; then
+            cp "$NEEDLE_CACHE_DIR/libneedle3.so" "$NEEDLE_CACHE_DIR/libneedle.so"
+        fi
     fi
 fi
 
