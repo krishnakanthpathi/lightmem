@@ -74,6 +74,10 @@ enum Commands {
         #[arg(long)]
         min_similarity: Option<f32>,
 
+        /// Toggle: Run Needle 3 precision reranker & factual slot extraction on recalled memories
+        #[arg(long, alias = "needle")]
+        precision: bool,
+
         /// Output results as JSON for agent consumption
         #[arg(long)]
         json: bool,
@@ -263,14 +267,20 @@ fn main() -> Result<()> {
             as_of,
             limit,
             min_similarity,
+            precision,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
-            let results = lm.recall(&query, cat, as_of_dt, limit, min_similarity)?;
-            CliView::render_recall(&query, &results, lm.db_path(), json)?;
+            if precision {
+                let result = lm.answer_with_reranker(&query, cat, as_of_dt, limit, Some("needle"))?;
+                CliView::render_answer(&result, json)?;
+            } else {
+                let results = lm.recall(&query, cat, as_of_dt, limit, min_similarity)?;
+                CliView::render_recall(&query, &results, lm.db_path(), json)?;
+            }
         }
 
         Commands::List {

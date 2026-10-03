@@ -17,15 +17,19 @@ case "$OS" in
     Darwin)
         OS_TARGET="apple-darwin"
         NEEDLE_LIB="libneedle.dylib"
-        NEEDLE_WHL_PATTERN="macosx[^\"]*arm64\.whl"
+        if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-macosx_11_0_arm64.whl"
+        else
+            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-macosx_11_0_x86_64.whl"
+        fi
         ;;
     Linux)
         OS_TARGET="unknown-linux-gnu"
         NEEDLE_LIB="libneedle.so"
         if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-            NEEDLE_WHL_PATTERN="manylinux[^\"]*aarch64\.whl"
+            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-manylinux2014_aarch64.whl"
         else
-            NEEDLE_WHL_PATTERN="manylinux[^\"]*x86_64\.whl"
+            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-manylinux2014_x86_64.whl"
         fi
         ;;
     *)
@@ -50,7 +54,7 @@ esac
 TARGET="${ARCH_TARGET}-${OS_TARGET}"
 mkdir -p "$INSTALL_DIR"
 
-# 1. Try downloading pre-built binary from GitHub Releases first (instant ~1s install, zero compilation)
+# 1. Download pre-built binary from GitHub Releases (instant ~1s install, zero compilation)
 RELEASE_URL="https://github.com/${REPO}/releases/latest/download/lmem-${TARGET}.tar.gz"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -71,7 +75,7 @@ if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
     fi
 fi
 
-# 2. Fallback to cargo install --git --locked if no pre-built release tarball is available yet
+# 2. Fallback to cargo install --git --locked if no pre-built release tarball is available
 if [ "$INSTALLED_BIN" -eq 0 ]; then
     printf "  \033[1;33m▸\033[0m No pre-built release found for %s; building from source via Cargo...\n" "$TARGET"
     if ! command -v cargo >/dev/null 2>&1; then
@@ -86,20 +90,17 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
     printf "  \033[1;32m◈\033[0m Built and installed lmem binary!\n"
 fi
 
-# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact) with visible progress bar
+# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact)
 if [ ! -f "$NEEDLE_CACHE_DIR/$NEEDLE_LIB" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/$NEEDLE_LIB" ]; then
     printf "  \033[1;31m▸\033[0m Downloading Native Needle 3 C-FFI runtime (%s)...\n" "$NEEDLE_LIB"
     mkdir -p "$NEEDLE_CACHE_DIR"
-    WHL_NAME="$(curl -fsSL https://huggingface.co/api/models/Cactus-Compute/needle3/tree/main/python 2>/dev/null | grep -oE "cactus_needle-[^\"]*${NEEDLE_WHL_PATTERN}" | head -n 1 || true)"
-    if [ -n "$WHL_NAME" ]; then
-        if curl -fL --progress-bar "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${WHL_NAME}" -o "$TMP_DIR/needle.whl"; then
-            unzip -q -j "$TMP_DIR/needle.whl" "needle/${NEEDLE_LIB}" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
-        fi
+    if curl -fL --progress-bar "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" -o "$TMP_DIR/needle.whl"; then
+        unzip -q -j "$TMP_DIR/needle.whl" "needle/${NEEDLE_LIB}" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
     fi
 fi
 
 if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/needle3.cact" ]; then
-    printf "  \033[1;31m▸\033[0m Downloading Needle 3 model weights (needle3.cact ~260 MB, one-time)...\n"
+    printf "  \033[1;31m▸\033[0m Downloading Needle 3 model weights (needle3.cact ~34 MB, one-time)...\n"
     mkdir -p "$NEEDLE_CACHE_DIR"
     curl -fL --progress-bar "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" -o "$NEEDLE_CACHE_DIR/needle3.cact" || true
 fi
