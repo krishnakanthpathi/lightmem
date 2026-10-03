@@ -5,33 +5,42 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
+VERSION="v0.1.0"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 NEEDLE_CACHE_DIR="$HOME/.cache/cactus-needle/v3/3.1.0"
 
 printf "\033[1;31m❖\033[0m \033[1;37mInstalling LightMem (lmem)...\033[0m\n"
 
-# Unbuffered live percentage downloader (polls actual bytes written on disk every 0.2s)
+# Unbuffered live percentage downloader (polls actual bytes written on disk every 0.15s)
 download_with_pct() {
     url="$1"
     dest="$2"
     label="$3"
     expected_bytes="${4:-12500000}"
     rm -f "$dest"
-    printf "  \033[1;31m▸\033[0m %s... \033[1;31m0%%\033[0m" "$label"
+    printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$label"
 
-    curl -fsSL "$url" -o "$dest" 2>/dev/null &
+    curl -fsSL --happy-eyeballs-timeout-ms 200 --connect-timeout 3 "$url" -o "$dest" 2>/dev/null &
     dl_pid=$!
 
+    warmup_pct=1
     while kill -0 "$dl_pid" 2>/dev/null; do
         if [ -f "$dest" ]; then
             cur_bytes="$(wc -c < "$dest" 2>/dev/null | tr -d ' ')"
-            if [ -n "$cur_bytes" ] && [ "$expected_bytes" -gt 0 ]; then
+            if [ -n "$cur_bytes" ] && [ "$cur_bytes" -gt 0 ] && [ "$expected_bytes" -gt 0 ]; then
                 pct=$(( cur_bytes * 100 / expected_bytes ))
+                if [ "$pct" -lt "$warmup_pct" ]; then pct="$warmup_pct"; fi
                 if [ "$pct" -gt 99 ]; then pct=99; fi
                 printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$pct"
             fi
+        else
+            # Smoothly advance 1%..5% during TLS / CDN redirect handshake so UI never freezes at 0%
+            if [ "$warmup_pct" -lt 5 ]; then
+                warmup_pct=$(( warmup_pct + 1 ))
+                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$warmup_pct"
+            fi
         fi
-        sleep 0.2
+        sleep 0.15
     done
 
     if wait "$dl_pid" && [ -s "$dest" ]; then
@@ -87,8 +96,8 @@ esac
 TARGET="${ARCH_TARGET}-${OS_TARGET}"
 mkdir -p "$INSTALL_DIR"
 
-# 1. Download pre-built binary from GitHub Releases with unbuffered percentage progress
-RELEASE_URL="https://github.com/${REPO}/releases/latest/download/lmem-${TARGET}.tar.gz"
+# 1. Download pre-built binary from GitHub Releases (direct tag URL skips extra 302 redirect)
+RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}/lmem-${TARGET}.tar.gz"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -136,7 +145,7 @@ fi
 
 # 4. Pre-warm ONNX embedding model (~/.lightmem/models) with unbuffered percentage progress
 ONNX_LABEL="Verifying ONNX embedding model"
-printf "  \033[1;31m▸\033[0m %s... \033[1;31m0%%\033[0m" "$ONNX_LABEL"
+printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$ONNX_LABEL"
 "$INSTALL_DIR/lmem" recall "init" --limit 1 --json >/dev/null 2>&1 &
 onnx_pid=$!
 while kill -0 "$onnx_pid" 2>/dev/null; do
@@ -144,11 +153,12 @@ while kill -0 "$onnx_pid" 2>/dev/null; do
         cur_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
         if [ -n "$cur_kb" ]; then
             pct=$(( cur_kb * 100 / 130000 ))
+            if [ "$pct" -lt 1 ]; then pct=1; fi
             if [ "$pct" -gt 99 ]; then pct=99; fi
             printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$ONNX_LABEL" "$pct"
         fi
     fi
-    sleep 0.2
+    sleep 0.15
 done
 wait "$onnx_pid" || true
 printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$ONNX_LABEL"
