@@ -9,7 +9,72 @@ VERSION="v0.1.0"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 NEEDLE_CACHE_DIR="$HOME/.cache/cactus-needle/v3/3.1.0"
 
-printf "\033[1;31m❖\033[0m \033[1;37mInstalling LightMem (lmem)...\033[0m\n"
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+# Render 24-bit TrueColor Crimson Cloud Logo + Installer Header
+awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" 'BEGIN {
+    m[0]  = "                     WWWWWW           ";
+    m[1]  = "                   WWWRRRRWWW         ";
+    m[2]  = "                  WRRRRRRRRRWW        ";
+    m[3]  = "              WWWWRRRRRRRRRRRWWW      ";
+    m[4]  = "             WWRRWRRRRRWWRRRRWWWWWW   ";
+    m[5]  = "            WRRRWWRRRRRRWRRRRRRRRRWW  ";
+    m[6]  = "           WWRRRWWRRRRRRWRRRRRRRRRRWW ";
+    m[7]  = "           WRRRRRWRRRRRRWRRRRRRRRRRRW ";
+    m[8]  = "           WRRRRRRWWWRWWWRRRRRRRRRRRWW";
+    m[9]  = "        WWWWRRRRRRRRWWWRRRRRRRRRRRRRRW";
+    m[10] = "W      WWRRRRRRRRRRRRRRRRRRRRRRRRRRRRW";
+    m[11] = "WWW  WWRRRRRRRRRRRRRRRRRRRRWWWWRRRRRRW";
+    m[12] = "WWWWWWRRRRRRRRRRRRRRRRRRRRWWRRRRRRRRWW";
+    m[13] = " WRRRRRRRRRRRRRRRRRRRRRRRRWRRRRRRRRRW ";
+    m[14] = " WWRRRRRRRRWWWWWRRRRRRRRRRWRRRRRRRRWW ";
+    m[15] = "  WRRRRRRRWRRRRWWRRRRRRRRRWWRRRRRRWW  ";
+    m[16] = "   WRRRRRWRRRRRRWRRRRRRRRRRWWRRRRWW   ";
+    m[17] = "    WRRRRWRRRRRRRRRRRRRRRRRRWWWWWW    ";
+    m[18] = "     WWWWWWRRRRRRRRRRRRRRRRRRW        ";
+    m[19] = "          WRRRRRRRRWRRRRRRRRW         ";
+    m[20] = "          WWRRRRRWWWWWRRRWWW          ";
+    m[21] = "            WWWWWW   WWWWW            ";
+
+    r[0]  = "";
+    r[1]  = "\033[1;38;2;220;38;38m❖\033[0m  \033[1;38;2;248;250;252mL I G H T M E M\033[0m  \033[38;2;113;113;122m" ver "\033[0m";
+    r[2]  = "\033[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m";
+    r[3]  = "\033[1;38;2;220;38;38m▸\033[0m \033[38;2;228;228;231mUniversal Standalone Installer\033[0m";
+    r[4]  = "  \033[38;2;113;113;122m◫ Target     \033[1;38;2;248;250;252m" os " (" arch ")\033[0m";
+    r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38mneedle-3 FFI\033[0m";
+    r[6]  = "  \033[38;2;113;113;122m✦ Storage    \033[38;2;212;212;216mSQLite WAL + FTS5 + Vector\033[0m";
+    r[7]  = "\033[38;2;113;113;122m────────────────────────────────────────────────\033[0m";
+    r[8]  = "";
+    r[9]  = "";
+    r[10] = "";
+
+    printf "\n";
+    for (p = 0; p < 11; p++) {
+        top = m[p*2];
+        bot = m[p*2+1];
+        line = "  ";
+        for (x = 1; x <= 38; x++) {
+            tc = substr(top, x, 1);
+            bc = substr(bot, x, 1);
+            t_rgb = (tc == "W") ? "248;250;252" : ((tc == "R") ? "204;36;36" : "");
+            b_rgb = (bc == "W") ? "248;250;252" : ((bc == "R") ? "204;36;36" : "");
+            if (t_rgb == "" && b_rgb == "") {
+                line = line " ";
+            } else if (t_rgb != "" && b_rgb == "") {
+                line = line "\033[38;2;" t_rgb "m▀\033[0m";
+            } else if (t_rgb == "" && b_rgb != "") {
+                line = line "\033[38;2;" b_rgb "m▄\033[0m";
+            } else if (t_rgb == b_rgb) {
+                line = line "\033[38;2;" t_rgb "m█\033[0m";
+            } else {
+                line = line "\033[38;2;" t_rgb ";48;2;" b_rgb "m▀\033[0m";
+            }
+        }
+        printf "%s   %s\n", line, r[p];
+    }
+    printf "\n";
+}'
 
 # Unbuffered live percentage downloader (polls actual bytes written on disk every 0.15s)
 download_with_pct() {
@@ -34,7 +99,6 @@ download_with_pct() {
                 printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$pct"
             fi
         else
-            # Smoothly advance 1%..5% during TLS / CDN redirect handshake so UI never freezes at 0%
             if [ "$warmup_pct" -lt 5 ]; then
                 warmup_pct=$(( warmup_pct + 1 ))
                 printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$warmup_pct"
@@ -51,9 +115,6 @@ download_with_pct() {
         return 1
     fi
 }
-
-OS="$(uname -s)"
-ARCH="$(uname -m)"
 
 case "$OS" in
     Darwin)
@@ -96,7 +157,7 @@ esac
 TARGET="${ARCH_TARGET}-${OS_TARGET}"
 mkdir -p "$INSTALL_DIR"
 
-# 1. Download pre-built binary from GitHub Releases (direct tag URL skips extra 302 redirect)
+# 1. Download pre-built binary from GitHub Releases
 RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}/lmem-${TARGET}.tar.gz"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -130,7 +191,7 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
     printf "  \033[1;32m◈\033[0m Built and installed lmem binary... \033[1;32m100%%\033[0m\n"
 fi
 
-# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact) with unbuffered percentage progress
+# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact)
 if [ ! -f "$NEEDLE_CACHE_DIR/$NEEDLE_LIB" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/$NEEDLE_LIB" ]; then
     mkdir -p "$NEEDLE_CACHE_DIR"
     if download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" "$TMP_DIR/needle.whl" "Downloading Needle 3 C-FFI runtime (${NEEDLE_LIB})" 530108; then
@@ -143,7 +204,7 @@ if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-need
     download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" "$NEEDLE_CACHE_DIR/needle3.cact" "Downloading Needle 3 model weights (needle3.cact)" 35500000 || true
 fi
 
-# 4. Pre-warm ONNX embedding model (~/.lightmem/models) with unbuffered percentage progress
+# 4. Pre-warm ONNX embedding model (~/.lightmem/models)
 ONNX_LABEL="Verifying ONNX embedding model"
 printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$ONNX_LABEL"
 "$INSTALL_DIR/lmem" recall "init" --limit 1 --json >/dev/null 2>&1 &
@@ -163,4 +224,4 @@ done
 wait "$onnx_pid" || true
 printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$ONNX_LABEL"
 
-printf "\n\033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n"
+printf "\n  \033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n\n"
