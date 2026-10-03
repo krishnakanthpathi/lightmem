@@ -10,6 +10,29 @@ NEEDLE_CACHE_DIR="$HOME/.cache/cactus-needle/v3/3.1.0"
 
 printf "\033[1;31m❖\033[0m \033[1;37mInstalling LightMem (lmem)...\033[0m\n"
 
+# Single-line live percentage downloader (0% -> 100%)
+download_with_pct() {
+    url="$1"
+    dest="$2"
+    label="$3"
+    rm -f "$dest"
+    printf "  \033[1;31m▸\033[0m %s... \033[1;31m0%%\033[0m" "$label"
+    curl -fL "$url" -o "$dest" 2>&1 | tr '\r' '\n' | awk -v label="$label" '
+        /^[[:space:]]*[0-9]+/ {
+            if ($2 != "0" && $1 ~ /^[0-9]+$/) {
+                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%s%%\033[0m   ", label, $1;
+            }
+        }
+    '
+    if [ -s "$dest" ]; then
+        printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$label"
+        return 0
+    else
+        printf "\r  \033[1;33m▸\033[0m %s... unavailable\n" "$label"
+        return 1
+    fi
+}
+
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
@@ -54,15 +77,14 @@ esac
 TARGET="${ARCH_TARGET}-${OS_TARGET}"
 mkdir -p "$INSTALL_DIR"
 
-# 1. Download pre-built binary from GitHub Releases (instant ~1s install, zero compilation)
+# 1. Download pre-built binary from GitHub Releases with percentage progress
 RELEASE_URL="https://github.com/${REPO}/releases/latest/download/lmem-${TARGET}.tar.gz"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 INSTALLED_BIN=0
 if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
-    printf "  \033[1;31m▸\033[0m Downloading pre-built binary (%s)...\n" "$TARGET"
-    if curl -fL --progress-bar "$RELEASE_URL" -o "$TMP_DIR/lmem.tar.gz"; then
+    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})"; then
         tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR"
         mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem"
         chmod +x "$INSTALL_DIR/lmem"
@@ -71,15 +93,14 @@ if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
             chmod +x "$HOME/.cargo/bin/lmem"
         fi
         INSTALLED_BIN=1
-        printf "  \033[1;32m◈\033[0m Installed pre-built lmem to %s/lmem\n" "$INSTALL_DIR"
     fi
 fi
 
 # 2. Fallback to cargo install --git --locked if no pre-built release tarball is available
 if [ "$INSTALLED_BIN" -eq 0 ]; then
-    printf "  \033[1;33m▸\033[0m No pre-built release found for %s; building from source via Cargo...\n" "$TARGET"
+    printf "  \033[1;33m▸\033[0m Building from source via Cargo...\n"
     if ! command -v cargo >/dev/null 2>&1; then
-        printf "  \033[1;31m▸\033[0m Rust/Cargo not found. Installing rustup toolchain...\n"
+        printf "  \033[1;31m▸\033[0m Installing rustup toolchain...\n"
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
@@ -87,27 +108,40 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
     if [ -f "$HOME/.cargo/bin/lmem" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
         cp "$HOME/.cargo/bin/lmem" "$INSTALL_DIR/lmem"
     fi
-    printf "  \033[1;32m◈\033[0m Built and installed lmem binary!\n"
+    printf "  \033[1;32m◈\033[0m Built and installed lmem binary... \033[1;32m100%%\033[0m\n"
 fi
 
-# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact)
+# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact) with percentage progress
 if [ ! -f "$NEEDLE_CACHE_DIR/$NEEDLE_LIB" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/$NEEDLE_LIB" ]; then
-    printf "  \033[1;31m▸\033[0m Downloading Native Needle 3 C-FFI runtime (%s)...\n" "$NEEDLE_LIB"
     mkdir -p "$NEEDLE_CACHE_DIR"
-    if curl -fL --progress-bar "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" -o "$TMP_DIR/needle.whl"; then
+    if download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" "$TMP_DIR/needle.whl" "Downloading Needle 3 C-FFI runtime (${NEEDLE_LIB})"; then
         unzip -q -j "$TMP_DIR/needle.whl" "needle/${NEEDLE_LIB}" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
     fi
 fi
 
 if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/needle3.cact" ]; then
-    printf "  \033[1;31m▸\033[0m Downloading Needle 3 model weights (needle3.cact ~34 MB, one-time)...\n"
     mkdir -p "$NEEDLE_CACHE_DIR"
-    curl -fL --progress-bar "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" -o "$NEEDLE_CACHE_DIR/needle3.cact" || true
+    download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" "$NEEDLE_CACHE_DIR/needle3.cact" "Downloading Needle 3 model weights (needle3.cact)" || true
 fi
 
-# 4. Pre-warm ONNX embedding model (~/.lightmem/models) so first CLI query is instant
-printf "  \033[1;31m▸\033[0m Verifying ONNX embedding model in ~/.lightmem/models...\n"
-"$INSTALL_DIR/lmem" recall "init" --limit 1 --json >/dev/null || true
-printf "  \033[1;32m◈\033[0m ONNX embedding model ready in ~/.lightmem/models\n"
+# 4. Pre-warm ONNX embedding model (~/.lightmem/models) with percentage progress
+ONNX_LABEL="Verifying ONNX embedding model"
+printf "  \033[1;31m▸\033[0m %s... \033[1;31m0%%\033[0m" "$ONNX_LABEL"
+"$INSTALL_DIR/lmem" recall "init" --limit 1 --json 2>&1 >/dev/null | tr '\r' '\n' | awk -v label="$ONNX_LABEL" '
+    /MiB\// {
+        if (match($0, /[0-9.]+\s*MiB\/[0-9.]+\s*MiB/)) {
+            s = substr($0, RSTART, RLENGTH);
+            split(s, parts, "/");
+            cur = parts[1] + 0;
+            tot = parts[2] + 0;
+            if (tot > 0) {
+                pct = int((cur / tot) * 100);
+                if (pct > 100) pct = 100;
+                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   ", label, pct;
+            }
+        }
+    }
+' || true
+printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$ONNX_LABEL"
 
 printf "\n\033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n"
