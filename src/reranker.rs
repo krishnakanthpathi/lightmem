@@ -91,21 +91,24 @@ impl NeedleReranker {
     fn find_needle_assets() -> Option<(PathBuf, PathBuf)> {
         let home = dirs::home_dir()?;
         let base_dir = home.join(".cache").join("cactus-needle").join("v3");
-        let v301 = base_dir.join("3.0.1");
-        let lib_path = v301.join("libneedle.dylib");
-        let weights_path = v301.join("needle3.cact");
-        if lib_path.exists() && weights_path.exists() {
-            return Some((lib_path, weights_path));
-        }
+        let lib_names = ["libneedle.dylib", "libneedle.so"];
 
-        // Scan any version directory inside ~/.cache/cactus-needle/v3/
+        // Check known version folders first, then scan any version directory inside ~/.cache/cactus-needle/v3/
+        let mut candidate_dirs = vec![base_dir.join("3.1.0"), base_dir.join("3.0.1")];
         if let Ok(entries) = std::fs::read_dir(&base_dir) {
             for entry in entries.flatten() {
-                let p = entry.path();
-                let l = p.join("libneedle.dylib");
-                let w = p.join("needle3.cact");
-                if l.exists() && w.exists() {
-                    return Some((l, w));
+                candidate_dirs.push(entry.path());
+            }
+        }
+
+        for dir in candidate_dirs {
+            let w = dir.join("needle3.cact");
+            if w.exists() {
+                for lib_name in &lib_names {
+                    let l = dir.join(lib_name);
+                    if l.exists() {
+                        return Some((l, w));
+                    }
                 }
             }
         }
