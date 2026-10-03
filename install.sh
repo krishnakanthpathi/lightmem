@@ -62,7 +62,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 INSTALLED_BIN=0
 if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
     printf "  \033[1;31m▸\033[0m Downloading pre-built binary (%s)...\n" "$TARGET"
-    if curl -fL --progress-bar "$RELEASE_URL" -o "$TMP_DIR/lmem.tar.gz" 2>/dev/null; then
+    if curl -fL --progress-bar "$RELEASE_URL" -o "$TMP_DIR/lmem.tar.gz"; then
         tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR"
         mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem"
         chmod +x "$INSTALL_DIR/lmem"
