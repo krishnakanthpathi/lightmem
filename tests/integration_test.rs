@@ -251,3 +251,85 @@ fn test_universal_json_importers() {
     let stats = lm.stats().unwrap();
     assert_eq!(stats.total_memories, 7);
 }
+
+#[test]
+fn test_pagination_and_counts() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("pagination_test.db");
+
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(&db_path, config).expect("Failed to open LightMem");
+
+    // Store 7 memories across two categories
+    for i in 1..=5 {
+        lm.remember(
+            &format!("Fact memory item {}", i),
+            Some(MemoryType::Fact),
+            Some(format!("Fact {}", i)),
+            vec!["fact".to_string()],
+            Some(0.9),
+        )
+        .unwrap();
+    }
+    for i in 1..=2 {
+        lm.remember(
+            &format!("Decision memory item {}", i),
+            Some(MemoryType::Decision),
+            Some(format!("Decision {}", i)),
+            vec!["decision".to_string()],
+            Some(0.95),
+        )
+        .unwrap();
+    }
+
+    // 1. Total count & filtered count
+    assert_eq!(lm.count(None, Some(MemoryStatus::Active), None).unwrap(), 7);
+    assert_eq!(
+        lm.count(Some(MemoryType::Fact), Some(MemoryStatus::Active), None)
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        lm.count(Some(MemoryType::Decision), Some(MemoryStatus::Active), None)
+            .unwrap(),
+        2
+    );
+
+    // 2. Offset pagination (limit = 3, offset = 0 -> 3 items, page 1/3, has_more = true)
+    let page1 = lm
+        .list_paginated(None, Some(MemoryStatus::Active), None, 3, 0)
+        .unwrap();
+    assert_eq!(page1.total, 7);
+    assert_eq!(page1.items.len(), 3);
+    assert_eq!(page1.offset, 0);
+    assert_eq!(page1.page, 1);
+    assert_eq!(page1.total_pages, 3);
+    assert!(page1.has_more);
+
+    // 3. Page 2 via list_page (page = 2, per_page = 3 -> offset 3, 3 items, has_more = true)
+    let page2 = lm
+        .list_page(None, Some(MemoryStatus::Active), None, 2, 3)
+        .unwrap();
+    assert_eq!(page2.total, 7);
+    assert_eq!(page2.items.len(), 3);
+    assert_eq!(page2.offset, 3);
+    assert_eq!(page2.page, 2);
+    assert_eq!(page2.total_pages, 3);
+    assert!(page2.has_more);
+    assert_ne!(page1.items[0].id, page2.items[0].id);
+
+    // 4. Page 3 via list_page (page = 3, per_page = 3 -> offset 6, 1 item, has_more = false)
+    let page3 = lm
+        .list_page(None, Some(MemoryStatus::Active), None, 3, 3)
+        .unwrap();
+    assert_eq!(page3.total, 7);
+    assert_eq!(page3.items.len(), 1);
+    assert_eq!(page3.offset, 6);
+    assert_eq!(page3.page, 3);
+    assert_eq!(page3.total_pages, 3);
+    assert!(!page3.has_more);
+}
+

@@ -18,7 +18,7 @@ pub use embeddings::{
 };
 pub use exporter::Exporter;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
-pub use models::{MemoryRecord, MemoryStatus, MemoryType, ScoredMemory};
+pub use models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory};
 pub use reranker::{AnswerResult, PrecisionReranker, Reranker, Top1Reranker};
 pub use search::HybridSearchEngine;
 pub use storage::{Storage, StorageStats};
@@ -140,6 +140,44 @@ impl LightMem {
             limit,
             min_similarity,
         )
+    }
+
+    /// Count total memories matching optional filters
+    pub fn count(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<usize> {
+        self.storage.count_memories(category, status, as_of)
+    }
+
+    /// List memories with pagination (limit + offset) and total metadata
+    pub fn list_paginated(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
+        self.storage
+            .list_memories_paginated(category, status, as_of, limit, offset)
+    }
+
+    /// List memories by 1-indexed page number and page size
+    pub fn list_page(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        page: usize,
+        per_page: usize,
+    ) -> Result<PaginatedMemories> {
+        let per_page_clean = per_page.max(1);
+        let offset = page.saturating_sub(1) * per_page_clean;
+        self.storage
+            .list_memories_paginated(category, status, as_of, per_page_clean, offset)
     }
 
     /// List memories with optional filtering

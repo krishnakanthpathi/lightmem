@@ -1,4 +1,4 @@
-use crate::models::{MemoryRecord, MemoryStatus, MemoryType};
+use crate::models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -223,13 +223,50 @@ impl Storage {
         }
     }
 
-    pub fn list_memories(
+    pub fn count_memories(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut query = String::from("SELECT COUNT(*) FROM memories WHERE 1=1");
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(cat) = category {
+            params_vec.push(Box::new(cat.as_str().to_string()));
+            query.push_str(&format!(" AND category = ?{}", params_vec.len()));
+        }
+
+        if let Some(as_of_dt) = as_of {
+            let as_of_str = as_of_dt.to_rfc3339();
+            params_vec.push(Box::new(as_of_str.clone()));
+            query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
+            params_vec.push(Box::new(as_of_str));
+            query.push_str(&format!(
+                " AND (expired_at IS NULL OR expired_at > ?{})",
+                params_vec.len()
+            ));
+        } else if let Some(st) = status {
+            params_vec.push(Box::new(st.as_str().to_string()));
+            query.push_str(&format!(" AND status = ?{}", params_vec.len()));
+        }
+
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let total: i64 = conn.query_row(&query, param_refs.as_slice(), |r| r.get(0))?;
+        Ok(total as usize)
+    }
+
+    pub fn list_memories_paginated(
         &self,
         category: Option<MemoryType>,
         status: Option<MemoryStatus>,
         as_of: Option<DateTime<Utc>>,
         limit: usize,
-    ) -> Result<Vec<MemoryRecord>> {
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
+        let total = self.count_memories(category, status, as_of)?;
+
         let conn = self.conn.lock().unwrap();
         let mut query = String::from(
             "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE 1=1"
@@ -261,17 +298,54 @@ impl Storage {
         if limit > 0 {
             params_vec.push(Box::new(limit as i64));
             query.push_str(&format!(" LIMIT ?{}", params_vec.len()));
+            params_vec.push(Box::new(offset as i64));
+            query.push_str(&format!(" OFFSET ?{}", params_vec.len()));
+        } else if offset > 0 {
+            params_vec.push(Box::new(-1i64));
+            query.push_str(&format!(" LIMIT ?{}", params_vec.len()));
+            params_vec.push(Box::new(offset as i64));
+            query.push_str(&format!(" OFFSET ?{}", params_vec.len()));
         }
 
         let mut stmt = conn.prepare(&query)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(param_refs.as_slice(), row_to_memory)?;
 
-        let mut results = Vec::new();
+        let mut items = Vec::new();
         for r in rows {
-            results.push(r?);
+            items.push(r?);
         }
-        Ok(results)
+
+        let effective_limit = if limit == 0 { total.max(1) } else { limit };
+        let page = (offset / effective_limit) + 1;
+        let total_pages = if total == 0 {
+            1
+        } else {
+            total.div_ceil(effective_limit)
+        };
+        let has_more = offset + items.len() < total;
+
+        Ok(PaginatedMemories {
+            items,
+            total,
+            limit,
+            offset,
+            page,
+            total_pages,
+            has_more,
+        })
+    }
+
+    pub fn list_memories(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>> {
+        Ok(self
+            .list_memories_paginated(category, status, as_of, limit, 0)?
+            .items)
     }
 
     pub fn search_bm25(

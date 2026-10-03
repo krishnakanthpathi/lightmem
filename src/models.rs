@@ -187,3 +187,15 @@ pub struct ScoredMemory {
     pub bm25_rank: Option<usize>,
     pub vector_rank: Option<usize>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedMemories {
+    pub items: Vec<MemoryRecord>,
+    pub total: usize,
+    pub limit: usize,
+    pub offset: usize,
+    pub page: usize,
+    pub total_pages: usize,
+    pub has_more: bool,
+}
+

@@ -76,7 +76,7 @@ enum Commands {
         json: bool,
     },
 
-    /// List memories chronologically
+    /// List memories chronologically with pagination (limit, offset, page, total)
     List {
         /// Filter by category
         #[arg(short = 't', long = "type")]
@@ -90,11 +90,19 @@ enum Commands {
         #[arg(long)]
         as_of: Option<String>,
 
-        /// Max results
+        /// Max results per page
         #[arg(short = 'l', long, default_value = "20")]
         limit: usize,
 
-        /// Output list as JSON
+        /// Number of records to skip (0-indexed offset)
+        #[arg(long, default_value = "0")]
+        offset: usize,
+
+        /// Page number (1-indexed; overrides --offset if specified)
+        #[arg(short = 'p', long)]
+        page: Option<usize>,
+
+        /// Output paginated result as JSON (includes total, limit, offset, page, total_pages, has_more, items)
         #[arg(long)]
         json: bool,
     },
@@ -327,6 +335,8 @@ fn main() -> Result<()> {
             status,
             as_of,
             limit,
+            offset,
+            page,
             json,
         } => {
             let lm = open_engine(effective_db, global)?;
@@ -334,34 +344,50 @@ fn main() -> Result<()> {
             let st = status.parse::<MemoryStatus>().ok();
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
-            let memories = lm.list(cat, st, as_of_dt, limit)?;
+            let paginated = if let Some(p) = page {
+                lm.list_page(cat, st, as_of_dt, p, limit)?
+            } else {
+                lm.list_paginated(cat, st, as_of_dt, limit, offset)?
+            };
 
             if json {
-                println!("{}", serde_json::to_string_pretty(&memories)?);
+                println!("{}", serde_json::to_string_pretty(&paginated)?);
                 return Ok(());
             }
 
-            if memories.is_empty() {
-                println!("{}", "No memories found.".dimmed());
+            if paginated.items.is_empty() {
+                if paginated.total > 0 {
+                    println!(
+                        "{}",
+                        format!(
+                            "No memories on this page/offset (total matching: {}, offset: {}).",
+                            paginated.total, paginated.offset
+                        )
+                        .dimmed()
+                    );
+                } else {
+                    println!("{}", "No memories found.".dimmed());
+                }
                 return Ok(());
             }
 
             let db_str = format_path(lm.db_path());
-            let count_label = if memories.len() == 1 {
-                "memory"
-            } else {
-                "memories"
-            };
+            let start_idx = paginated.offset + 1;
+            let end_idx = paginated.offset + paginated.items.len();
             println!(
-                "{} Displaying {} {} from {}:",
+                "{} Displaying {}–{} of {} memories (page {}/{}, offset {}) from {}:",
                 "📋".bold(),
-                memories.len().to_string().cyan().bold(),
-                count_label,
+                start_idx.to_string().cyan().bold(),
+                end_idx.to_string().cyan().bold(),
+                paginated.total.to_string().bold(),
+                paginated.page.to_string().cyan(),
+                paginated.total_pages.to_string().cyan(),
+                paginated.offset,
                 db_str.dimmed()
             );
             println!();
 
-            for m in &memories {
+            for m in &paginated.items {
                 let short_id: String = m.id.chars().take(8).collect();
                 let first_line = m.content.lines().next().unwrap_or("").trim();
                 let snippet = if first_line.len() > 64 {
@@ -375,6 +401,20 @@ fn main() -> Result<()> {
                     m.title.bold(),
                     format!("({})", short_id).yellow(),
                     snippet.dimmed()
+                );
+            }
+
+            if paginated.has_more {
+                let next_offset = paginated.offset + paginated.items.len();
+                let next_page = paginated.page + 1;
+                println!();
+                println!(
+                    "  {}",
+                    format!(
+                        "↳ More memories available (next: --page {} -l {}  or  --offset {} -l {})",
+                        next_page, paginated.limit, next_offset, paginated.limit
+                    )
+                    .dimmed()
                 );
             }
         }
