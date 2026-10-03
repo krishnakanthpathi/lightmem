@@ -20,8 +20,8 @@ impl Default for LightMemConfig {
     fn default() -> Self {
         Self {
             backend: "onnx".to_string(),
-            onnx_model: Some("bge-small".to_string()),
-            ollama_url: "http://100.75.149.115:7777".to_string(),
+            onnx_model: Some("Xenova/bge-small-en-v1.5".to_string()),
+            ollama_url: "http://localhost:11434".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
         }
@@ -29,6 +29,34 @@ impl Default for LightMemConfig {
 }
 
 impl LightMemConfig {
+    pub fn active_embedding_summary(&self) -> String {
+        match self.backend.as_str() {
+            "onnx" => match self.onnx_model.as_deref() {
+                Some("minilm") | Some("all-minilm-l6-v2") | Some("Xenova/all-MiniLM-L6-v2") => {
+                    "Xenova/all-MiniLM-L6-v2 (384-dim local ONNX)".to_string()
+                }
+                Some("nomic") | Some("nomic-embed-text") | Some("nomic-ai/nomic-embed-text-v1.5") => {
+                    "nomic-ai/nomic-embed-text-v1.5 (768-dim local ONNX)".to_string()
+                }
+                Some("bge-small") | Some("bge-small-en-v1.5") | Some("Xenova/bge-small-en-v1.5") | None => {
+                    "Xenova/bge-small-en-v1.5 (384-dim local ONNX)".to_string()
+                }
+                Some(custom) => format!("{} (custom local ONNX)", custom),
+            },
+            "ollama" => format!("{} (via Ollama @ {})", self.embedding_model, self.ollama_url),
+            "hash" => "deterministic-trigram-hash (384-dim offline)".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    pub fn active_reranker_summary(&self) -> String {
+        match self.reranker.as_str() {
+            "needle" | "precision" => "needle-3 (Native C-FFI · needle3.cact)".to_string(),
+            "top1" => "top1 (0ms vector rank-1)".to_string(),
+            other => other.to_string(),
+        }
+    }
+
     pub fn config_dir() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -47,12 +75,26 @@ impl LightMemConfig {
         let path = Self::config_file();
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(cfg) = serde_json::from_str::<LightMemConfig>(&content) {
+                if let Ok(mut cfg) = serde_json::from_str::<LightMemConfig>(&content) {
+                    let mut migrated = false;
+                    if cfg.onnx_model.as_deref() == Some("bge-small") {
+                        cfg.onnx_model = Some("Xenova/bge-small-en-v1.5".to_string());
+                        migrated = true;
+                    }
+                    if cfg.ollama_url == "http://100.75.149.115:7777" {
+                        cfg.ollama_url = "http://localhost:11434".to_string();
+                        migrated = true;
+                    }
+                    if migrated {
+                        let _ = cfg.save();
+                    }
                     return cfg;
                 }
             }
         }
-        Self::default()
+        let cfg = Self::default();
+        let _ = cfg.save();
+        cfg
     }
 
     pub fn save(&self) -> Result<()> {

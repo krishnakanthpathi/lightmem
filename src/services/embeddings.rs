@@ -21,13 +21,13 @@ impl OnnxEmbeddingProvider {
     /// Initialize with a known model name ("bge-small", "minilm", "nomic")
     pub fn new(model_name: Option<&str>) -> Result<Self> {
         let (selected_model, display_name) = match model_name {
-            Some("minilm") | Some("all-minilm-l6-v2") => {
-                (EmbeddingModel::AllMiniLML6V2, "all-minilm-l6-v2")
+            Some("minilm") | Some("all-minilm-l6-v2") | Some("Xenova/all-MiniLM-L6-v2") => {
+                (EmbeddingModel::AllMiniLML6V2, "Xenova/all-MiniLM-L6-v2")
             }
-            Some("nomic") | Some("nomic-embed-text") => {
-                (EmbeddingModel::NomicEmbedTextV15, "nomic-embed-text")
+            Some("nomic") | Some("nomic-embed-text") | Some("nomic-ai/nomic-embed-text-v1.5") => {
+                (EmbeddingModel::NomicEmbedTextV15, "nomic-ai/nomic-embed-text-v1.5")
             }
-            _ => (EmbeddingModel::BGESmallENV15, "bge-small-en-v1.5"),
+            _ => (EmbeddingModel::BGESmallENV15, "Xenova/bge-small-en-v1.5"),
         };
 
         let cache_dir = crate::config::LightMemConfig::config_dir().join("models");

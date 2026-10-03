@@ -560,6 +560,18 @@ impl CliView {
         println!(
             "  {} {:<16} {}",
             Self::slate("├─"),
+            Self::slate("Active Embedder"),
+            Self::emerald_bold(&cfg.active_embedding_summary())
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("Active Reranker"),
+            Self::crimson_bold(&cfg.active_reranker_summary())
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
             Self::slate("Backend"),
             Self::violet_bold(&cfg.backend)
         );
@@ -567,13 +579,11 @@ impl CliView {
             "  {} {:<16} {}",
             Self::slate("├─"),
             Self::slate("ONNX Model"),
-            Self::white_bold(cfg.onnx_model.as_deref().unwrap_or("bge-small"))
-        );
-        println!(
-            "  {} {:<16} {}",
-            Self::slate("├─"),
-            Self::slate("Reranker"),
-            Self::crimson_bold(&cfg.reranker)
+            Self::white_bold(
+                cfg.onnx_model
+                    .as_deref()
+                    .unwrap_or("Xenova/bge-small-en-v1.5")
+            )
         );
         println!(
             "  {} {:<16} {}",
@@ -585,7 +595,15 @@ impl CliView {
             "  {} {:<16} {}",
             Self::slate("├─"),
             Self::slate("Ollama Model"),
-            Self::slate(&cfg.embedding_model)
+            Self::slate(&format!(
+                "{}{}",
+                cfg.embedding_model,
+                if cfg.backend == "ollama" {
+                    " (active)"
+                } else {
+                    " (standby — used only when backend=ollama)"
+                }
+            ))
         );
         println!(
             "  {} {:<16} {}",

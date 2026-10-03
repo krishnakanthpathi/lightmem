@@ -185,7 +185,7 @@ enum Commands {
         #[arg(long)]
         onnx_model: Option<String>,
 
-        /// Ollama server URL (e.g. http://100.75.149.115:7777)
+        /// Ollama server URL (e.g. http://localhost:11434)
         #[arg(long)]
         url: Option<String>,
 
