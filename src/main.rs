@@ -1,25 +1,27 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
-use colored::*;
-use lightmem::{LightMem, LightMemConfig, MemoryStatus, MemoryType};
-use std::path::PathBuf;
+use lightmem::{CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "lmem")]
-#[command(about = "🧠 LightMem - Ultra-fast, lightweight agent memory engine", long_about = None)]
+#[command(
+    about = "🧠 LightMem - Ultra-fast, lightweight agent memory engine",
+    long_about = None
+)]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Path to custom database file (or via LIGHTMEM_DB env var)
-    #[arg(long, global = true)]
-    db: Option<PathBuf>,
-
     /// Force use of global database (~/.lightmem/memories.db)
     #[arg(short = 'g', long, global = true)]
     global: bool,
+
+    /// Explicit path to SQLite database file
+    #[arg(long, global = true)]
+    db: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -29,7 +31,7 @@ enum Commands {
         /// Content of the memory
         content: String,
 
-        /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, password, error, context)
+        /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password)
         #[arg(short = 't', long = "type")]
         category: Option<String>,
 
@@ -132,18 +134,18 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Import external memories from file (.json, .jsonl, or .okf/.md)
+    /// Import external memories from file (.json, .jsonl, or .okf/.md) or directory
     Import {
-        /// Path to import file
+        /// Path to import file or OKF directory
         file: PathBuf,
     },
 
-    /// Ask a question and synthesize/extract the factual answer (with toggleable pure-Rust precision reranker)
+    /// Ask a question and synthesize/extract the factual answer (with toggleable Native Needle 3 C-FFI reranker)
     Answer {
         /// The question to answer
         question: String,
 
-        /// Toggle: Force use of precision reranker & factual slot extractor
+        /// Toggle: Force use of Needle 3 precision reranker & factual slot extractor
         #[arg(long, alias = "needle")]
         precision: bool,
 
@@ -186,7 +188,7 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
 
-        /// Default reranker: 'top1' (0ms instant) or 'precision' (pure-Rust slot extractor)
+        /// Default reranker: 'top1' (0ms instant) or 'needle' (Native Needle 3 C-FFI)
         #[arg(long)]
         reranker: Option<String>,
     },
@@ -208,17 +210,7 @@ fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
     Ok(Utc.from_utc_datetime(&naive_dt))
 }
 
-fn format_path(p: &std::path::Path) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        let home_path = std::path::Path::new(&home);
-        if let Ok(rel) = p.strip_prefix(home_path) {
-            return format!("~/{}", rel.display());
-        }
-    }
-    p.display().to_string()
-}
-
-fn open_engine(db_path: Option<&std::path::Path>, global: bool) -> Result<LightMem> {
+fn open_controller(db_path: Option<&Path>, global: bool) -> Result<LightMem> {
     if let Some(path) = db_path {
         let config = LightMemConfig::load();
         LightMem::open_at(path, config)
@@ -242,7 +234,7 @@ fn main() -> Result<()> {
             confidence,
             json,
         } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let tag_vec = tags
                 .map(|t| {
@@ -254,22 +246,7 @@ fn main() -> Result<()> {
                 .unwrap_or_default();
 
             let memory = lm.remember(&content, cat, title, tag_vec, Some(confidence))?;
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&memory)?);
-                return Ok(());
-            }
-
-            let short_id: String = memory.id.chars().take(8).collect();
-            let db_str = format_path(lm.db_path());
-            println!(
-                "{} Stored [{}] {} ({}) in {}",
-                "✔".green().bold(),
-                memory.category.as_str().cyan().bold(),
-                memory.title.bold(),
-                short_id.yellow(),
-                db_str.dimmed()
-            );
+            CliView::render_remembered(&memory, lm.db_path(), json)?;
         }
 
         Commands::Recall {
@@ -280,58 +257,12 @@ fn main() -> Result<()> {
             min_similarity,
             json,
         } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
             let results = lm.recall(&query, cat, as_of_dt, limit, min_similarity)?;
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&results)?);
-                return Ok(());
-            }
-
-            if results.is_empty() {
-                println!("{}", "No relevant memories found.".dimmed());
-                return Ok(());
-            }
-
-            let db_str = format_path(lm.db_path());
-            let count_label = if results.len() == 1 {
-                "memory"
-            } else {
-                "memories"
-            };
-            println!(
-                "{} Found {} {} for \"{}\" in {}:",
-                "🔍".bold(),
-                results.len().to_string().cyan().bold(),
-                count_label,
-                query.bold(),
-                db_str.dimmed()
-            );
-            println!();
-
-            for (idx, r) in results.iter().enumerate() {
-                let m = &r.memory;
-                let short_id: String = m.id.chars().take(8).collect();
-                println!(
-                    "{}. [{}] {} {}",
-                    idx + 1,
-                    m.category.as_str().cyan().bold(),
-                    m.title.bold(),
-                    format!("(score: {:.2})", r.score).dimmed()
-                );
-                println!("   {}", m.content.replace('\n', "\n   "));
-                let mut meta = vec![format!("ID: {}", short_id.yellow())];
-                if !m.tags.is_empty() {
-                    meta.push(format!("Tags: {}", m.tags.join(", ").blue()));
-                }
-                println!("   {}", meta.join(" | ").dimmed());
-                if idx + 1 < results.len() {
-                    println!();
-                }
-            }
+            CliView::render_recall(&query, &results, lm.db_path(), json)?;
         }
 
         Commands::List {
@@ -343,7 +274,7 @@ fn main() -> Result<()> {
             page,
             json,
         } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let st = status.parse::<MemoryStatus>().ok();
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
@@ -353,123 +284,25 @@ fn main() -> Result<()> {
             } else {
                 lm.list_paginated(cat, st, as_of_dt, limit, offset)?
             };
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&paginated)?);
-                return Ok(());
-            }
-
-            if paginated.items.is_empty() {
-                if paginated.total > 0 {
-                    println!(
-                        "{}",
-                        format!(
-                            "No memories on this page/offset (total matching: {}, offset: {}).",
-                            paginated.total, paginated.offset
-                        )
-                        .dimmed()
-                    );
-                } else {
-                    println!("{}", "No memories found.".dimmed());
-                }
-                return Ok(());
-            }
-
-            let db_str = format_path(lm.db_path());
-            let start_idx = paginated.offset + 1;
-            let end_idx = paginated.offset + paginated.items.len();
-            println!(
-                "{} Displaying {}–{} of {} memories (page {}/{}, offset {}) from {}:",
-                "📋".bold(),
-                start_idx.to_string().cyan().bold(),
-                end_idx.to_string().cyan().bold(),
-                paginated.total.to_string().bold(),
-                paginated.page.to_string().cyan(),
-                paginated.total_pages.to_string().cyan(),
-                paginated.offset,
-                db_str.dimmed()
-            );
-            println!();
-
-            for m in &paginated.items {
-                let short_id: String = m.id.chars().take(8).collect();
-                let first_line = m.content.lines().next().unwrap_or("").trim();
-                let snippet = if first_line.len() > 64 {
-                    format!("{}...", &first_line[..61])
-                } else {
-                    first_line.to_string()
-                };
-                println!(
-                    "• [{}] {} {} - {}",
-                    m.category.as_str().cyan().bold(),
-                    m.title.bold(),
-                    format!("({})", short_id).yellow(),
-                    snippet.dimmed()
-                );
-            }
-
-            if paginated.has_more {
-                let next_offset = paginated.offset + paginated.items.len();
-                let next_page = paginated.page + 1;
-                println!();
-                println!(
-                    "  {}",
-                    format!(
-                        "↳ More memories available (next: --page {} -l {}  or  --offset {} -l {})",
-                        next_page, paginated.limit, next_offset, paginated.limit
-                    )
-                    .dimmed()
-                );
-            }
+            CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
         }
 
         Commands::Forget { id, hard, json } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let ok = lm.forget(&id, hard)?;
-
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "id": id,
-                        "success": ok,
-                        "hard_deleted": hard,
-                    })
-                );
-                return Ok(());
-            }
-
-            if ok {
-                let action = if hard {
-                    "Permanently deleted"
-                } else {
-                    "Retired (soft-expired)"
-                };
-                println!("{} {} memory {}", "✔".green().bold(), action, id.yellow());
-            } else {
-                println!("{} Memory '{}' not found", "✖".red().bold(), id);
-            }
+            CliView::render_forget(&id, ok, hard, json)?;
         }
 
         Commands::Export { okf: _, output } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let exported_path = lm.export_okf(output.as_deref())?;
-            println!(
-                "{} Exported OKF bundle to: {}",
-                "✔".green().bold(),
-                exported_path.display().to_string().cyan().bold()
-            );
+            CliView::render_export(&exported_path);
         }
 
         Commands::Import { file } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let count = lm.import_file(&file)?;
-            println!(
-                "{} Successfully imported {} memories from {:?}",
-                "✔".green().bold(),
-                count.to_string().cyan().bold(),
-                file
-            );
+            CliView::render_import(count, &file);
         }
 
         Commands::Answer {
@@ -481,7 +314,7 @@ fn main() -> Result<()> {
             limit,
             json,
         } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
             let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
 
@@ -492,33 +325,7 @@ fn main() -> Result<()> {
             };
 
             let result = lm.answer_with_reranker(&question, cat, as_of_dt, limit, override_mode)?;
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                return Ok(());
-            }
-
-            let conf_pct = (result.confidence * 100.0).round() as u32;
-            println!(
-                "{} Answer [reranker: {}] (confidence: {}%):",
-                "💡".bold(),
-                result.reranker_used.cyan().bold(),
-                conf_pct
-            );
-            println!();
-            println!("  {}", result.answer.green().bold());
-            println!();
-
-            if let Some(m) = &result.selected_memory {
-                let short_id: String = m.id.chars().take(8).collect();
-                println!(
-                    "  {} Source: [{}] {} {}",
-                    "📌".dimmed(),
-                    m.category.as_str().cyan(),
-                    m.title.bold(),
-                    format!("(ID: {})", short_id).dimmed()
-                );
-            }
+            CliView::render_answer(&result, json)?;
         }
 
         Commands::Config {
@@ -553,62 +360,20 @@ fn main() -> Result<()> {
                     cfg.reranker = lower;
                     changed = true;
                 } else {
-                    eprintln!(
-                        "Invalid reranker '{}'. Choose 'top1' or 'needle'.",
-                        r
-                    );
+                    eprintln!("Invalid reranker '{}'. Choose 'top1' or 'needle'.", r);
                 }
             }
 
             if changed {
                 cfg.save()?;
-                println!("{} Configuration updated successfully!", "✔".green().bold());
             }
-
-            println!("Current Configuration:");
-            println!("  Backend:          {}", cfg.backend.cyan().bold());
-            println!(
-                "  ONNX Model/Path:  {}",
-                cfg.onnx_model.as_deref().unwrap_or("bge-small").cyan()
-            );
-            println!("  Reranker:         {}", cfg.reranker.cyan().bold());
-            println!("  Ollama URL:       {}", cfg.ollama_url.dimmed());
-            println!("  Ollama Model:     {}", cfg.embedding_model.dimmed());
-            println!(
-                "  Config File:      {}",
-                LightMemConfig::config_file().display()
-            );
+            CliView::render_config(&cfg, changed);
         }
 
         Commands::Stats { json } => {
-            let lm = open_engine(effective_db, global)?;
+            let lm = open_controller(effective_db, global)?;
             let stats = lm.stats()?;
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&stats)?);
-                return Ok(());
-            }
-
-            let db_str = format_path(lm.db_path());
-            println!("{} LightMem Storage Statistics", "📊".bold());
-            println!("  Database:  {}", db_str.cyan().bold());
-            println!(
-                "  Memories:  {} total  ({} active, {} expired)",
-                stats.total_memories.to_string().bold(),
-                stats.active_memories.to_string().green(),
-                stats.expired_memories.to_string().yellow()
-            );
-            println!(
-                "  Vectors:   {} embedded",
-                stats.total_vectors.to_string().blue()
-            );
-            if !stats.by_category.is_empty() {
-                println!();
-                println!("  Breakdown by Category:");
-                for (cat, count) in &stats.by_category {
-                    println!("    • {:<14} {}", cat.cyan(), count);
-                }
-            }
+            CliView::render_stats(&stats, lm.db_path(), json)?;
         }
     }
 

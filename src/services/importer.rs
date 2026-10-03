@@ -191,7 +191,7 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
     })?;
 
     let explicit_title = get_str_field(val, &["title", "name", "summary", "heading", "subject"]);
-    let mut cat_str = get_str_field(
+    let cat_str = get_str_field(
         val,
         &["category", "memory_type", "type", "kind", "type_name"],
     );

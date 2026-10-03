@@ -1,19 +1,9 @@
-use crate::models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories};
+use crate::models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, StorageStats};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageStats {
-    pub total_memories: usize,
-    pub active_memories: usize,
-    pub expired_memories: usize,
-    pub total_vectors: usize,
-    pub by_category: Vec<(String, usize)>,
-}
 
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
