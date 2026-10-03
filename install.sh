@@ -5,12 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-if [ -d "$HOME/.cargo/bin" ]; then
-    DEFAULT_BIN="$HOME/.cargo/bin"
-else
-    DEFAULT_BIN="$HOME/.local/bin"
-fi
-INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$DEFAULT_BIN}"
+INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 NEEDLE_CACHE_DIR="$HOME/.cache/cactus-needle/v3/3.1.0"
 
 printf "\033[1;31m❖\033[0m \033[1;37mInstalling LightMem (lmem)...\033[0m\n"
@@ -22,15 +17,15 @@ case "$OS" in
     Darwin)
         OS_TARGET="apple-darwin"
         NEEDLE_LIB="libneedle.dylib"
-        NEEDLE_WHL_PATTERN="macosx.*arm64\.whl"
+        NEEDLE_WHL_PATTERN="macosx[^\"]*arm64\.whl"
         ;;
     Linux)
         OS_TARGET="unknown-linux-gnu"
         NEEDLE_LIB="libneedle.so"
         if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-            NEEDLE_WHL_PATTERN="manylinux.*aarch64\.whl"
+            NEEDLE_WHL_PATTERN="manylinux[^\"]*aarch64\.whl"
         else
-            NEEDLE_WHL_PATTERN="manylinux.*x86_64\.whl"
+            NEEDLE_WHL_PATTERN="manylinux[^\"]*x86_64\.whl"
         fi
         ;;
     *)
@@ -67,6 +62,10 @@ if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
         tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR"
         mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem"
         chmod +x "$INSTALL_DIR/lmem"
+        if [ -d "$HOME/.cargo/bin" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
+            cp "$INSTALL_DIR/lmem" "$HOME/.cargo/bin/lmem"
+            chmod +x "$HOME/.cargo/bin/lmem"
+        fi
         INSTALLED_BIN=1
         printf "  \033[1;32m◈\033[0m Installed pre-built lmem to %s/lmem\n" "$INSTALL_DIR"
     fi
