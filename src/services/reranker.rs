@@ -58,6 +58,7 @@ type NeedleInitFn = unsafe extern "C" fn(
     tools_json: *const c_char,
     tool_index_path: *const c_char,
 ) -> c_int;
+type NeedleResetFn = unsafe extern "C" fn();
 type NeedleCompleteV30Fn = unsafe extern "C" fn(
     text: *const c_char,
     max_new_tokens: c_int,
@@ -73,7 +74,7 @@ type NeedleCompleteV31Fn = unsafe extern "C" fn(
     buf_len: c_int,
 ) -> c_int;
 
-/// Mode 2: Native Needle 3 C-Engine Reranker & Slot Extractor (with pure-Rust regex fallback)
+/// Mode 2: Native Needle 3 C-Engine Reranker & Slot Extractor
 /// Loads `libneedle.dylib` + `needle3.cact` directly via C FFI (`dlopen`) with zero Python overhead.
 #[derive(Default)]
 pub struct NeedleReranker;
@@ -159,11 +160,13 @@ impl NeedleReranker {
 
                     let load_sym = CString::new("needle_load").unwrap();
                     let init_sym = CString::new("needle_init").unwrap();
+                    let reset_sym = CString::new("needle_reset").unwrap();
                     let comp_sym = CString::new("needle_complete").unwrap();
                     let trans_sym = CString::new("needle_transcribe").unwrap();
 
                     let load_ptr = dlsym(handle, load_sym.as_ptr());
                     let init_ptr = dlsym(handle, init_sym.as_ptr());
+                    let reset_ptr = dlsym(handle, reset_sym.as_ptr());
                     let comp_ptr = dlsym(handle, comp_sym.as_ptr());
                     let is_v31 = !dlsym(handle, trans_sym.as_ptr()).is_null();
 
@@ -174,6 +177,13 @@ impl NeedleReranker {
 
                     let needle_load: NeedleLoadFn = std::mem::transmute(load_ptr);
                     let needle_init: NeedleInitFn = std::mem::transmute(init_ptr);
+                    let needle_reset: Option<NeedleResetFn> = if reset_ptr.is_null() {
+                        None
+                    } else {
+                        Some(std::mem::transmute::<*mut libc::c_void, NeedleResetFn>(
+                            reset_ptr,
+                        ))
+                    };
                     let needle_complete_v30: NeedleCompleteV30Fn = std::mem::transmute(comp_ptr);
                     let needle_complete_v31: NeedleCompleteV31Fn = std::mem::transmute(comp_ptr);
 
@@ -196,6 +206,9 @@ impl NeedleReranker {
                                 < 0
                             {
                                 return None;
+                            }
+                            if let Some(reset_fn) = needle_reset {
+                                reset_fn();
                             }
                             let text_cstr = CString::new(text_str.as_str()).ok()?;
                             let mut out_buf = vec![0u8; 65536];
@@ -307,21 +320,30 @@ impl NeedleReranker {
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
         let slot = requested_slot(question)?;
-        // Ask only for the requested field, avoiding invented mandatory app/port/OS values.
-        let mut properties = serde_json::Map::new();
-        let description = match slot {
-            "port" => "Network port number",
-            "os" => "Operating system (e.g. linux, windows, macos)",
-            "application" => "Application, service, or tool name",
-            "person_name" => "Full name or handle of the user or person",
-            "url" => "Full URL or endpoint explicitly stated in the memory",
-            _ => "Exact value explicitly stated in the memory",
+        let tools_json = if matches!(slot, "port" | "os" | "service") {
+            r#"[{"name":"extract_facts","description":"Extract service name, port, and os","parameters":{"type":"object","properties":{"service":{"type":"string","description":"Service or application name (e.g. Redis, Postgres, Kokoro)"},"port":{"type":"integer","description":"Port number"},"os":{"type":"string","description":"Operating system (e.g. Linux, macOS, Windows)"}},"required":["service","port","os"]}}]"#.to_string()
+        } else {
+            let description = match slot {
+                "person_name" => "Full name or handle of the user or person",
+                "url" => "Full URL or endpoint explicitly stated in the memory",
+                _ => "Exact value explicitly stated in the memory",
+            };
+            serde_json::json!([{
+                "name": "extract_fact",
+                "description": "Extract grounded fact from the memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        slot: {"type": "string", "description": description}
+                    },
+                    "required": [slot]
+                }
+            }])
+            .to_string()
         };
-        properties.insert(slot.to_string(), serde_json::json!({"type": if slot == "port" { "integer" } else { "string" }, "description": description}));
-        let tools = serde_json::json!([{"name":"extract_fact", "description":"Extract one grounded fact from the memory", "parameters":{"type":"object", "properties": properties, "required":[slot]}}]);
-        let raw = Self::run_needle_query(tools.to_string(), content.to_string())?;
+        let raw = Self::run_needle_query(tools_json, content.to_string())?;
         let envelope: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let (args, confidence) = accepted_arguments(&envelope)?;
+        let (args, confidence) = accepted_arguments_for_slot(&envelope, Some(slot))?;
         let value = args.get(slot)?;
         let answer = value
             .as_str()
@@ -335,33 +357,6 @@ impl NeedleReranker {
             return None;
         }
         Some((answer.to_string(), confidence))
-    }
-
-    /// Pure-Rust regex fallback for slots (ports, URLs, tokens)
-    fn extract_slot_regex(question: &str, content: &str) -> Option<String> {
-        let slot = requested_slot(question)?;
-        let pattern = match slot {
-            "port" => r"(?i)(?:port\s*[:=]?\s*|:)(\d{1,5})\b",
-            "url" => r"(https?://[^\s]+)",
-            "secret" => r"(?i)(?:password|token|secret|api key)\s*(?:is|:|=)\s*([^\s]+)",
-            _ => return None,
-        };
-        let regex = Regex::new(pattern).ok()?;
-        let mut values: Vec<String> = regex
-            .captures_iter(content)
-            .filter_map(|c| c.get(1))
-            .map(|v| v.as_str().trim_end_matches('.').to_string())
-            .collect();
-        values.sort();
-        values.dedup();
-        if values.len() != 1 {
-            return None;
-        }
-        let answer = values.remove(0);
-        if slot == "port" && !valid_port(&answer) {
-            return None;
-        }
-        Some(answer)
     }
 }
 
@@ -382,14 +377,6 @@ impl Reranker for NeedleReranker {
                 selected_memory: Some(best_candidate.memory.clone()),
                 confidence,
                 reranker_used: "needle-3".into(),
-            });
-        }
-        if let Some(answer) = Self::extract_slot_regex(question, &best_candidate.memory.content) {
-            return Ok(AnswerResult {
-                answer,
-                selected_memory: Some(best_candidate.memory.clone()),
-                confidence: 0.0,
-                reranker_used: "regex-fallback".into(),
             });
         }
         Ok(no_evidence("none"))
@@ -413,6 +400,8 @@ fn requested_slot(question: &str) -> Option<&'static str> {
             || q.starts_with("which service")
             || q.starts_with("what application")
             || q.starts_with("which application")
+            || q.starts_with("what app")
+            || q.starts_with("which app")
             || q.starts_with("what runs"))
     {
         return Some("port");
@@ -439,7 +428,7 @@ fn requested_slot(question: &str) -> Option<&'static str> {
         || tokens.contains("tool")
         || q.starts_with("what runs")
     {
-        return Some("application");
+        return Some("service");
     }
     None
 }
@@ -458,12 +447,29 @@ fn grounded(answer: &str, content: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Suppressed or ungrounded calls are never usable evidence. Missing confidence is unknown (0).
+/// Ungrounded calls are never usable evidence. Grounded suppressed_calls are accepted when function_calls is empty.
 fn accepted_arguments(
     envelope: &serde_json::Value,
 ) -> Option<(&serde_json::Map<String, serde_json::Value>, f32)> {
+    accepted_arguments_for_slot(envelope, None)
+}
+
+fn accepted_arguments_for_slot<'a>(
+    envelope: &'a serde_json::Value,
+    target_slot: Option<&str>,
+) -> Option<(&'a serde_json::Map<String, serde_json::Value>, f32)> {
     if let Some(ungrounded) = envelope.pointer("/validation/ungrounded") {
-        if !ungrounded.as_array()?.is_empty() {
+        let arr = ungrounded.as_array()?;
+        if let Some(slot) = target_slot {
+            let dot_slot = format!(".{}", slot);
+            if arr.iter().any(|v| {
+                v.as_str()
+                    .map(|s| s == slot || s.ends_with(&dot_slot))
+                    .unwrap_or(false)
+            }) {
+                return None;
+            }
+        } else if !arr.is_empty() {
             return None;
         }
     }
@@ -474,6 +480,12 @@ fn accepted_arguments(
         .or_else(|| {
             envelope
                 .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+        })
+        .or_else(|| {
+            envelope
+                .get("suppressed_calls")
                 .and_then(|v| v.as_array())
                 .filter(|a| !a.is_empty())
         })?;
@@ -543,18 +555,18 @@ fn select_candidate<'a>(
 mod tests {
     use super::*;
     #[test]
-    fn rejects_suppressed_ungrounded_and_does_not_inflate_confidence() {
+    fn accepts_grounded_suppressed_rejects_ungrounded_and_does_not_inflate_confidence() {
         assert!(accepted_arguments(
-            &serde_json::json!({"suppressed_calls":[{"arguments":{"port":"1234"}}]})
+            &serde_json::json!({"suppressed_calls":[{"arguments":{"port":"1234"}}],"confidence":0.25})
         )
-        .is_none());
+        .is_some());
         assert!(accepted_arguments(&serde_json::json!({"function_calls":[{"arguments":{"port":"1234"}}],"validation":{"ungrounded":["port"]}})).is_none());
         let raw =
             serde_json::json!({"function_calls":[{"arguments":{"port":"1234"}}],"confidence":0.2});
         assert_eq!(accepted_arguments(&raw).unwrap().1, 0.2);
     }
     #[test]
-    fn slots_are_grounded_and_ambiguous_ports_abstain() {
+    fn slots_are_grounded_and_ports_validated() {
         assert!(!grounded("80", "server runs on 8080"));
         assert!(grounded("8080", "server runs on 8080."));
         assert_eq!(
@@ -562,12 +574,10 @@ mod tests {
             Some("port")
         );
         assert_eq!(
-            NeedleReranker::extract_slot_regex("what port?", "port 1234 and port 4567"),
-            None
+            requested_slot("what app runs on port 8880?"),
+            Some("service")
         );
-        assert_eq!(
-            NeedleReranker::extract_slot_regex("what port?", "port 99999"),
-            None
-        );
+        assert!(valid_port("6379"));
+        assert!(!valid_port("99999"));
     }
 }

@@ -59,11 +59,12 @@ fn test_core_lifecycle() {
     let ans_prec = lm
         .answer("what port does redis use?", None, None, 5, false)
         .expect("precision answer failed");
-    assert!(matches!(
-        ans_prec.reranker_used.as_str(),
-        "needle-3" | "regex-fallback"
-    ));
-    assert_eq!(ans_prec.answer, "6379");
+    if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some() {
+        assert_eq!(ans_prec.reranker_used, "none");
+    } else {
+        assert_eq!(ans_prec.reranker_used, "needle-3");
+        assert_eq!(ans_prec.answer, "6379");
+    }
 
     // 5. Stats
     let stats = lm.stats().expect("stats failed");
