@@ -329,11 +329,18 @@ impl NeedleReranker {
             Some((answer.to_string(), confidence))
         };
 
-        let inputs = if is_core_triad {
-            [content.to_string(), format!("Extract fact: {}", content)]
+        let mut inputs = Vec::with_capacity(4);
+        if let Some(focused) = focus_clause_for_question(question, content) {
+            inputs.push(format!("Extract fact: {}", focused));
+            inputs.push(focused);
+        }
+        if is_core_triad {
+            inputs.push(content.to_string());
+            inputs.push(format!("Extract fact: {}", content));
         } else {
-            [format!("Extract fact: {}", content), content.to_string()]
-        };
+            inputs.push(format!("Extract fact: {}", content));
+            inputs.push(content.to_string());
+        }
 
         for input in inputs {
             if let Some(raw) = Self::run_needle_query(tools_json.clone(), input) {
@@ -478,26 +485,131 @@ fn accepted_arguments_for_slot<'a>(
 }
 
 /// Deterministic entity-aware candidate selection, separate from native extraction.
+const GENERIC_TOKENS: &[&str] = &[
+    "service",
+    "services",
+    "server",
+    "servers",
+    "daemon",
+    "proxy",
+    "node",
+    "host",
+    "cluster",
+    "engine",
+    "app",
+    "application",
+    "system",
+    "port",
+    "ports",
+    "os",
+    "endpoint",
+    "url",
+    "uri",
+    "default",
+    "primary",
+    "current",
+    "main",
+    "active",
+    "located",
+    "listening",
+    "stored",
+    "configured",
+];
+
+fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
+    let dynamic_slot = requested_slot(question);
+    let query = NeedleReranker::tokenize(question);
+    let anchor_tokens: HashSet<&str> = query
+        .iter()
+        .map(String::as_str)
+        .filter(|&t| t != dynamic_slot.as_str() && !GENERIC_TOKENS.contains(&t))
+        .collect();
+    if anchor_tokens.is_empty() {
+        return None;
+    }
+
+    let splitter = Regex::new(r"(?i)\n|;|\.\s+|,\s+and\s+|\s+and\s+").ok()?;
+    let clauses: Vec<&str> = splitter
+        .split(content)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if clauses.len() < 2 {
+        return None;
+    }
+
+    let mut best_clause: Option<(&str, usize)> = None;
+    let mut tied = false;
+
+    for clause in clauses {
+        let clause_tokens = NeedleReranker::tokenize(clause);
+        let anchor_hits = anchor_tokens
+            .iter()
+            .filter(|&&t| clause_tokens.contains(t))
+            .count();
+        if anchor_hits == 0 || clause_tokens.len() <= anchor_hits {
+            continue;
+        }
+        match best_clause {
+            None => {
+                best_clause = Some((clause, anchor_hits));
+                tied = false;
+            }
+            Some((_, best_hits)) if anchor_hits > best_hits => {
+                best_clause = Some((clause, anchor_hits));
+                tied = false;
+            }
+            Some((_, best_hits)) if anchor_hits == best_hits => {
+                tied = true;
+            }
+            _ => {}
+        }
+    }
+
+    if tied {
+        return None;
+    }
+    best_clause.map(|(clause, _)| clause.to_string())
+}
+
 fn select_candidate<'a>(
     question: &str,
     candidates: &'a [ScoredMemory],
 ) -> Option<&'a ScoredMemory> {
     let dynamic_slot = requested_slot(question);
     let query = NeedleReranker::tokenize(question);
-    let specific: HashSet<_> = query
+    let specific: HashSet<&str> = query
         .iter()
-        .filter(|t| t.as_str() != dynamic_slot.as_str())
+        .map(String::as_str)
+        .filter(|&t| t != dynamic_slot.as_str())
         .collect();
+    let (generic_tokens, anchor_tokens): (HashSet<&str>, HashSet<&str>) = specific
+        .iter()
+        .copied()
+        .partition(|t| GENERIC_TOKENS.contains(t));
     candidates
         .iter()
         .filter_map(|candidate| {
             let doc = NeedleReranker::tokenize(&candidate.memory.to_card_text());
-            let hits = specific.iter().filter(|t| doc.contains(t.as_str())).count();
-            // Require an entity/content match; the target slot word alone is not evidence.
-            if (!specific.is_empty() && hits == 0) || query.is_disjoint(&doc) {
+            let anchor_hits = anchor_tokens
+                .iter()
+                .filter(|&&t| doc.contains(t))
+                .count();
+            let generic_hits = generic_tokens
+                .iter()
+                .filter(|&&t| doc.contains(t))
+                .count();
+            let hits = anchor_hits + generic_hits;
+            // Require an anchor entity/content match when present; generic or target slot words alone are not evidence.
+            if (!anchor_tokens.is_empty() && anchor_hits == 0)
+                || (!specific.is_empty() && hits == 0)
+                || query.is_disjoint(&doc)
+            {
                 return None;
             }
-            Some((candidate, hits as f32 * 3.5 + candidate.score))
+            let score =
+                anchor_hits as f32 * 5.0 + generic_hits as f32 * 0.5 + candidate.score;
+            Some((candidate, score))
         })
         .max_by(|a, b| {
             a.1.total_cmp(&b.1)
@@ -535,5 +647,88 @@ mod tests {
         );
         assert!(valid_port("6379"));
         assert!(!valid_port("99999"));
+    }
+
+    fn make_candidate(id: &str, content: &str, score: f32) -> ScoredMemory {
+        let mut memory = MemoryRecord::new(
+            crate::models::MemoryType::Fact,
+            "Test fact".to_string(),
+            content.to_string(),
+            vec![],
+            0.9,
+            None,
+        );
+        memory.id = id.to_string();
+        ScoredMemory {
+            memory,
+            score,
+            bm25_rank: Some(1),
+            vector_rank: Some(1),
+        }
+    }
+
+    #[test]
+    fn select_candidate_abstains_when_only_generic_nouns_match() {
+        let helios = make_candidate("1", "Helios service runs on port 7654 on macOS.", 0.85);
+        let haproxy = make_candidate("2", "haproxy proxy runs on port 8404 on Linux.", 0.82);
+        let nexus = make_candidate("3", "Nexus service runs on port 6543 on Linux.", 0.80);
+        let candidates = vec![helios, haproxy, nexus];
+
+        assert!(
+            select_candidate("What port does Kafka service use?", &candidates).is_none(),
+            "Should abstain when only generic noun service matches"
+        );
+        assert!(
+            select_candidate("What port does Cassandra proxy use?", &candidates).is_none(),
+            "Should abstain when only generic noun proxy matches"
+        );
+        assert!(
+            select_candidate("What service runs on port 80?", &candidates).is_none(),
+            "Should abstain when only generic noun port matches"
+        );
+
+        let selected_helios =
+            select_candidate("What port does Helios service use?", &candidates).unwrap();
+        assert_eq!(selected_helios.memory.id, "1");
+
+        let selected_port =
+            select_candidate("What service runs on port 6543?", &candidates).unwrap();
+        assert_eq!(selected_port.memory.id, "3");
+    }
+
+    #[test]
+    fn focus_clause_selects_matching_entity_clause_in_multi_entity_memory() {
+        let content = "haproxy runs on port 8404 on Linux and envoy runs on port 9901 on Linux.";
+        let focused_envoy =
+            focus_clause_for_question("What port does envoy use?", content).unwrap();
+        assert!(focused_envoy.contains("envoy"));
+        assert!(focused_envoy.contains("9901"));
+        assert!(!focused_envoy.contains("haproxy"));
+
+        let focused_haproxy =
+            focus_clause_for_question("What port does haproxy use?", content).unwrap();
+        assert!(focused_haproxy.contains("haproxy"));
+        assert!(focused_haproxy.contains("8404"));
+        assert!(!focused_haproxy.contains("envoy"));
+
+        assert!(focus_clause_for_question(
+            "What port does Redis use?",
+            "Redis runs on port 6379 on Linux."
+        )
+        .is_none());
+
+        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_none()
+            && NeedleReranker::find_needle_assets().is_some()
+        {
+            let (envoy_port, _) =
+                NeedleReranker::extract_via_native_needle("What port does envoy use?", content)
+                    .expect("Should extract envoy port");
+            assert_eq!(envoy_port, "9901");
+
+            let (haproxy_port, _) =
+                NeedleReranker::extract_via_native_needle("What port does haproxy use?", content)
+                    .expect("Should extract haproxy port");
+            assert_eq!(haproxy_port, "8404");
+        }
     }
 }
