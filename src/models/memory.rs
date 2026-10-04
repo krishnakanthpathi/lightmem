@@ -463,6 +463,7 @@ fn extract_subject_and_slots(
 
     let mut slots = BTreeMap::new();
     let mut slot_tokens = HashSet::new();
+    let mut prose_content = content.to_string();
 
     if let Ok(re_port) = Regex::new(r"(?i)\bport\s*[:=]?\s*(\d{1,5})\b") {
         let ports: Vec<String> = re_port
@@ -484,16 +485,14 @@ fn extract_subject_and_slots(
             })
             .collect();
         if urls.len() == 1 {
-            for part in urls[0].split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
-                if !part.is_empty() {
-                    slot_tokens.insert(part.to_lowercase());
-                }
-            }
+            prose_content = prose_content.replace(&urls[0], " ");
             slots.insert("url".to_string(), urls[0].clone());
         }
     }
 
-    if let Ok(re_os) = Regex::new(r"(?i)\b(linux|macos|windows|ubuntu|debian|alpine|freebsd)\b") {
+    if let Ok(re_os) = Regex::new(
+        r"(?i)\b(linux|macos|windows|ubuntu|debian|alpine|freebsd|fedora|arch|rhel|centos|rocky|alma|suse|opensuse|nixos|gentoo|solaris|openbsd|netbsd|dragonfly|ios|android)\b",
+    ) {
         let mut os_list: Vec<String> = re_os
             .captures_iter(content)
             .filter_map(|c| c.get(1).map(|m| m.as_str().to_lowercase()))
@@ -507,7 +506,9 @@ fn extract_subject_and_slots(
     }
 
     if slots.is_empty() {
-        if let Ok(re_kv) = Regex::new(r"(?i)^\s*([a-z0-9_\-\s]{2,40}?)\s+(?:is|=)\s+([^\s.,;]+)") {
+        if let Ok(re_kv) =
+            Regex::new(r"(?i)^\s*([a-z0-9_.\-/\s]{2,40}?)\s+(?:is|=)\s+([^\s.,;]+)")
+        {
             if let Some(cap) = re_kv.captures(content.trim()) {
                 if let (Some(lhs), Some(rhs)) = (cap.get(1), cap.get(2)) {
                     let val = rhs.as_str().trim().to_string();
@@ -560,11 +561,31 @@ fn extract_subject_and_slots(
     .into_iter()
     .collect();
 
-    let subjects: HashSet<String> = content
+    let mut subjects: HashSet<String> = prose_content
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
         .map(|w| w.to_lowercase())
         .filter(|w| w.len() > 1 && !stop_words.contains(w.as_str()) && !slot_tokens.contains(w))
         .collect();
+
+    if subjects.is_empty() {
+        let infra_nouns: HashSet<&str> = [
+            "server",
+            "node",
+            "host",
+            "service",
+            "cluster",
+            "engine",
+            "app",
+            "application",
+        ]
+        .into_iter()
+        .collect();
+        subjects = prose_content
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .map(|w| w.to_lowercase())
+            .filter(|w| infra_nouns.contains(w.as_str()) && !slot_tokens.contains(w))
+            .collect();
+    }
 
     (subjects, slots)
 }
@@ -610,4 +631,62 @@ pub fn detect_memory_conflict(a: &MemoryRecord, b: &MemoryRecord) -> Option<Memo
     }
 
     None
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+
+    fn make_fact(content: &str) -> MemoryRecord {
+        MemoryRecord::new(
+            MemoryType::Fact,
+            content.to_string(),
+            content.to_string(),
+            vec![],
+            1.0,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_url_subject_cannibalization() {
+        let m1 = make_fact("Atlas API endpoint is https://api.v1.atlas.io");
+        let m2 = make_fact("Atlas API endpoint is https://api.v2.atlas.io");
+        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect URL conflict");
+        assert_eq!(conflict.slot, "url");
+    }
+
+    #[test]
+    fn test_expanded_os_regex() {
+        let m1 = make_fact("Worker node runs on Fedora");
+        let m2 = make_fact("Worker node runs on Arch");
+        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect Fedora vs Arch OS conflict");
+        assert_eq!(conflict.slot, "os");
+
+        let m3 = make_fact("Worker node OS is Ubuntu");
+        let m4 = make_fact("Worker node OS is Fedora");
+        let conflict2 = detect_memory_conflict(&m3, &m4).expect("Should detect Ubuntu vs Fedora OS conflict");
+        assert_eq!(conflict2.slot, "os");
+    }
+
+    #[test]
+    fn test_dotted_and_slashed_keys_in_re_kv() {
+        let m1 = make_fact("db.max_connections = 100");
+        let m2 = make_fact("db.max_connections = 500");
+        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect dotted key KV conflict");
+        assert_eq!(conflict.slot, "value(db.max_connections)");
+
+        let m3 = make_fact("service/timeout_ms = 250");
+        let m4 = make_fact("service/timeout_ms = 1000");
+        let conflict2 = detect_memory_conflict(&m3, &m4).expect("Should detect slashed key KV conflict");
+        assert_eq!(conflict2.slot, "value(service/timeout_ms)");
+    }
+
+    #[test]
+    fn test_stopword_only_subject_fallback() {
+        let m1 = make_fact("Server node runs on Ubuntu");
+        let m2 = make_fact("Server node runs on Alpine");
+        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect conflict using infrastructure noun fallback");
+        assert_eq!(conflict.slot, "os");
+    }
 }
