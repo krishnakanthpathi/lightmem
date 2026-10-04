@@ -65,15 +65,89 @@ impl MemoryType {
     pub fn infer(content: &str) -> Self {
         let lower = content.trim().to_lowercase();
 
+        // 0. Explicit start-of-line category prefixes take precedence over mid-sentence substrings
+        if lower.starts_with("password:")
+            || lower.starts_with("secret:")
+            || lower.starts_with("credential:")
+        {
+            return MemoryType::Password;
+        }
+        if lower.starts_with("error:")
+            || lower.starts_with("bug:")
+            || lower.starts_with("panic:")
+            || lower.starts_with("exception:")
+        {
+            return MemoryType::Error;
+        }
+        if lower.starts_with("preference:") {
+            return MemoryType::Preference;
+        }
+        if lower.starts_with("rule:")
+            || lower.starts_with("instruction:")
+            || lower.starts_with("runbook:")
+            || lower.starts_with("how to ")
+        {
+            return MemoryType::Instruction;
+        }
+        if lower.starts_with("decision:") {
+            return MemoryType::Decision;
+        }
+        if lower.starts_with("goal:")
+            || lower.starts_with("objective:")
+            || lower.starts_with("okr:")
+            || lower.starts_with("milestone:")
+        {
+            return MemoryType::Goal;
+        }
+        if lower.starts_with("todo:")
+            || lower.starts_with("commitment:")
+            || lower.starts_with("action item:")
+        {
+            return MemoryType::Commitment;
+        }
+        if lower.starts_with("learning:") || lower.starts_with("til:") {
+            return MemoryType::Learning;
+        }
+        if lower.starts_with("event:") || lower.starts_with("incident:") {
+            return MemoryType::Event;
+        }
+        if lower.starts_with("relationship:") {
+            return MemoryType::Relationship;
+        }
+        if lower.starts_with("observation:") {
+            return MemoryType::Observation;
+        }
+        if lower.starts_with("artifact:") {
+            return MemoryType::Artifact;
+        }
+        if lower.starts_with("context:") || lower.starts_with("background:") {
+            return MemoryType::Context;
+        }
+        if lower.starts_with("fact:") {
+            return MemoryType::Fact;
+        }
+
         // 1. Password / Secret / Credential
-        if lower.starts_with("ghp_")
-            || lower.starts_with("github_pat_")
-            || lower.starts_with("sk-")
+        let has_secret_token = lower
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            .any(|t| {
+                t.starts_with("ghp_")
+                    || t.starts_with("github_pat_")
+                    || t.starts_with("sk-")
+                    || t.starts_with("glpat-")
+                    || t.starts_with("xoxb-")
+                    || (t.starts_with("akia")
+                        && t.len() >= 16
+                        && t.chars().all(|c| c.is_ascii_alphanumeric()))
+            });
+        let has_cred_url = lower
+            .split_whitespace()
+            .any(|tok| tok.contains("://") && tok.contains('@') && tok.matches(':').count() >= 2);
+
+        if has_secret_token
+            || has_cred_url
             || lower.contains("sk_live_")
             || lower.contains("sk_test_")
-            || lower.starts_with("glpat-")
-            || lower.starts_with("xoxb-")
-            || lower.starts_with("akia")
             || lower.contains("password:")
             || lower.contains("password is")
             || lower.contains("api_key")
@@ -85,15 +159,12 @@ impl MemoryType {
             || lower.contains("whsec_")
             || lower.contains("auth token")
             || lower.contains("private key")
-            || (lower.contains("://") && lower.contains('@') && lower.matches(':').count() >= 2)
         {
             return MemoryType::Password;
         }
 
         // 2. Error / Bug / Failure
-        if lower.starts_with("error:")
-            || lower.starts_with("bug:")
-            || lower.contains("panic:")
+        if lower.contains("panic:")
             || lower.contains("panic in ")
             || lower.contains("fix panic")
             || lower.contains("panicked")
@@ -111,40 +182,9 @@ impl MemoryType {
             return MemoryType::Error;
         }
 
-        // 3. Preference / Style (checked before Instruction so "Always prefer..." maps to Preference)
-        if lower.contains("prefers ")
-            || lower.contains("prefer ")
-            || lower.contains("user prefers")
-            || lower.starts_with("preference:")
-            || lower.contains("likes to use ")
-            || lower.contains("favorite ")
-            || lower.contains("dark mode")
-            || lower.contains("keybindings")
-        {
-            return MemoryType::Preference;
-        }
-
-        // 4. Instruction / Rule / Runbook
-        if lower.starts_with("always ")
-            || lower.starts_with("never ")
-            || lower.starts_with("do not ")
-            || lower.starts_with("don't ")
-            || lower.starts_with("how to ")
-            || lower.starts_with("rule:")
-            || lower.starts_with("instruction:")
-            || lower.starts_with("runbook:")
-            || lower.contains("must always ")
-            || lower.contains("must never ")
-            || lower.contains("make sure to ")
-            || lower.contains("step 1")
-        {
-            return MemoryType::Instruction;
-        }
-
-        // 5. Decision / Architecture Choice
+        // 3. Decision / Architecture Choice (checked before bare "dark mode" / Preference)
         if lower.contains("we decided")
             || lower.contains("decided to ")
-            || lower.starts_with("decision:")
             || lower.contains("agreed to ")
             || lower.contains("standardized on ")
             || lower.contains("switched from ")
@@ -154,6 +194,40 @@ impl MemoryType {
             || lower.contains("adopted ")
         {
             return MemoryType::Decision;
+        }
+
+        // 4. Security / engineering imperatives checked before generic "prefer "
+        if lower.contains("prevent ")
+            || lower.starts_with("never ")
+            || lower.contains(" never ")
+            || lower.contains("must always ")
+            || lower.contains("must never ")
+            || lower.starts_with("do not ")
+            || lower.contains(" do not ")
+            || lower.starts_with("don't ")
+            || lower.contains(" don't ")
+        {
+            return MemoryType::Instruction;
+        }
+
+        // 5. Preference / Style (checked before "always " so "Always prefer..." maps to Preference)
+        if lower.contains("prefers ")
+            || lower.contains("prefer ")
+            || lower.contains("user prefers")
+            || lower.contains("likes to use ")
+            || lower.contains("favorite ")
+            || lower.contains("dark mode")
+            || lower.contains("keybindings")
+        {
+            return MemoryType::Preference;
+        }
+
+        // 6. Instruction / Rule / Runbook
+        if lower.starts_with("always ")
+            || lower.contains("make sure to ")
+            || lower.contains("step 1")
+        {
+            return MemoryType::Instruction;
         }
 
         // 6. Goal / Objective / Target
@@ -323,6 +397,183 @@ impl FromStr for MemoryStatus {
                 other
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod infer_tests {
+    use super::*;
+    use crate::repositories::Storage;
+    use chrono::Duration;
+
+    #[test]
+    fn explicit_category_prefixes_take_precedence_over_substrings() {
+        assert_eq!(
+            MemoryType::infer("TODO: fix panic in worker"),
+            MemoryType::Commitment
+        );
+        assert_eq!(
+            MemoryType::infer("Error: api_key expired"),
+            MemoryType::Error
+        );
+        assert_eq!(
+            MemoryType::infer("Artifact: we decided to store schema here"),
+            MemoryType::Artifact
+        );
+        assert_eq!(
+            MemoryType::infer("Context: currently working on migrating to Postgres"),
+            MemoryType::Context
+        );
+        assert_eq!(
+            MemoryType::infer("Fact: user prefers dark mode in some docs"),
+            MemoryType::Fact
+        );
+        assert_eq!(
+            MemoryType::infer("Decision: fix panic by using bounded channels"),
+            MemoryType::Decision
+        );
+        assert_eq!(
+            MemoryType::infer("Goal: fix panic rate to zero"),
+            MemoryType::Goal
+        );
+        assert_eq!(
+            MemoryType::infer("Learning: api_key rotation requires dual reads"),
+            MemoryType::Learning
+        );
+        assert_eq!(
+            MemoryType::infer("Event: panic in production cluster"),
+            MemoryType::Event
+        );
+        assert_eq!(
+            MemoryType::infer("Relationship: Alice decided to mentor Bob"),
+            MemoryType::Relationship
+        );
+        assert_eq!(
+            MemoryType::infer("Observation: connection timeout during deploy"),
+            MemoryType::Observation
+        );
+        assert_eq!(
+            MemoryType::infer("Secret: some random text"),
+            MemoryType::Password
+        );
+        assert_eq!(
+            MemoryType::infer("Credential: internal service token"),
+            MemoryType::Password
+        );
+    }
+
+    #[test]
+    fn secret_token_prefixes_detected_mid_sentence() {
+        assert_eq!(
+            MemoryType::infer("GitHub personal token is ghp_1234567890abcdef"),
+            MemoryType::Password
+        );
+        assert_eq!(
+            MemoryType::infer("AWS access key is AKIAIOSFODNN7EXAMPLE"),
+            MemoryType::Password
+        );
+        assert_eq!(
+            MemoryType::infer("Fine-grained token: github_pat_11aabbccddeeff"),
+            MemoryType::Password
+        );
+        assert_eq!(
+            MemoryType::infer("Use sk-proj-1234567890 for staging"),
+            MemoryType::Password
+        );
+        assert_eq!(
+            MemoryType::infer("GitLab token is glpat-abcdef123456"),
+            MemoryType::Password
+        );
+        assert_eq!(
+            MemoryType::infer("Slack bot token is xoxb-12345-67890"),
+            MemoryType::Password
+        );
+    }
+
+    #[test]
+    fn credential_url_heuristic_checks_per_token() {
+        assert_eq!(
+            MemoryType::infer(
+                "Docs for @scope/pkg are at https://registry.npmjs.org/@scope/pkg (port: 443)"
+            ),
+            MemoryType::Fact
+        );
+        assert_eq!(
+            MemoryType::infer(
+                "Database URI is postgres://admin:secret123@localhost:5432/mydb"
+            ),
+            MemoryType::Password
+        );
+    }
+
+    #[test]
+    fn instruction_preference_and_decision_collisions_resolved() {
+        assert_eq!(
+            MemoryType::infer("We decided to support dark mode in v2"),
+            MemoryType::Decision
+        );
+        assert_eq!(
+            MemoryType::infer("Always prefer parameterized SQL queries to prevent injection"),
+            MemoryType::Instruction
+        );
+        assert_eq!(
+            MemoryType::infer("Always prefer dark mode"),
+            MemoryType::Preference
+        );
+        assert_eq!(
+            MemoryType::infer("Always prefer concise single-line answers with zero fluff"),
+            MemoryType::Preference
+        );
+    }
+
+    #[test]
+    fn as_of_excludes_expired_memories_with_null_expired_at() {
+        let storage = Storage::open_in_memory().expect("open_in_memory");
+        let now = Utc::now();
+
+        let mut expired_no_ts = MemoryRecord::new(
+            MemoryType::Fact,
+            "Expired No TS".to_string(),
+            "Redis legacy cluster runs on port 6379".to_string(),
+            vec![],
+            0.9,
+            None,
+        );
+        expired_no_ts.created_at = now - Duration::hours(2);
+        expired_no_ts.updated_at = now - Duration::hours(1);
+        expired_no_ts.status = MemoryStatus::Expired;
+        expired_no_ts.expired_at = None;
+        storage
+            .insert_memory(&expired_no_ts, Some(&[1.0, 0.0, 0.0, 0.0]))
+            .expect("insert expired_no_ts");
+
+        let mut active_mem = MemoryRecord::new(
+            MemoryType::Fact,
+            "Active Mem".to_string(),
+            "Redis primary cluster runs on port 6380".to_string(),
+            vec![],
+            0.9,
+            None,
+        );
+        active_mem.created_at = now - Duration::hours(2);
+        active_mem.updated_at = now - Duration::hours(2);
+        active_mem.status = MemoryStatus::Active;
+        active_mem.expired_at = None;
+        storage
+            .insert_memory(&active_mem, Some(&[0.0, 1.0, 0.0, 0.0]))
+            .expect("insert active_mem");
+
+        let bm25_hits = storage
+            .search_bm25("Redis", None, None, Some(now), 10)
+            .expect("search_bm25");
+        assert_eq!(bm25_hits.len(), 1);
+        assert_eq!(bm25_hits[0].0, active_mem.id);
+
+        let vec_hits = storage
+            .get_candidate_vectors_checked(None, None, Some(now), None)
+            .expect("get_candidate_vectors_checked");
+        assert_eq!(vec_hits.len(), 1);
+        assert_eq!(vec_hits[0].0, active_mem.id);
     }
 }
 
