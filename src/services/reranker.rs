@@ -300,61 +300,19 @@ impl NeedleReranker {
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
         let slot = requested_slot(question);
-        if slot == "profile" {
-            let profile_schema = r#"[{"name":"extract_profile","description":"Extract user handle and profile url","parameters":{"type":"object","properties":{"handle":{"type":"string","description":"Username or handle"},"url":{"type":"string","description":"Profile URL"}},"required":["handle","url"]}}]"#.to_string();
-            for input in [content.to_string(), format!("Extract fact: {}", content)] {
-                if let Some(raw) = Self::run_needle_query(profile_schema.clone(), input) {
-                    if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        if let Some((args, confidence)) = accepted_arguments(&envelope) {
-                            let handle = args
-                                .get("handle")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty() && grounded(s, content));
-                            let url = args
-                                .get("url")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty() && grounded(s, content));
-                            match (handle, url) {
-                                (Some(h), Some(u)) if h != u => {
-                                    return Some((format!("{} ({})", h, u), confidence));
-                                }
-                                (Some(h), _) => return Some((h.to_string(), confidence)),
-                                (None, Some(u)) => return Some((u.to_string(), confidence)),
-                                (None, None) => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let is_core_triad = matches!(slot, "port" | "os" | "service");
+        let is_core_triad = matches!(slot.as_str(), "port" | "os" | "service");
         let tools_json = if is_core_triad {
             r#"[{"name":"extract_facts","description":"Extract service name, port, and os","parameters":{"type":"object","properties":{"service":{"type":"string","description":"Service or application name (e.g. Redis, Postgres, Kokoro)"},"port":{"type":"integer","description":"Port number"},"os":{"type":"string","description":"Operating system (e.g. Linux, macOS, Windows)"}},"required":["service","port","os"]}}]"#.to_string()
         } else {
-            let (param_type, description) = match slot {
-                "person_name" => ("string", "Full name of the user or person"),
-                "url" => ("string", "Full URL or endpoint"),
-                "profile" => ("string", "User handle or profile URL"),
-                "handle" => ("string", "Username or handle"),
-                "path" => ("string", "File or directory path"),
-                "ip" => ("string", "IP address"),
-                "brightness" => ("integer", "Brightness level"),
-                "secret" => ("string", "Secret, token, or password"),
-                _ => ("string", "Primary factual statement or decision"),
-            };
             format!(
-                r#"[{{"name":"extract_fact","description":"Extract grounded fact from the memory","parameters":{{"type":"object","properties":{{"{}":{{"type":"{}","description":"{}"}}}},"required":["{}"]}}}}]"#,
-                slot, param_type, description, slot
+                r#"[{{"name":"extract_fact","description":"Extract {slot} from text","parameters":{{"type":"object","properties":{{"{slot}":{{"type":"string","description":"The {slot}"}}}},"required":["{slot}"]}}}}]"#
             )
         };
 
         let extract_from_raw = |raw_json: &str| -> Option<(String, f32)> {
             let envelope: serde_json::Value = serde_json::from_str(raw_json).ok()?;
-            let (args, confidence) = accepted_arguments_for_slot(&envelope, Some(slot))?;
-            let value = args.get(slot)?;
+            let (args, confidence) = accepted_arguments_for_slot(&envelope, Some(&slot))?;
+            let value = args.get(&slot)?;
             let answer = value
                 .as_str()
                 .map(str::to_owned)
@@ -418,9 +376,16 @@ fn no_evidence(provider: &str) -> AnswerResult {
     }
 }
 
-fn requested_slot(question: &str) -> &'static str {
+/// Dynamically infer the target slot noun from the question's syntax without hardcoded domain lists.
+fn requested_slot(question: &str) -> String {
     let q = question.to_lowercase();
-    let tokens = NeedleReranker::tokenize(question);
+    let ordered: Vec<String> = question
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 1)
+        .collect();
+    let tokens: HashSet<&str> = ordered.iter().map(String::as_str).collect();
+
     if tokens.contains("port")
         && !(q.starts_with("what service")
             || q.starts_with("which service")
@@ -430,53 +395,10 @@ fn requested_slot(question: &str) -> &'static str {
             || q.starts_with("which app")
             || q.starts_with("what runs"))
     {
-        return "port";
-    }
-    if tokens.contains("url")
-        || tokens.contains("endpoint")
-        || tokens.contains("uri")
-        || tokens.contains("link")
-        || tokens.contains("website")
-    {
-        return "url";
-    }
-    if tokens.contains("handle")
-        || tokens.contains("handles")
-        || tokens.contains("username")
-        || tokens.contains("userid")
-    {
-        return "handle";
-    }
-    if tokens.contains("profile") || tokens.contains("profiles") || tokens.contains("account") {
-        return "profile";
-    }
-    if tokens.contains("password")
-        || tokens.contains("token")
-        || tokens.contains("secret")
-        || q.contains("api key")
-        || tokens.contains("credential")
-    {
-        return "secret";
+        return "port".to_string();
     }
     if tokens.contains("os") || q.contains("operating system") || tokens.contains("platform") {
-        return "os";
-    }
-    if q.starts_with("who ") || tokens.contains("name") {
-        return "person_name";
-    }
-    if tokens.contains("path")
-        || tokens.contains("directory")
-        || tokens.contains("folder")
-        || tokens.contains("location")
-        || q.starts_with("where ")
-    {
-        return "path";
-    }
-    if tokens.contains("ip") || tokens.contains("hostname") || tokens.contains("address") {
-        return "ip";
-    }
-    if tokens.contains("brightness") || tokens.contains("volume") || tokens.contains("percentage") {
-        return "brightness";
+        return "os".to_string();
     }
     if tokens.contains("service")
         || tokens.contains("app")
@@ -484,9 +406,32 @@ fn requested_slot(question: &str) -> &'static str {
         || tokens.contains("tool")
         || q.starts_with("what runs")
     {
-        return "service";
+        return "service".to_string();
     }
-    "fact"
+
+    match ordered.first().map(String::as_str) {
+        Some("who") => return "name".to_string(),
+        Some("where") => return "location".to_string(),
+        Some("when") => return "time".to_string(),
+        Some("what" | "which") if ordered.len() >= 2 => {
+            let second = ordered[1].as_str();
+            if !matches!(
+                second,
+                "is" | "are" | "was" | "were" | "does" | "do" | "did" | "the" | "my" | "our"
+            ) {
+                return second.to_string();
+            }
+        }
+        _ => {}
+    }
+
+    let trailing_verbs = ["use", "uses", "used", "run", "runs", "running", "is", "are"];
+    ordered
+        .iter()
+        .rev()
+        .find(|t| !trailing_verbs.contains(&t.as_str()))
+        .cloned()
+        .unwrap_or_else(|| "value".to_string())
 }
 
 fn valid_port(value: &str) -> bool {
@@ -560,7 +505,9 @@ fn select_candidate<'a>(
     question: &str,
     candidates: &'a [ScoredMemory],
 ) -> Option<&'a ScoredMemory> {
+    let dynamic_slot = requested_slot(question);
     let generic: HashSet<&str> = [
+        dynamic_slot.as_str(),
         "port",
         "operating",
         "system",
@@ -569,35 +516,8 @@ fn select_candidate<'a>(
         "app",
         "service",
         "tool",
-        "url",
-        "endpoint",
-        "uri",
-        "link",
-        "website",
-        "profile",
-        "profiles",
-        "handle",
-        "handles",
-        "username",
-        "account",
         "user",
         "users",
-        "name",
-        "ip",
-        "address",
-        "hostname",
-        "brightness",
-        "volume",
-        "level",
-        "percentage",
-        "path",
-        "folder",
-        "directory",
-        "location",
-        "password",
-        "token",
-        "secret",
-        "credential",
         "run",
         "runs",
         "running",
@@ -621,7 +541,7 @@ fn select_candidate<'a>(
         .filter_map(|candidate| {
             let doc = NeedleReranker::tokenize(&candidate.memory.to_card_text());
             let hits = specific.iter().filter(|t| doc.contains(t.as_str())).count();
-            // Require an entity/content match; generic words such as "port" alone are not evidence.
+            // Require an entity/content match; generic words such as the target slot alone are not evidence.
             if (!specific.is_empty() && hits == 0) || query.is_disjoint(&doc) {
                 return None;
             }
