@@ -406,6 +406,23 @@ impl Storage {
         Ok(rows > 0)
     }
 
+    pub fn clear_all(&self, hard_delete: bool) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let rows = if hard_delete {
+            let deleted = tx.execute("DELETE FROM memories", [])?;
+            tx.execute("DELETE FROM embedding_state", [])?;
+            deleted
+        } else {
+            tx.execute(
+                "UPDATE memories SET status='expired', expired_at=?1, updated_at=?1 WHERE status='active'",
+                params![Utc::now().to_rfc3339()],
+            )?
+        };
+        tx.commit()?;
+        Ok(rows)
+    }
+
     pub fn count_memories(
         &self,
         category: Option<MemoryType>,

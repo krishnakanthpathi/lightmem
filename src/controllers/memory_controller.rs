@@ -334,6 +334,11 @@ impl LightMem {
         self.storage.forget_memory(id, hard_delete)
     }
 
+    /// Clear (soft-retire or permanently delete) all memories in the database
+    pub fn clear_all(&self, hard_delete: bool) -> Result<usize> {
+        self.storage.clear_all(hard_delete)
+    }
+
     /// Scan active memories, smart-merge duplicate content (union tags, max confidence, best title, earliest created_at), and delete redundant rows
     pub fn deduplicate(&self) -> Result<usize> {
         self.storage

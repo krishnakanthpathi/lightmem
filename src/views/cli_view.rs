@@ -607,6 +607,36 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_clear(removed: usize, hard: bool, db_path: &Path, json: bool) -> Result<()> {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "removed": removed,
+                    "hard_deleted": hard,
+                    "database": db_path.display().to_string(),
+                })
+            );
+            return Ok(());
+        }
+
+        let db_str = Self::format_path(db_path);
+        let action = if hard {
+            "Permanently wiped"
+        } else {
+            "Soft-retired"
+        };
+        println!(
+            "{} {} {} memories {} {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold(action),
+            Self::white_bold(&removed.to_string()),
+            Self::slate("from"),
+            Self::slate(&db_str)
+        );
+        Ok(())
+    }
+
     pub fn render_dedup(merged_count: usize, db_path: &Path, json: bool) -> Result<()> {
         if json {
             println!(

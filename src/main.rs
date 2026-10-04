@@ -123,14 +123,30 @@ enum Commands {
         json: bool,
     },
 
-    /// Forget or expire a memory
+    /// Forget or expire a memory (or all memories with --all)
     Forget {
-        /// Memory ID to forget
-        id: String,
+        /// Memory ID to forget (or omit when using --all)
+        id: Option<String>,
+
+        /// Forget all memories in the database
+        #[arg(long)]
+        all: bool,
 
         /// Permanently delete instead of soft-retiring
         #[arg(long)]
         hard: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete / wipe the entire memory database (aliases: purge, reset)
+    #[command(visible_alias = "purge", visible_alias = "reset")]
+    Clear {
+        /// Soft-retire all memories instead of permanently deleting the database
+        #[arg(long)]
+        soft: bool,
 
         /// Output result as JSON
         #[arg(long)]
@@ -218,6 +234,10 @@ enum Commands {
         #[arg(long)]
         reranker: Option<String>,
 
+        /// Delete / reset the active memory database
+        #[arg(long)]
+        reset_db: bool,
+
         /// Approve migration of the selected database when the embedding model changes
         #[arg(long)]
         yes: bool,
@@ -277,6 +297,14 @@ fn open_controller(db_path: Option<&Path>, global: bool) -> Result<LightMem> {
         LightMem::open_at(path, config)
     } else {
         LightMem::open_default(global)
+    }
+}
+
+fn remove_db_files(db_path: &Path) {
+    let _ = std::fs::remove_file(db_path);
+    if let Some(s) = db_path.to_str() {
+        let _ = std::fs::remove_file(format!("{}-wal", s));
+        let _ = std::fs::remove_file(format!("{}-shm", s));
     }
 }
 
@@ -425,10 +453,39 @@ fn main() -> Result<()> {
             CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
         }
 
-        Commands::Forget { id, hard, json } => {
+        Commands::Forget {
+            id,
+            all,
+            hard,
+            json,
+        } => {
             let lm = open_controller(effective_db, global)?;
-            let ok = lm.forget(&id, hard)?;
-            CliView::render_forget(&id, ok, hard, json)?;
+            if all || id.as_deref() == Some("all") {
+                let db_path = lm.db_path().to_path_buf();
+                let removed = lm.clear_all(hard)?;
+                drop(lm);
+                if hard {
+                    remove_db_files(&db_path);
+                }
+                CliView::render_clear(removed, hard, &db_path, json)?;
+            } else if let Some(target_id) = id {
+                let ok = lm.forget(&target_id, hard)?;
+                CliView::render_forget(&target_id, ok, hard, json)?;
+            } else {
+                anyhow::bail!("Provide a memory <ID> or pass '--all' to forget all memories.");
+            }
+        }
+
+        Commands::Clear { soft, json } => {
+            let hard = !soft;
+            let lm = open_controller(effective_db, global)?;
+            let db_path = lm.db_path().to_path_buf();
+            let removed = lm.clear_all(hard)?;
+            drop(lm);
+            if hard {
+                remove_db_files(&db_path);
+            }
+            CliView::render_clear(removed, hard, &db_path, json)?;
         }
 
         Commands::Export {
@@ -488,8 +545,27 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
+            reset_db,
             yes,
         } => {
+            if reset_db {
+                let lm = open_controller(effective_db, global)?;
+                let db_path = lm.db_path().to_path_buf();
+                let removed = lm.clear_all(true)?;
+                drop(lm);
+                remove_db_files(&db_path);
+                CliView::render_clear(removed, true, &db_path, false)?;
+                if backend.is_none()
+                    && onnx_model.is_none()
+                    && download.is_none()
+                    && url.is_none()
+                    && model.is_none()
+                    && reranker.is_none()
+                {
+                    return Ok(());
+                }
+            }
+
             if let Some(ref dl) = download {
                 let targets: Vec<&str> = match dl.to_lowercase().as_str() {
                     "all" => vec!["bge-small", "minilm", "nomic"],
