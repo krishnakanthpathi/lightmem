@@ -412,8 +412,8 @@ impl Reranker for OnnxQaReranker {
 
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
-            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.40)
-            .take(5)
+            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.47)
+            .take(10)
             .collect();
 
         if gated.is_empty() {
@@ -783,7 +783,12 @@ fn content_tokens(text: &str) -> HashSet<String> {
 }
 
 fn is_valid_qa_span(span: &str, margin: f32, q_tokens: &HashSet<String>) -> bool {
-    if margin < 1.5 {
+    let is_alnum_code = !span.contains(' ')
+        && span.len() >= 6
+        && span.chars().any(|c| c.is_ascii_alphabetic())
+        && span.chars().any(|c| c.is_ascii_digit());
+    let min_margin = if is_alnum_code { 1.5 } else { 6.5 };
+    if margin < min_margin {
         return false;
     }
 
@@ -802,10 +807,9 @@ fn is_valid_qa_span(span: &str, margin: f32, q_tokens: &HashSet<String>) -> bool
         return false;
     }
 
-    // For low-margin spans (1.5 <= margin < 7.0), reject spans that echo question words
-    // (e.g. "4 passport-sized photos" echoing "passport" on "what is my passport number"),
-    // while keeping clean identifier extractions like "HAQPP8118D" (0 question word overlap).
-    if margin < 7.0 && s_tokens.iter().any(|t| q_tokens.contains(t)) {
+    // Reject medium-margin spans (< 10.0) that echo question words
+    // (e.g. "4 passport-sized photos" echoing "passport" on "what is my passport number")
+    if margin < 10.0 && s_tokens.iter().any(|t| q_tokens.contains(t)) {
         return false;
     }
 

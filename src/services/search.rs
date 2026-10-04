@@ -271,7 +271,15 @@ impl HybridSearchEngine {
                 let bm25_rank = bm25_ranks.get(&id).copied();
                 let vector_rank = vector_ranks.get(&id).copied();
                 let boost = Self::compute_acronym_and_lexical_boost(&query_tokens, &mem);
-                let mut base_score = rrf_scores.get(&id).copied().unwrap_or(0.0) * (K + 1.0) / 2.0;
+                let mut rrf_val = rrf_scores.get(&id).copied().unwrap_or(0.0);
+                if !bm25_ranks.is_empty()
+                    && bm25_rank.is_none()
+                    && vector_rank.unwrap_or(999) <= 5
+                    && boost >= 0.06 - 1e-5
+                {
+                    rrf_val += 1.0 / (K + 10.0 + vector_rank.unwrap_or(5) as f32);
+                }
+                let mut base_score = rrf_val * (K + 1.0) / 2.0;
                 if is_bare_acronym_query && bm25_rank.is_none() && boost >= 0.12 - 1e-5 {
                     base_score += 0.5;
                 }
