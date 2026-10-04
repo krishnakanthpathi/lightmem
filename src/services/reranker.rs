@@ -391,22 +391,101 @@ fn requested_slot(question: &str) -> String {
         Some("where") => return "location".to_string(),
         Some("when") => return "time".to_string(),
         Some("what" | "which") if ordered.len() >= 2 => {
-            let second = ordered[1].as_str();
-            if !matches!(
-                second,
-                "is" | "are" | "was" | "were" | "does" | "do" | "did" | "the" | "my" | "our"
-            ) {
-                return second.to_string();
+            const AUX_VERBS: &[&str] = &[
+                "is", "are", "was", "were", "does", "do", "did", "has", "have", "had", "can",
+                "will", "should",
+            ];
+            const MODIFIERS: &[&str] = &[
+                "the", "a", "an", "my", "our", "your", "their", "its", "user", "users",
+                "default", "primary", "current", "main", "active", "official", "exact",
+                "standard",
+            ];
+            const ACTION_VERBS: &[&str] = &["runs", "run", "uses", "use"];
+            let is_verb = |w: &str| AUX_VERBS.contains(&w) || ACTION_VERBS.contains(&w);
+
+            let rest = &ordered[1..];
+            let skip_idx = rest
+                .iter()
+                .position(|w| !AUX_VERBS.contains(&w.as_str()) && !MODIFIERS.contains(&w.as_str()))
+                .unwrap_or(rest.len());
+            let trimmed = &rest[skip_idx..];
+
+            if let Some(prep_idx) = trimmed
+                .iter()
+                .position(|w| matches!(w.as_str(), "of" | "for"))
+            {
+                if prep_idx > 0
+                    && prep_idx + 1 < trimmed.len()
+                    && !trimmed[..prep_idx].iter().any(|w| is_verb(w.as_str()))
+                {
+                    if prep_idx >= 2
+                        && trimmed[prep_idx - 2] == "operating"
+                        && trimmed[prep_idx - 1] == "system"
+                    {
+                        return "os".to_string();
+                    }
+                    let noun = trimmed[prep_idx - 1].as_str();
+                    return if noun == "ports" {
+                        "port".to_string()
+                    } else {
+                        noun.to_string()
+                    };
+                }
+            }
+
+            let mod_idx = rest
+                .iter()
+                .position(|w| !MODIFIERS.contains(&w.as_str()))
+                .unwrap_or(rest.len());
+            let after_mods = &rest[mod_idx..];
+            if after_mods.len() >= 3
+                && after_mods[0] == "operating"
+                && after_mods[1] == "system"
+                && is_verb(after_mods[2].as_str())
+            {
+                return "os".to_string();
+            }
+            if after_mods.len() >= 2
+                && !is_verb(after_mods[0].as_str())
+                && is_verb(after_mods[1].as_str())
+            {
+                let noun = after_mods[0].as_str();
+                return if noun == "ports" {
+                    "port".to_string()
+                } else {
+                    noun.to_string()
+                };
             }
         }
         _ => {}
     }
 
-    let trailing_verbs = ["use", "uses", "used", "run", "runs", "running", "is", "are"];
+    if ordered
+        .iter()
+        .any(|t| matches!(t.as_str(), "port" | "ports"))
+        || ordered
+            .windows(2)
+            .any(|w| w[0] == "listening" && w[1] == "on")
+    {
+        return "port".to_string();
+    }
+    if ordered.iter().any(|t| t == "os")
+        || ordered
+            .windows(2)
+            .any(|w| w[0] == "operating" && w[1] == "system")
+    {
+        return "os".to_string();
+    }
+
+    const TRAILING_IGNORE: &[&str] = &[
+        "use", "uses", "used", "run", "runs", "running", "is", "are", "was", "were", "do",
+        "does", "did", "on", "in", "at", "to", "for", "of", "with", "by", "from", "listening",
+        "located", "stored", "configured",
+    ];
     ordered
         .iter()
         .rev()
-        .find(|t| !trailing_verbs.contains(&t.as_str()))
+        .find(|t| !TRAILING_IGNORE.contains(&t.as_str()))
         .cloned()
         .unwrap_or_else(|| "value".to_string())
 }
@@ -533,6 +612,27 @@ mod tests {
             requested_slot("what are the users codeforces profile"),
             "profile"
         );
+        assert_eq!(requested_slot("What is the user's name?"), "name");
+        assert_eq!(requested_slot("What is the Atlas endpoint?"), "endpoint");
+        assert_eq!(requested_slot("What is the port of Redis?"), "port");
+        assert_eq!(requested_slot("What is the OS of Helios?"), "os");
+        assert_eq!(
+            requested_slot("What is the operating system of Helios?"),
+            "os"
+        );
+        assert_eq!(requested_slot("What default port does Orion use?"), "port");
+        assert_eq!(requested_slot("What is Nexus listening on?"), "port");
+        assert_eq!(
+            requested_slot("Which port is Redis listening on?"),
+            "port"
+        );
+        assert_eq!(
+            requested_slot("What is the endpoint for Atlas?"),
+            "endpoint"
+        );
+        assert_eq!(requested_slot("Who is the team lead?"), "name");
+        assert_eq!(requested_slot("Where is the backup stored?"), "location");
+        assert_eq!(requested_slot("When does the job run?"), "time");
         assert!(valid_port("6379"));
         assert!(!valid_port("99999"));
     }
