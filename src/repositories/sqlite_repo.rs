@@ -63,6 +63,17 @@ impl Storage {
             "Database schema is newer than this version of LightMem"
         );
         if version == 2 {
+            let needs_tag_or_key_repair: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE tags NOT LIKE '[%' OR (dedup_key = '' AND TRIM(content) != ''))",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if needs_tag_or_key_repair {
+                repair_legacy_tags_and_dedup_keys(&tx)?;
+                tx.commit()?;
+            }
             return Ok(());
         }
         tx.execute_batch(
@@ -145,23 +156,7 @@ impl Storage {
         }
         tx.execute("CREATE INDEX IF NOT EXISTS idx_memories_dedup ON memories(status, category, dedup_key)", [])?;
         // Store tags as JSON so commas inside a tag survive a round trip.
-        let tags: Vec<(String, String, String)> = {
-            let mut stmt = tx.prepare("SELECT id, tags, content FROM memories")?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        for (id, tags, content) in tags {
-            let values: Vec<String> = tags
-                .split(',')
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(str::to_owned)
-                .collect();
-            tx.execute(
-                "UPDATE memories SET tags=?1, dedup_key=?2 WHERE id=?3",
-                params![serde_json::to_string(&values)?, duplicate_key(&content), id],
-            )?;
-        }
+        repair_legacy_tags_and_dedup_keys(&tx)?;
         tx.pragma_update(None, "user_version", 2)?;
         tx.commit()?;
         Ok(())
@@ -773,6 +768,38 @@ fn expire_due_conn(conn: &Connection) -> Result<usize> {
     Ok(expired)
 }
 
+fn parse_tags_column(tags_str: &str) -> Vec<String> {
+    let trimmed = tags_str.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(parsed) = serde_json::from_str::<Vec<String>>(trimmed) {
+        return parsed;
+    }
+    trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn repair_legacy_tags_and_dedup_keys(tx: &Transaction) -> Result<()> {
+    let rows_to_fix: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT id, tags, content FROM memories")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, tags, content) in rows_to_fix {
+        let values = parse_tags_column(&tags);
+        tx.execute(
+            "UPDATE memories SET tags=?1, dedup_key=?2 WHERE id=?3",
+            params![serde_json::to_string(&values)?, duplicate_key(&content), id],
+        )?;
+    }
+    Ok(())
+}
+
 fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
     let id: String = row.get(0)?;
     let category_str: String = row.get(1)?;
@@ -793,9 +820,7 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
         .parse::<MemoryStatus>()
         .unwrap_or(MemoryStatus::Active);
 
-    let tags: Vec<String> = serde_json::from_str(&tags_str).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
-    })?;
+    let tags: Vec<String> = parse_tags_column(&tags_str);
 
     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
         .map(|dt| dt.with_timezone(&Utc))
@@ -1130,5 +1155,47 @@ mod fts_tests {
             .unwrap();
         assert!(!q2_hits.is_empty());
         assert_eq!(q2_hits[0].0, mem_redis.id);
+    }
+
+    #[test]
+    fn test_legacy_comma_tags_with_user_version_2_repairs_and_lists_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("memories.db");
+        {
+            let storage = Storage::open(&db_path).unwrap();
+            let m = MemoryRecord::new(
+                MemoryType::Fact,
+                "HP Profile".to_string(),
+                "Developer profile on kk-Linux".to_string(),
+                vec!["json-tag".to_string()],
+                0.9,
+                None,
+            );
+            storage.insert_memory(&m, None).unwrap();
+        }
+        // Simulate ssh hp state: user_version is already 2, but a row has legacy comma-separated tags
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE memories SET tags = 'profile,bio,career,developer,agent:hp-docker-ollama-moorcheh'",
+                [],
+            )
+            .unwrap();
+        }
+        let reopened = Storage::open(&db_path).unwrap();
+        let listed = reopened
+            .list_memories(None, Some(MemoryStatus::Active), None, 10)
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].tags,
+            vec![
+                "profile",
+                "bio",
+                "career",
+                "developer",
+                "agent:hp-docker-ollama-moorcheh"
+            ]
+        );
     }
 }
