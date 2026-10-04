@@ -262,27 +262,7 @@ impl NeedleReranker {
 
     /// Use Native Needle 3 C-FFI to extract structured (content, title, category, tags) from an imported JSON or text record
     pub fn extract_import_record_via_needle(raw_input: &str) -> Option<ExtractedImportRecord> {
-        let tools_schema = serde_json::json!([{
-            "name": "extract_memory",
-            "description": "Extract memory content, title, category, and tags from raw JSON or text",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {"type": "string", "description": "Primary text or fact of the memory"},
-                    "title": {"type": "string", "description": "Short summary title"},
-                    "category": {
-                        "type": "string",
-                        "enum": [
-                            "fact", "decision", "instruction", "preference", "learning",
-                            "goal", "commitment", "artifact", "event", "relationship",
-                            "observation", "error", "context", "password"
-                        ]
-                    },
-                    "tags": {"type": "string", "description": "Comma-separated tags"}
-                },
-                "required": ["content", "title", "category"]
-            }
-        }]);
+        let tools_schema = r#"[{"name":"extract_memory","description":"Extract memory content, title, category, and tags from raw JSON or text","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Primary text or fact of the memory"},"title":{"type":"string","description":"Short summary title"},"category":{"type":"string","enum":["fact","decision","instruction","preference","learning","goal","commitment","artifact","event","relationship","observation","error","context","password"]},"tags":{"type":"string","description":"Comma-separated tags"}},"required":["content","title","category"]}}]"#;
 
         let raw_json_str = Self::run_needle_query(tools_schema.to_string(), raw_input.to_string())?;
 
@@ -319,44 +299,90 @@ impl NeedleReranker {
 
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
-        let slot = requested_slot(question)?;
-        let tools_json = if matches!(slot, "port" | "os" | "service") {
+        let slot = requested_slot(question);
+        if slot == "profile" {
+            let profile_schema = r#"[{"name":"extract_profile","description":"Extract user handle and profile url","parameters":{"type":"object","properties":{"handle":{"type":"string","description":"Username or handle"},"url":{"type":"string","description":"Profile URL"}},"required":["handle","url"]}}]"#.to_string();
+            for input in [content.to_string(), format!("Extract fact: {}", content)] {
+                if let Some(raw) = Self::run_needle_query(profile_schema.clone(), input) {
+                    if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Some((args, confidence)) = accepted_arguments(&envelope) {
+                            let handle = args
+                                .get("handle")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty() && grounded(s, content));
+                            let url = args
+                                .get("url")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty() && grounded(s, content));
+                            match (handle, url) {
+                                (Some(h), Some(u)) if h != u => {
+                                    return Some((format!("{} ({})", h, u), confidence));
+                                }
+                                (Some(h), _) => return Some((h.to_string(), confidence)),
+                                (None, Some(u)) => return Some((u.to_string(), confidence)),
+                                (None, None) => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_core_triad = matches!(slot, "port" | "os" | "service");
+        let tools_json = if is_core_triad {
             r#"[{"name":"extract_facts","description":"Extract service name, port, and os","parameters":{"type":"object","properties":{"service":{"type":"string","description":"Service or application name (e.g. Redis, Postgres, Kokoro)"},"port":{"type":"integer","description":"Port number"},"os":{"type":"string","description":"Operating system (e.g. Linux, macOS, Windows)"}},"required":["service","port","os"]}}]"#.to_string()
         } else {
-            let description = match slot {
-                "person_name" => "Full name or handle of the user or person",
-                "url" => "Full URL or endpoint explicitly stated in the memory",
-                _ => "Exact value explicitly stated in the memory",
+            let (param_type, description) = match slot {
+                "person_name" => ("string", "Full name of the user or person"),
+                "url" => ("string", "Full URL or endpoint"),
+                "profile" => ("string", "User handle or profile URL"),
+                "handle" => ("string", "Username or handle"),
+                "path" => ("string", "File or directory path"),
+                "ip" => ("string", "IP address"),
+                "brightness" => ("integer", "Brightness level"),
+                "secret" => ("string", "Secret, token, or password"),
+                _ => ("string", "Primary factual statement or decision"),
             };
-            serde_json::json!([{
-                "name": "extract_fact",
-                "description": "Extract grounded fact from the memory",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        slot: {"type": "string", "description": description}
-                    },
-                    "required": [slot]
-                }
-            }])
-            .to_string()
+            format!(
+                r#"[{{"name":"extract_fact","description":"Extract grounded fact from the memory","parameters":{{"type":"object","properties":{{"{}":{{"type":"{}","description":"{}"}}}},"required":["{}"]}}}}]"#,
+                slot, param_type, description, slot
+            )
         };
-        let raw = Self::run_needle_query(tools_json, content.to_string())?;
-        let envelope: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let (args, confidence) = accepted_arguments_for_slot(&envelope, Some(slot))?;
-        let value = args.get(slot)?;
-        let answer = value
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| value.as_i64().map(|n| n.to_string()))?;
-        let answer = answer.trim();
-        if answer.is_empty() || !grounded(answer, content) {
-            return None;
+
+        let extract_from_raw = |raw_json: &str| -> Option<(String, f32)> {
+            let envelope: serde_json::Value = serde_json::from_str(raw_json).ok()?;
+            let (args, confidence) = accepted_arguments_for_slot(&envelope, Some(slot))?;
+            let value = args.get(slot)?;
+            let answer = value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_i64().map(|n| n.to_string()))?;
+            let answer = answer.trim();
+            if answer.is_empty() || !grounded(answer, content) {
+                return None;
+            }
+            if slot == "port" && !valid_port(answer) {
+                return None;
+            }
+            Some((answer.to_string(), confidence))
+        };
+
+        let inputs = if is_core_triad {
+            [content.to_string(), format!("Extract fact: {}", content)]
+        } else {
+            [format!("Extract fact: {}", content), content.to_string()]
+        };
+
+        for input in inputs {
+            if let Some(raw) = Self::run_needle_query(tools_json.clone(), input) {
+                if let Some(res) = extract_from_raw(&raw) {
+                    return Some(res);
+                }
+            }
         }
-        if slot == "port" && !valid_port(answer) {
-            return None;
-        }
-        Some((answer.to_string(), confidence))
+        None
     }
 }
 
@@ -392,7 +418,7 @@ fn no_evidence(provider: &str) -> AnswerResult {
     }
 }
 
-fn requested_slot(question: &str) -> Option<&'static str> {
+fn requested_slot(question: &str) -> &'static str {
     let q = question.to_lowercase();
     let tokens = NeedleReranker::tokenize(question);
     if tokens.contains("port")
@@ -404,23 +430,53 @@ fn requested_slot(question: &str) -> Option<&'static str> {
             || q.starts_with("which app")
             || q.starts_with("what runs"))
     {
-        return Some("port");
+        return "port";
     }
-    if tokens.contains("url") || tokens.contains("endpoint") || tokens.contains("uri") {
-        return Some("url");
+    if tokens.contains("url")
+        || tokens.contains("endpoint")
+        || tokens.contains("uri")
+        || tokens.contains("link")
+        || tokens.contains("website")
+    {
+        return "url";
+    }
+    if tokens.contains("handle")
+        || tokens.contains("handles")
+        || tokens.contains("username")
+        || tokens.contains("userid")
+    {
+        return "handle";
+    }
+    if tokens.contains("profile") || tokens.contains("profiles") || tokens.contains("account") {
+        return "profile";
     }
     if tokens.contains("password")
         || tokens.contains("token")
         || tokens.contains("secret")
         || q.contains("api key")
+        || tokens.contains("credential")
     {
-        return Some("secret");
+        return "secret";
     }
     if tokens.contains("os") || q.contains("operating system") || tokens.contains("platform") {
-        return Some("os");
+        return "os";
     }
     if q.starts_with("who ") || tokens.contains("name") {
-        return Some("person_name");
+        return "person_name";
+    }
+    if tokens.contains("path")
+        || tokens.contains("directory")
+        || tokens.contains("folder")
+        || tokens.contains("location")
+        || q.starts_with("where ")
+    {
+        return "path";
+    }
+    if tokens.contains("ip") || tokens.contains("hostname") || tokens.contains("address") {
+        return "ip";
+    }
+    if tokens.contains("brightness") || tokens.contains("volume") || tokens.contains("percentage") {
+        return "brightness";
     }
     if tokens.contains("service")
         || tokens.contains("app")
@@ -428,9 +484,9 @@ fn requested_slot(question: &str) -> Option<&'static str> {
         || tokens.contains("tool")
         || q.starts_with("what runs")
     {
-        return Some("service");
+        return "service";
     }
-    None
+    "fact"
 }
 
 fn valid_port(value: &str) -> bool {
@@ -515,6 +571,33 @@ fn select_candidate<'a>(
         "tool",
         "url",
         "endpoint",
+        "uri",
+        "link",
+        "website",
+        "profile",
+        "profiles",
+        "handle",
+        "handles",
+        "username",
+        "account",
+        "user",
+        "users",
+        "name",
+        "ip",
+        "address",
+        "hostname",
+        "brightness",
+        "volume",
+        "level",
+        "percentage",
+        "path",
+        "folder",
+        "directory",
+        "location",
+        "password",
+        "token",
+        "secret",
+        "credential",
         "run",
         "runs",
         "running",
@@ -571,11 +654,12 @@ mod tests {
         assert!(grounded("8080", "server runs on 8080."));
         assert_eq!(
             requested_slot("what port does postgres service use?"),
-            Some("port")
+            "port"
         );
+        assert_eq!(requested_slot("what app runs on port 8880?"), "service");
         assert_eq!(
-            requested_slot("what app runs on port 8880?"),
-            Some("service")
+            requested_slot("what are the users codeforces profile"),
+            "profile"
         );
         assert!(valid_port("6379"));
         assert!(!valid_port("99999"));
