@@ -90,7 +90,9 @@ impl NeedleReranker {
     fn tokenize(text: &str) -> HashSet<String> {
         let stop_words: HashSet<&str> = [
             "what", "is", "our", "the", "a", "an", "on", "in", "to", "for", "with", "does", "do",
-            "how", "why", "where", "when", "who", "which", "are", "was", "were",
+            "did", "how", "why", "where", "when", "who", "which", "are", "was", "were", "my", "me",
+            "your", "user", "users", "use", "uses", "used", "run", "runs", "running", "please",
+            "tell",
         ]
         .into_iter()
         .collect();
@@ -378,36 +380,11 @@ fn no_evidence(provider: &str) -> AnswerResult {
 
 /// Dynamically infer the target slot noun from the question's syntax without hardcoded domain lists.
 fn requested_slot(question: &str) -> String {
-    let q = question.to_lowercase();
     let ordered: Vec<String> = question
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .map(|w| w.to_lowercase())
         .filter(|w| w.len() > 1)
         .collect();
-    let tokens: HashSet<&str> = ordered.iter().map(String::as_str).collect();
-
-    if tokens.contains("port")
-        && !(q.starts_with("what service")
-            || q.starts_with("which service")
-            || q.starts_with("what application")
-            || q.starts_with("which application")
-            || q.starts_with("what app")
-            || q.starts_with("which app")
-            || q.starts_with("what runs"))
-    {
-        return "port".to_string();
-    }
-    if tokens.contains("os") || q.contains("operating system") || tokens.contains("platform") {
-        return "os".to_string();
-    }
-    if tokens.contains("service")
-        || tokens.contains("app")
-        || tokens.contains("application")
-        || tokens.contains("tool")
-        || q.starts_with("what runs")
-    {
-        return "service".to_string();
-    }
 
     match ordered.first().map(String::as_str) {
         Some("who") => return "name".to_string(),
@@ -506,42 +483,17 @@ fn select_candidate<'a>(
     candidates: &'a [ScoredMemory],
 ) -> Option<&'a ScoredMemory> {
     let dynamic_slot = requested_slot(question);
-    let generic: HashSet<&str> = [
-        dynamic_slot.as_str(),
-        "port",
-        "operating",
-        "system",
-        "os",
-        "application",
-        "app",
-        "service",
-        "tool",
-        "user",
-        "users",
-        "run",
-        "runs",
-        "running",
-        "use",
-        "uses",
-        "used",
-        "my",
-        "me",
-        "please",
-        "tell",
-    ]
-    .into_iter()
-    .collect();
     let query = NeedleReranker::tokenize(question);
     let specific: HashSet<_> = query
         .iter()
-        .filter(|t| !generic.contains(t.as_str()))
+        .filter(|t| t.as_str() != dynamic_slot.as_str())
         .collect();
     candidates
         .iter()
         .filter_map(|candidate| {
             let doc = NeedleReranker::tokenize(&candidate.memory.to_card_text());
             let hits = specific.iter().filter(|t| doc.contains(t.as_str())).count();
-            // Require an entity/content match; generic words such as the target slot alone are not evidence.
+            // Require an entity/content match; the target slot word alone is not evidence.
             if (!specific.is_empty() && hits == 0) || query.is_disjoint(&doc) {
                 return None;
             }
@@ -576,7 +528,7 @@ mod tests {
             requested_slot("what port does postgres service use?"),
             "port"
         );
-        assert_eq!(requested_slot("what app runs on port 8880?"), "service");
+        assert_eq!(requested_slot("what service runs on port 8880?"), "service");
         assert_eq!(
             requested_slot("what are the users codeforces profile"),
             "profile"
