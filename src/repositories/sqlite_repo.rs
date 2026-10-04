@@ -586,7 +586,7 @@ impl Storage {
             sql.push_str(&format!(" AND m.created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
             sql.push_str(&format!(
-                " AND (m.expired_at IS NULL OR m.expired_at > ?{})",
+                " AND ((m.status = 'active' AND m.expired_at IS NULL) OR (m.expired_at IS NOT NULL AND m.expired_at > ?{}))",
                 params_vec.len()
             ));
         } else if let Some(st) = status {
@@ -661,7 +661,7 @@ impl Storage {
             sql.push_str(&format!(" AND m.created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
             sql.push_str(&format!(
-                " AND (m.expired_at IS NULL OR m.expired_at > ?{})",
+                " AND ((m.status = 'active' AND m.expired_at IS NULL) OR (m.expired_at IS NOT NULL AND m.expired_at > ?{}))",
                 params_vec.len()
             ));
         } else if let Some(st) = status {
