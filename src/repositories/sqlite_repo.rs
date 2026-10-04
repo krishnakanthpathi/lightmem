@@ -613,6 +613,24 @@ impl Storage {
         for r in rows {
             results.push(r?);
         }
+        drop(param_refs);
+        if results.is_empty() {
+            let clean_fallback = sanitize_fts5_query(query);
+            let tokens: Vec<&str> = clean_fallback.split_whitespace().collect();
+            if tokens.len() >= 2 {
+                params_vec[0] = Box::new(tokens.join(" OR "));
+                let fallback_refs: Vec<&dyn rusqlite::ToSql> =
+                    params_vec.iter().map(|p| p.as_ref()).collect();
+                let fallback_rows = stmt.query_map(fallback_refs.as_slice(), |row| {
+                    let id: String = row.get(0)?;
+                    let rank: f64 = row.get(1)?;
+                    Ok((id, rank as f32))
+                })?;
+                for r in fallback_rows {
+                    results.push(r?);
+                }
+            }
+        }
         Ok(results)
     }
 
@@ -820,18 +838,36 @@ fn deserialize_f32_slice(bytes: &[u8]) -> Vec<f32> {
 }
 
 fn sanitize_fts5_query(query: &str) -> String {
-    // Strip characters that break FTS5 grammar
-    let mut tokens = Vec::new();
-    for word in query.split_whitespace() {
-        let clean: String = word
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-            .collect();
-        if !clean.is_empty() {
-            tokens.push(format!("\"{}\"*", clean));
-        }
-    }
-    tokens.join(" ")
+    const STOPWORDS: &[&str] = &[
+        "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were",
+        "does", "do", "did", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with",
+        "by", "from", "as", "and", "or", "my", "me", "our", "your", "use", "uses", "used",
+        "run", "runs", "running", "please", "tell",
+    ];
+
+    let raw_tokens: Vec<&str> = query
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+        .map(|w| w.trim_matches(|c: char| c == '-' || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    let filtered: Vec<&str> = raw_tokens
+        .iter()
+        .copied()
+        .filter(|t| !STOPWORDS.contains(&t.to_ascii_lowercase().as_str()))
+        .collect();
+
+    let active_tokens = if filtered.is_empty() {
+        raw_tokens
+    } else {
+        filtered
+    };
+
+    active_tokens
+        .into_iter()
+        .map(|clean| format!("\"{}\"*", clean))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn conn_settings(storage: &Storage) -> Result<()> {
@@ -988,4 +1024,108 @@ where
         }
     }
     Ok(merged)
+}
+
+#[cfg(test)]
+mod fts_tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_fts5_query_splits_dotted_tokens_and_ips() {
+        assert_eq!(
+            sanitize_fts5_query("198.51.100.214"),
+            "\"198\"* \"51\"* \"100\"* \"214\"*"
+        );
+        assert_eq!(
+            sanitize_fts5_query("16.4.2-r9"),
+            "\"16\"* \"4\"* \"2-r9\"*"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_fts5_query_filters_question_stopwords() {
+        assert_eq!(
+            sanitize_fts5_query("What port does Redis use?"),
+            "\"port\"* \"Redis\"*"
+        );
+        // All-stopword query retains original tokens instead of returning empty
+        assert_eq!(
+            sanitize_fts5_query("what is the"),
+            "\"what\"* \"is\"* \"the\"*"
+        );
+    }
+
+    #[test]
+    fn test_search_bm25_matches_dotted_versions_ips_and_natural_questions() {
+        let storage = Storage::open_in_memory().unwrap();
+
+        let mem_redis = MemoryRecord::new(
+            MemoryType::Fact,
+            "Redis port".to_string(),
+            "Redis runs on port 6379 on Linux.".to_string(),
+            vec!["redis".to_string()],
+            0.9,
+            None,
+        );
+        let mem_pg = MemoryRecord::new(
+            MemoryType::Fact,
+            "Postgres version".to_string(),
+            "Production database is pinned to PostgreSQL 16.4.2-r9 on staging.".to_string(),
+            vec!["postgres".to_string()],
+            0.9,
+            None,
+        );
+        let mem_ip = MemoryRecord::new(
+            MemoryType::Fact,
+            "Bastion host".to_string(),
+            "Primary bastion host IP is 198.51.100.214:2222.".to_string(),
+            vec!["network".to_string()],
+            0.9,
+            None,
+        );
+
+        storage.insert_memory(&mem_redis, None).unwrap();
+        storage.insert_memory(&mem_pg, None).unwrap();
+        storage.insert_memory(&mem_ip, None).unwrap();
+
+        // Dotted version query
+        let pg_hits = storage
+            .search_bm25("16.4.2-r9", None, Some(MemoryStatus::Active), None, 10)
+            .unwrap();
+        assert_eq!(pg_hits.len(), 1);
+        assert_eq!(pg_hits[0].0, mem_pg.id);
+
+        // Dotted IP query
+        let ip_hits = storage
+            .search_bm25("198.51.100.214", None, Some(MemoryStatus::Active), None, 10)
+            .unwrap();
+        assert_eq!(ip_hits.len(), 1);
+        assert_eq!(ip_hits[0].0, mem_ip.id);
+
+        // Natural question with stopwords
+        let q1_hits = storage
+            .search_bm25(
+                "What port does Redis use?",
+                None,
+                Some(MemoryStatus::Active),
+                None,
+                10,
+            )
+            .unwrap();
+        assert!(!q1_hits.is_empty());
+        assert_eq!(q1_hits[0].0, mem_redis.id);
+
+        // Natural question requiring OR fallback ("service" is not in the memory)
+        let q2_hits = storage
+            .search_bm25(
+                "What service runs on port 6379?",
+                None,
+                Some(MemoryStatus::Active),
+                None,
+                10,
+            )
+            .unwrap();
+        assert!(!q2_hits.is_empty());
+        assert_eq!(q2_hits[0].0, mem_redis.id);
+    }
 }
