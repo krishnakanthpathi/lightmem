@@ -499,9 +499,7 @@ mod infer_tests {
             MemoryType::Fact
         );
         assert_eq!(
-            MemoryType::infer(
-                "Database URI is postgres://admin:secret123@localhost:5432/mydb"
-            ),
+            MemoryType::infer("Database URI is postgres://admin:secret123@localhost:5432/mydb"),
             MemoryType::Password
         );
     }
@@ -757,8 +755,7 @@ fn extract_subject_and_slots(
     }
 
     if slots.is_empty() {
-        if let Ok(re_kv) =
-            Regex::new(r"(?i)^\s*([a-z0-9_.\-/\s]{2,40}?)\s+(?:is|=)\s+([^\s.,;]+)")
+        if let Ok(re_kv) = Regex::new(r"(?i)^\s*([a-z0-9_.\-/\s]{2,40}?)\s+(?:is|=)\s+([^\s.,;]+)")
         {
             if let Some(cap) = re_kv.captures(content.trim()) {
                 if let (Some(lhs), Some(rhs)) = (cap.get(1), cap.get(2)) {
@@ -911,12 +908,14 @@ mod conflict_tests {
     fn test_expanded_os_regex() {
         let m1 = make_fact("Worker node runs on Fedora");
         let m2 = make_fact("Worker node runs on Arch");
-        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect Fedora vs Arch OS conflict");
+        let conflict =
+            detect_memory_conflict(&m1, &m2).expect("Should detect Fedora vs Arch OS conflict");
         assert_eq!(conflict.slot, "os");
 
         let m3 = make_fact("Worker node OS is Ubuntu");
         let m4 = make_fact("Worker node OS is Fedora");
-        let conflict2 = detect_memory_conflict(&m3, &m4).expect("Should detect Ubuntu vs Fedora OS conflict");
+        let conflict2 =
+            detect_memory_conflict(&m3, &m4).expect("Should detect Ubuntu vs Fedora OS conflict");
         assert_eq!(conflict2.slot, "os");
     }
 
@@ -924,12 +923,14 @@ mod conflict_tests {
     fn test_dotted_and_slashed_keys_in_re_kv() {
         let m1 = make_fact("db.max_connections = 100");
         let m2 = make_fact("db.max_connections = 500");
-        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect dotted key KV conflict");
+        let conflict =
+            detect_memory_conflict(&m1, &m2).expect("Should detect dotted key KV conflict");
         assert_eq!(conflict.slot, "value(db.max_connections)");
 
         let m3 = make_fact("service/timeout_ms = 250");
         let m4 = make_fact("service/timeout_ms = 1000");
-        let conflict2 = detect_memory_conflict(&m3, &m4).expect("Should detect slashed key KV conflict");
+        let conflict2 =
+            detect_memory_conflict(&m3, &m4).expect("Should detect slashed key KV conflict");
         assert_eq!(conflict2.slot, "value(service/timeout_ms)");
     }
 
@@ -937,7 +938,8 @@ mod conflict_tests {
     fn test_stopword_only_subject_fallback() {
         let m1 = make_fact("Server node runs on Ubuntu");
         let m2 = make_fact("Server node runs on Alpine");
-        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect conflict using infrastructure noun fallback");
+        let conflict = detect_memory_conflict(&m1, &m2)
+            .expect("Should detect conflict using infrastructure noun fallback");
         assert_eq!(conflict.slot, "os");
     }
 }

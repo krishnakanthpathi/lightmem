@@ -395,15 +395,11 @@ mod tests {
             None,
         );
 
-        storage
-            .insert_memory(&target, Some(&[1.0, 0.0]))
-            .unwrap();
+        storage.insert_memory(&target, Some(&[1.0, 0.0])).unwrap();
         storage
             .insert_memory(&dist2, Some(&[0.9, 0.43589]))
             .unwrap();
-        storage
-            .insert_memory(&dist3, Some(&[0.8, 0.6]))
-            .unwrap();
+        storage.insert_memory(&dist3, Some(&[0.8, 0.6])).unwrap();
 
         let results = HybridSearchEngine::search(
             &storage,

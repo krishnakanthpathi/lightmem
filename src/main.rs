@@ -200,7 +200,7 @@ enum Commands {
         as_of: Option<DateTime<Utc>>,
 
         /// Max candidate memories to retrieve for reranking
-        #[arg(short = 'l', long, default_value = "5")]
+        #[arg(short = 'l', long, default_value = "10")]
         limit: usize,
 
         /// Output results as JSON for agent consumption

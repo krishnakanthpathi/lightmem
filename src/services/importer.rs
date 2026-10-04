@@ -102,12 +102,7 @@ fn get_str_field(val: &serde_json::Value, keys: &[&str]) -> Option<String> {
 
 fn try_parse_category_lenient(c: &str) -> Option<MemoryType> {
     let trimmed = c.trim().to_lowercase();
-    if trimmed.is_empty()
-        || matches!(
-            trimmed.as_str(),
-            "entity" | "node" | "item" | "record"
-        )
-    {
+    if trimmed.is_empty() || matches!(trimmed.as_str(), "entity" | "node" | "item" | "record") {
         return None;
     }
     if let Ok(matched) = trimmed.parse::<MemoryType>() {

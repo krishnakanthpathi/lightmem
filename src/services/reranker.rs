@@ -350,6 +350,24 @@ impl NeedleReranker {
             {
                 return None;
             }
+            if matches!(slot.as_str(), "id" | "number" | "port" | "name") {
+                let lower_ans = answer.to_lowercase();
+                if lower_ans.ends_with(".pdf")
+                    || lower_ans.ends_with(".png")
+                    || lower_ans.ends_with(".jpg")
+                    || lower_ans.ends_with(".jpeg")
+                    || lower_ans.ends_with(".doc")
+                    || lower_ans.ends_with(".docx")
+                    || lower_ans.ends_with(".md")
+                {
+                    return None;
+                }
+            }
+            if matches!(slot.as_str(), "id" | "number" | "port")
+                && (answer.split_whitespace().count() > 4 || confidence < 0.20)
+            {
+                return None;
+            }
             let content_tokens = Self::tokenize(content);
             if (content_tokens.contains("not") || content_tokens.contains("never"))
                 && (content_tokens.contains("recorded")
@@ -365,12 +383,19 @@ impl NeedleReranker {
             Some((answer.to_string(), confidence))
         };
 
-        let mut inputs = Vec::with_capacity(6);
+        let mut inputs = Vec::with_capacity(7);
         if let Some(focused) = focus_clause_for_question(question, content) {
             if let Some((_, rhs)) = focused.split_once(':') {
-                let rhs = rhs.trim();
+                let rhs = rhs.trim().trim_end_matches('.');
                 if !rhs.is_empty() {
                     inputs.push(format!("Extract fact: {} is {}", slot, rhs));
+                }
+            } else if let (Some(open), Some(close)) = (focused.find('('), focused.rfind(')')) {
+                if open + 1 < close {
+                    let inner = focused[open + 1..close].trim();
+                    if !inner.is_empty() {
+                        inputs.push(format!("Extract fact: {} is {}", slot, inner));
+                    }
                 }
             }
             inputs.push(format!("Extract fact: {}", focused));
@@ -428,6 +453,14 @@ fn no_evidence(provider: &str) -> AnswerResult {
 
 /// Dynamically infer the target slot noun from the question's syntax without hardcoded domain lists.
 fn requested_slot(question: &str) -> String {
+    let normalize_slot = |s: &str| -> String {
+        match s {
+            "ports" => "port".to_string(),
+            "no" | "num" | "numbers" => "number".to_string(),
+            "ids" => "id".to_string(),
+            other => other.to_string(),
+        }
+    };
     let ordered: Vec<String> = question
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .map(|w| w.to_lowercase())
@@ -471,12 +504,7 @@ fn requested_slot(question: &str) -> String {
                     {
                         return "os".to_string();
                     }
-                    let noun = trimmed[prep_idx - 1].as_str();
-                    return if noun == "ports" {
-                        "port".to_string()
-                    } else {
-                        noun.to_string()
-                    };
+                    return normalize_slot(trimmed[prep_idx - 1].as_str());
                 }
             }
 
@@ -496,12 +524,7 @@ fn requested_slot(question: &str) -> String {
                 && !is_verb(after_mods[0].as_str())
                 && is_verb(after_mods[1].as_str())
             {
-                let noun = after_mods[0].as_str();
-                return if noun == "ports" {
-                    "port".to_string()
-                } else {
-                    noun.to_string()
-                };
+                return normalize_slot(after_mods[0].as_str());
             }
         }
         _ => {}
@@ -556,7 +579,7 @@ fn requested_slot(question: &str) -> String {
         .iter()
         .rev()
         .find(|t| !TRAILING_IGNORE.contains(&t.as_str()))
-        .cloned()
+        .map(|s| normalize_slot(s.as_str()))
         .unwrap_or_else(|| "value".to_string())
 }
 
@@ -656,6 +679,24 @@ const GENERIC_TOKENS: &[&str] = &[
     "listening",
     "stored",
     "configured",
+    "card",
+    "cards",
+    "id",
+    "ids",
+    "no",
+    "num",
+    "number",
+    "numbers",
+    "roll",
+    "code",
+    "document",
+    "documents",
+    "record",
+    "records",
+    "file",
+    "files",
+    "detail",
+    "details",
 ];
 
 fn token_stem(token: &str) -> &str {
@@ -680,20 +721,25 @@ fn doc_contains_token(doc: &HashSet<String>, token: &str) -> bool {
     doc.iter().any(|d| token_stem(d) == stem)
 }
 
+fn is_target_slot_token(token: &str, dynamic_slot: &str) -> bool {
+    let dynamic_slot_stem = token_stem(dynamic_slot);
+    token_stem(token) == dynamic_slot_stem
+        || (dynamic_slot == "number" && matches!(token, "no" | "num" | "number" | "numbers"))
+}
+
 fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
     let dynamic_slot = requested_slot(question);
-    let dynamic_slot_stem = token_stem(&dynamic_slot);
     let query = NeedleReranker::tokenize(question);
     let anchor_tokens: HashSet<&str> = query
         .iter()
         .map(String::as_str)
-        .filter(|&t| token_stem(t) != dynamic_slot_stem && !GENERIC_TOKENS.contains(&t))
+        .filter(|&t| !is_target_slot_token(t, &dynamic_slot) && !GENERIC_TOKENS.contains(&t))
         .collect();
     if anchor_tokens.is_empty() {
         return None;
     }
 
-    let splitter = Regex::new(r"(?i)\n|;|\.\s+|,\s+and\s+|\s+and\s+|\s+-\s+").ok()?;
+    let splitter = Regex::new(r"(?i)\n|;|\.\s+|,\s+and\s+|\s+and\s+|\s+-\s+|,\s+").ok()?;
     let clauses: Vec<&str> = splitter
         .split(content)
         .map(str::trim)
@@ -738,18 +784,24 @@ fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
 }
 
 fn rank_candidates<'a>(question: &str, candidates: &'a [ScoredMemory]) -> Vec<&'a ScoredMemory> {
+    const RELATIVE_TOKENS: &[&str] = &[
+        "dad", "father", "mom", "mother", "brother", "sister", "annaya",
+    ];
     let dynamic_slot = requested_slot(question);
-    let dynamic_slot_stem = token_stem(&dynamic_slot);
     let query = NeedleReranker::tokenize(question);
     let specific: HashSet<&str> = query
         .iter()
         .map(String::as_str)
-        .filter(|&t| token_stem(t) != dynamic_slot_stem)
+        .filter(|&t| !is_target_slot_token(t, &dynamic_slot))
         .collect();
     let (generic_tokens, anchor_tokens): (HashSet<&str>, HashSet<&str>) = specific
         .iter()
         .copied()
         .partition(|t| GENERIC_TOKENS.contains(t));
+    let query_mentions_relative = query
+        .iter()
+        .any(|q| RELATIVE_TOKENS.iter().any(|r| token_stem(q) == *r));
+
     let mut scored: Vec<(&'a ScoredMemory, f32)> = candidates
         .iter()
         .filter_map(|candidate| {
@@ -771,7 +823,21 @@ fn rank_candidates<'a>(question: &str, candidates: &'a [ScoredMemory]) -> Vec<&'
             {
                 return None;
             }
-            let score = anchor_hits as f32 * 5.0 + generic_hits as f32 * 0.5 + candidate.score;
+            let fact_bonus = if candidate.memory.category == crate::models::MemoryType::Fact {
+                0.8
+            } else {
+                0.0
+            };
+            let relative_penalty = if !query_mentions_relative
+                && RELATIVE_TOKENS.iter().any(|r| doc_contains_token(&doc, r))
+            {
+                2.0
+            } else {
+                0.0
+            };
+            let score = anchor_hits as f32 * 5.0 + generic_hits as f32 * 0.5 + fact_bonus
+                - relative_penalty
+                + candidate.score;
             Some((candidate, score))
         })
         .collect();
@@ -952,6 +1018,78 @@ mod tests {
                 .answer("what is my father name", &[c3_family_list])
                 .unwrap();
             assert_eq!(res_family.answer, "Pathi Srinivas");
+        }
+    }
+
+    #[test]
+    fn pan_card_no_and_college_id_queries_extract_exact_identifiers() {
+        assert_eq!(requested_slot("what is my pan card no"), "number");
+        assert_eq!(requested_slot("what is my college roll no"), "number");
+        assert_eq!(requested_slot("what is my college id"), "id");
+
+        let mut dad_pan = make_candidate(
+            "1",
+            "Dad's PAN card is stored at /home/krishnakanth/Documents/Family Vault/files/dad/dad_PAN.pdf",
+            0.48,
+        );
+        dad_pan.memory.category = crate::models::MemoryType::Artifact;
+        dad_pan.memory.title = "Dad's PAN Card Location".to_string();
+
+        let user_pan = make_candidate("2", "User's PAN ID is HAQPP8118D.", 0.44);
+
+        let mut family_docs = make_candidate(
+            "6",
+            "The vault stores sensitive personal documents including Aadhaar cards, PAN cards, educational certificates (10th, Inter, BTech), payslips, and vehicle registration certificates (RCs) for various family members.",
+            0.41,
+        );
+        family_docs.memory.category = crate::models::MemoryType::Context;
+
+        let pan_candidates = vec![dad_pan, user_pan, family_docs];
+        let selected_pan = select_candidate("what is my pan card no", &pan_candidates).unwrap();
+        assert_eq!(selected_pan.memory.id, "2");
+
+        let mut removal_decision = make_candidate(
+            "10",
+            "The user decided to remove 'krishna_CollegeID.pdf' from their files and registry, keeping 'krishna_CollegeID_22A31A05I7.pdf' instead.",
+            0.90,
+        );
+        removal_decision.memory.category = crate::models::MemoryType::Decision;
+        removal_decision.memory.title = "Removal of College ID".to_string();
+
+        let user_identity_docs = make_candidate(
+            "11",
+            "The user (krishna) has various academic and identity documents stored, including BTech marks memos, 10th and Inter certificates, Aadhaar, PAN (HAQPP8118D), and College ID (22A31A05I7).",
+            0.89,
+        );
+
+        let college_candidates = vec![removal_decision.clone(), user_identity_docs.clone()];
+        let selected_college =
+            select_candidate("what is my college id", &college_candidates).unwrap();
+        assert_eq!(selected_college.memory.id, "11");
+
+        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_none()
+            && NeedleReranker::find_needle_assets().is_some()
+        {
+            let res_pan = NeedleReranker
+                .answer("what is my pan card no", &pan_candidates)
+                .unwrap();
+            assert_eq!(res_pan.answer, "HAQPP8118D");
+
+            let res_college = NeedleReranker
+                .answer("what is my college id", &college_candidates)
+                .unwrap();
+            assert_eq!(res_college.answer, "22A31A05I7");
+
+            let inter_record = make_candidate(
+                "12",
+                "The user (or the subject of the provided document) is Pathi Krishna Kanth, who completed their Intermediate education from the Board of Intermediate Education, Andhra Pradesh, India. Registered No: 2203226828. They graduated in May 2022 from KSN Junior College, Samalkot, with an A Grade and a total score of 945.",
+                0.41,
+            );
+            let roll_candidates = vec![removal_decision, inter_record, user_identity_docs];
+            let res_roll = NeedleReranker
+                .answer("what is my college roll no", &roll_candidates)
+                .unwrap();
+            assert!(res_roll.answer == "22A31A05I7" || res_roll.answer == "2203226828");
         }
     }
 }
