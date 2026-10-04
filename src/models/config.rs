@@ -10,10 +10,12 @@ pub struct LightMemConfig {
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
+    #[serde(default)]
+    pub qa_model: Option<String>,
 }
 
 fn default_reranker() -> String {
-    "needle".to_string()
+    "onnx".to_string()
 }
 
 impl Default for LightMemConfig {
@@ -24,6 +26,7 @@ impl Default for LightMemConfig {
             ollama_url: "http://localhost:11434".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
+            qa_model: Some("minilm-squad2".to_string()),
         }
     }
 }
@@ -125,8 +128,41 @@ impl LightMemConfig {
     }
 
     pub fn active_reranker_summary(&self) -> String {
-        match self.reranker.as_str() {
-            "needle" | "precision" => "needle-3 (Native C-FFI · needle3.cact)".to_string(),
+        let lower = self.reranker.to_lowercase();
+        if let Some(ollama_model) = lower.strip_prefix("ollama:") {
+            return format!("ollama:{} (@ {})", ollama_model, self.ollama_url);
+        }
+        match lower.as_str() {
+            "onnx" | "qa" | "needle" | "precision" | "minilm-squad2" | "tinyroberta-squad2" => {
+                let model = if lower == "tinyroberta-squad2" {
+                    "tinyroberta-squad2"
+                } else {
+                    self.qa_model.as_deref().unwrap_or("minilm-squad2")
+                };
+                match model {
+                    "tinyroberta-squad2"
+                    | "tinyroberta"
+                    | "deepset/tinyroberta-squad2"
+                    | "onnx-community/tinyroberta-squad2-ONNX" => {
+                        "tinyroberta-squad2 (local ONNX Extractive QA)".to_string()
+                    }
+                    "minilm-squad2"
+                    | "minilm"
+                    | "deepset/minilm-uncased-squad2"
+                    | "lquint/minilm-uncased-squad2-onnx" => {
+                        "minilm-squad2 (local ONNX Extractive QA)".to_string()
+                    }
+                    custom => format!("{} (local ONNX Extractive QA)", custom),
+                }
+            }
+            "ollama" => {
+                let model = self
+                    .qa_model
+                    .as_deref()
+                    .filter(|m| !matches!(*m, "minilm-squad2" | "tinyroberta-squad2"))
+                    .unwrap_or("auto");
+                format!("ollama:{} (@ {})", model, self.ollama_url)
+            }
             "top1" => "top1 (0ms vector rank-1)".to_string(),
             other => other.to_string(),
         }

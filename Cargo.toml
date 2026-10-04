@@ -32,7 +32,9 @@ dirs = "5.0"
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 colored = "2.1"
-libc = "0.2"
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "api-24", "download-binaries", "tls-rustls"] }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+ndarray = { version = "0.17.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.10"

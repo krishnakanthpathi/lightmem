@@ -178,16 +178,16 @@ enum Commands {
         enrich: bool,
     },
 
-    /// Ask a question and synthesize/extract the factual answer (with toggleable Native Needle 3 C-FFI reranker)
+    /// Ask a question and synthesize/extract the factual answer (via local ONNX Extractive QA or Ollama)
     Answer {
         /// The question to answer
         question: String,
 
-        /// Toggle: Force use of Needle 3 precision reranker & factual slot extractor
+        /// Toggle: Force use of precision extractive QA reranker
         #[arg(long, alias = "needle")]
         precision: bool,
 
-        /// Override reranker mode for this query ("top1" or "needle")
+        /// Override reranker mode for this query ("onnx", "ollama", "ollama:<model>", or "top1")
         #[arg(short = 'r', long)]
         reranker: Option<String>,
 
@@ -214,11 +214,11 @@ enum Commands {
         #[arg(long)]
         backend: Option<String>,
 
-        /// ONNX model name ('bge-small', 'minilm', 'nomic') or path to directory with custom model.onnx
+        /// ONNX embedding model name ('bge-small', 'minilm', 'nomic') or path to directory with custom model.onnx
         #[arg(long)]
         onnx_model: Option<String>,
 
-        /// Pre-download ONNX model(s) into ~/.lightmem/models ('bge-small', 'minilm', 'nomic', or 'all')
+        /// Pre-download ONNX model(s) into ~/.lightmem/models ('bge-small', 'minilm', 'nomic', 'minilm-squad2', 'tinyroberta-squad2', 'qa', or 'all')
         #[arg(long)]
         download: Option<String>,
 
@@ -230,9 +230,13 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
 
-        /// Default reranker: 'top1' (0ms instant) or 'needle' (Native Needle 3 C-FFI)
+        /// Default reranker: 'onnx' (local Extractive QA), 'ollama' ('ollama:<model>'), or 'top1' (0ms instant)
         #[arg(long)]
         reranker: Option<String>,
+
+        /// QA / reranker model ('minilm-squad2', 'tinyroberta-squad2', or Ollama model like 'qwen2.5:3b')
+        #[arg(long)]
+        qa_model: Option<String>,
 
         /// Delete / reset the active memory database
         #[arg(long)]
@@ -422,8 +426,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             if precision {
-                let result =
-                    lm.answer_with_reranker(&query, cat, as_of_dt, limit, Some("needle"))?;
+                let result = lm.answer(&query, cat, as_of_dt, limit, true)?;
                 CliView::render_answer(&result, json)?;
             } else {
                 let results = lm.recall(&query, cat, as_of_dt, limit, min_similarity)?;
@@ -528,13 +531,11 @@ fn main() -> Result<()> {
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
-            let override_mode = if precision {
-                Some("needle")
+            let result = if let Some(ref explicit_r) = reranker {
+                lm.answer_with_reranker(&question, cat, as_of_dt, limit, Some(explicit_r))?
             } else {
-                reranker.as_deref()
+                lm.answer(&question, cat, as_of_dt, limit, precision)?
             };
-
-            let result = lm.answer_with_reranker(&question, cat, as_of_dt, limit, override_mode)?;
             CliView::render_answer(&result, json)?;
         }
 
@@ -545,6 +546,7 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
+            qa_model,
             reset_db,
             yes,
         } => {
@@ -561,28 +563,45 @@ fn main() -> Result<()> {
                     && url.is_none()
                     && model.is_none()
                     && reranker.is_none()
+                    && qa_model.is_none()
                 {
                     return Ok(());
                 }
             }
 
             if let Some(ref dl) = download {
-                let targets: Vec<&str> = match dl.to_lowercase().as_str() {
-                    "all" => vec!["bge-small", "minilm", "nomic"],
-                    "bge-small" | "bge-small-en-v1.5" | "xenova/bge-small-en-v1.5" => {
-                        vec!["bge-small"]
+                match dl.to_lowercase().as_str() {
+                    "all" => {
+                        for m in ["bge-small", "minilm", "nomic"] {
+                            let _ = lightmem::OnnxEmbeddingProvider::new(Some(m))?;
+                        }
+                        let _ = lightmem::OnnxQaReranker::ensure_model_downloaded(Some(
+                            "minilm-squad2",
+                        ))?;
                     }
-                    "minilm" | "all-minilm-l6-v2" | "xenova/all-minilm-l6-v2" => vec!["minilm"],
+                    "qa" | "minilm-squad2" | "deepset/minilm-uncased-squad2" => {
+                        let _ = lightmem::OnnxQaReranker::ensure_model_downloaded(Some(
+                            "minilm-squad2",
+                        ))?;
+                    }
+                    "tinyroberta" | "tinyroberta-squad2" | "deepset/tinyroberta-squad2" => {
+                        let _ = lightmem::OnnxQaReranker::ensure_model_downloaded(Some(
+                            "tinyroberta-squad2",
+                        ))?;
+                    }
+                    "bge-small" | "bge-small-en-v1.5" | "xenova/bge-small-en-v1.5" => {
+                        let _ = lightmem::OnnxEmbeddingProvider::new(Some("bge-small"))?;
+                    }
+                    "minilm" | "all-minilm-l6-v2" | "xenova/all-minilm-l6-v2" => {
+                        let _ = lightmem::OnnxEmbeddingProvider::new(Some("minilm"))?;
+                    }
                     "nomic" | "nomic-embed-text" | "nomic-ai/nomic-embed-text-v1.5" => {
-                        vec!["nomic"]
+                        let _ = lightmem::OnnxEmbeddingProvider::new(Some("nomic"))?;
                     }
                     other => anyhow::bail!(
-                        "Unknown model '{}' for --download. Choose 'bge-small', 'minilm', 'nomic', or 'all'.",
+                        "Unknown model '{}' for --download. Choose 'bge-small', 'minilm', 'nomic', 'minilm-squad2', 'tinyroberta-squad2', 'qa', or 'all'.",
                         other
                     ),
-                };
-                for m in targets {
-                    let _ = lightmem::OnnxEmbeddingProvider::new(Some(m))?;
                 }
             }
 
@@ -607,13 +626,42 @@ fn main() -> Result<()> {
                 changed = true;
             }
             if let Some(r) = reranker {
-                let lower = r.to_lowercase();
-                if lower == "needle" || lower == "precision" || lower == "top1" {
+                let trimmed = r.trim();
+                let lower = trimmed.to_lowercase();
+                if let Some(ollama_m) = trimmed
+                    .strip_prefix("ollama:")
+                    .or_else(|| trimmed.strip_prefix("OLLAMA:"))
+                {
+                    cfg.reranker = "ollama".to_string();
+                    cfg.qa_model = Some(ollama_m.to_string());
+                    changed = true;
+                } else if let Some(onnx_m) = trimmed
+                    .strip_prefix("onnx:")
+                    .or_else(|| trimmed.strip_prefix("ONNX:"))
+                {
+                    cfg.reranker = "onnx".to_string();
+                    cfg.qa_model = Some(onnx_m.to_string());
+                    changed = true;
+                } else if matches!(
+                    lower.as_str(),
+                    "onnx" | "qa" | "needle" | "precision" | "ollama" | "top1"
+                ) {
                     cfg.reranker = lower;
                     changed = true;
+                } else if matches!(lower.as_str(), "minilm-squad2" | "tinyroberta-squad2") {
+                    cfg.reranker = "onnx".to_string();
+                    cfg.qa_model = Some(lower);
+                    changed = true;
                 } else {
-                    anyhow::bail!("Invalid reranker '{}'. Choose 'top1' or 'needle'.", r);
+                    anyhow::bail!(
+                        "Invalid reranker '{}'. Choose 'onnx', 'ollama' ('ollama:<model>'), 'minilm-squad2', 'tinyroberta-squad2', or 'top1'.",
+                        r
+                    );
                 }
+            }
+            if let Some(qm) = qa_model {
+                cfg.qa_model = Some(qm);
+                changed = true;
             }
 
             if changed {
@@ -678,16 +726,40 @@ fn main() -> Result<()> {
                         "bge-small",
                         "minilm",
                         "nomic",
+                        "minilm-squad2",
+                        "tinyroberta-squad2",
+                        "qa",
                         "all",
                     ]))
                 })
                 .mut_arg("reranker", |a| {
-                    a.value_parser(PossibleValuesParser::new(["needle", "top1"]))
+                    a.value_parser(PossibleValuesParser::new([
+                        "onnx",
+                        "ollama",
+                        "top1",
+                        "minilm-squad2",
+                        "tinyroberta-squad2",
+                    ]))
+                })
+                .mut_arg("qa_model", |a| {
+                    a.value_parser(PossibleValuesParser::new([
+                        "minilm-squad2",
+                        "tinyroberta-squad2",
+                        "qwen2.5:3b",
+                        "qwen2.5:1.5b",
+                        "llama3.2:1b",
+                    ]))
                 })
             });
             cmd = cmd.mut_subcommand("answer", |sub| {
                 sub.mut_arg("reranker", |a| {
-                    a.value_parser(PossibleValuesParser::new(["needle", "top1"]))
+                    a.value_parser(PossibleValuesParser::new([
+                        "onnx",
+                        "ollama",
+                        "top1",
+                        "minilm-squad2",
+                        "tinyroberta-squad2",
+                    ]))
                 })
             });
             clap_complete::generate(shell, &mut cmd, "lmem", &mut io::stdout());

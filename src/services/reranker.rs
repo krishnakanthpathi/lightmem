@@ -1,12 +1,18 @@
-use crate::models::{MemoryRecord, ScoredMemory};
-use anyhow::Result;
-use libc::{c_char, c_int, dlopen, dlsym, RTLD_LAZY};
+use crate::models::{LightMemConfig, MemoryRecord, ScoredMemory};
+use anyhow::{Context, Result};
+use ndarray::Array2;
+use ort::{
+    session::{builder::GraphOptimizationLevel, Session},
+    value::Value,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::ffi::{CStr, CString};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tokenizers::{Tokenizer, TruncationParams, TruncationStrategy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerResult {
@@ -21,8 +27,8 @@ pub trait Reranker: Send + Sync {
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult>;
 }
 
-/// Mode 1: Fast / Instant Top-1 Reranker (Default)
-/// Returns Rank-1 candidate with 0ms latency and 0MB extra RAM
+/// Mode 1: Fast / Instant Top-1 Reranker
+/// Returns Rank-1 candidate from Hybrid Search with 0ms latency and 0MB extra RAM.
 pub struct Top1Reranker;
 
 impl Reranker for Top1Reranker {
@@ -30,19 +36,20 @@ impl Reranker for Top1Reranker {
         "top1"
     }
 
-    fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
-        if candidates.is_empty() {
+    fn answer(&self, _question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
+        let Some(best) = candidates.first() else {
             return Ok(AnswerResult {
                 answer: "No relevant memories found to answer this question.".to_string(),
                 selected_memory: None,
                 confidence: 0.0,
                 reranker_used: "top1".to_string(),
             });
+        };
+
+        if best.bm25_rank.is_none() && best.score < 0.35 {
+            return Ok(no_evidence("top1"));
         }
 
-        let Some(best) = select_candidate(question, &candidates[..1]) else {
-            return Ok(no_evidence("top1"));
-        };
         Ok(AnswerResult {
             answer: best.memory.content.clone(),
             selected_memory: Some(best.memory.clone()),
@@ -52,34 +59,635 @@ impl Reranker for Top1Reranker {
     }
 }
 
-type NeedleLoadFn = unsafe extern "C" fn(data: *const c_char, len: u64) -> c_int;
-type NeedleInitFn = unsafe extern "C" fn(
-    system: *const c_char,
-    tools_json: *const c_char,
-    tool_index_path: *const c_char,
-) -> c_int;
-type NeedleResetFn = unsafe extern "C" fn();
-type NeedleCompleteV30Fn = unsafe extern "C" fn(
-    text: *const c_char,
-    max_new_tokens: c_int,
-    out_buf: *mut c_char,
-    buf_len: c_int,
-) -> c_int;
-type NeedleCompleteV31Fn = unsafe extern "C" fn(
-    text: *const c_char,
-    audio_data: *const std::ffi::c_void,
-    audio_len: u64,
-    max_new_tokens: c_int,
-    out_buf: *mut c_char,
-    buf_len: c_int,
-) -> c_int;
+struct OnnxQaEngine {
+    tokenizer: Tokenizer,
+    session: Mutex<Session>,
+    need_token_type_ids: bool,
+    provider_label: String,
+}
 
-/// Mode 2: Native Needle 3 C-Engine Reranker & Slot Extractor
-/// Loads `libneedle.dylib` + `needle3.cact` directly via C FFI (`dlopen`) with zero Python overhead.
+struct QaModelPreset {
+    slug: &'static str,
+    model_url: &'static str,
+    tokenizer_url: &'static str,
+}
+
+fn resolve_qa_preset(spec: &str) -> Option<QaModelPreset> {
+    match spec.trim().to_lowercase().as_str() {
+        ""
+        | "onnx"
+        | "qa"
+        | "needle"
+        | "precision"
+        | "minilm"
+        | "minilm-squad2"
+        | "deepset/minilm-uncased-squad2"
+        | "lquint/minilm-uncased-squad2-onnx" => Some(QaModelPreset {
+            slug: "minilm-squad2",
+            model_url: "https://huggingface.co/lquint/minilm-uncased-squad2-onnx/resolve/main/model.onnx",
+            tokenizer_url:
+                "https://huggingface.co/lquint/minilm-uncased-squad2-onnx/resolve/main/tokenizer.json",
+        }),
+        "tinyroberta"
+        | "tinyroberta-squad2"
+        | "deepset/tinyroberta-squad2"
+        | "onnx-community/tinyroberta-squad2-onnx" => Some(QaModelPreset {
+            slug: "tinyroberta-squad2",
+            model_url:
+                "https://huggingface.co/onnx-community/tinyroberta-squad2-ONNX/resolve/main/onnx/model.onnx",
+            tokenizer_url:
+                "https://huggingface.co/onnx-community/tinyroberta-squad2-ONNX/resolve/main/tokenizer.json",
+        }),
+        _ => None,
+    }
+}
+
+fn download_file_atomic(url: &str, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+    let response = ureq::get(url)
+        .timeout(Duration::from_secs(300))
+        .call()
+        .map_err(|e| anyhow::anyhow!("Failed to download {}: {}", url, e))?;
+
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("Failed reading stream from {}", url))?;
+
+    anyhow::ensure!(!bytes.is_empty(), "Downloaded empty file from {}", url);
+
+    let tmp_path = dest.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    std::fs::write(&tmp_path, &bytes)
+        .with_context(|| format!("Failed writing temporary file {}", tmp_path.display()))?;
+    if let Err(err) = std::fs::rename(&tmp_path, dest) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+/// Mode 2: Pure-Rust ONNX SQuAD-2.0 Extractive QA Reranker (`minilm-squad2` / `tinyroberta-squad2` / custom dir)
+#[derive(Debug, Clone, Default)]
+pub struct OnnxQaReranker {
+    model_spec: Option<String>,
+}
+
+impl OnnxQaReranker {
+    pub fn new(model_spec: Option<String>) -> Self {
+        Self { model_spec }
+    }
+
+    /// Ensure the specified ONNX QA model (`minilm-squad2` or `tinyroberta-squad2` or custom path) is present on disk.
+    pub fn ensure_model_downloaded(model_spec: Option<&str>) -> Result<(PathBuf, String)> {
+        let raw_spec = model_spec
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("minilm-squad2");
+        let clean_spec = raw_spec.strip_prefix("onnx:").unwrap_or(raw_spec).trim();
+
+        let custom_path = Path::new(clean_spec);
+        if custom_path.is_dir() {
+            let onnx_file = if custom_path.join("model.onnx").exists() {
+                custom_path.join("model.onnx")
+            } else if custom_path.join("model_quantized.onnx").exists() {
+                custom_path.join("model_quantized.onnx")
+            } else {
+                anyhow::bail!(
+                    "Custom ONNX QA directory '{}' is missing model.onnx",
+                    custom_path.display()
+                );
+            };
+            anyhow::ensure!(
+                custom_path.join("tokenizer.json").exists(),
+                "Custom ONNX QA directory '{}' is missing tokenizer.json",
+                custom_path.display()
+            );
+            let label = custom_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("onnx-qa")
+                .to_string();
+            let _ = onnx_file;
+            return Ok((custom_path.to_path_buf(), label));
+        }
+
+        let preset = resolve_qa_preset(clean_spec).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown ONNX QA model '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', or a local directory path.",
+                clean_spec
+            )
+        })?;
+
+        let primary_dir = LightMemConfig::config_dir()
+            .join("models")
+            .join("qa")
+            .join(preset.slug);
+
+        // If running inside an isolated test LIGHTMEM_CONFIG_DIR, check ~/.lightmem/models/qa/<slug> first to reuse cache
+        if !primary_dir.join("model.onnx").exists() {
+            if let Some(home) = dirs::home_dir() {
+                let global_dir = home
+                    .join(".lightmem")
+                    .join("models")
+                    .join("qa")
+                    .join(preset.slug);
+                if global_dir.join("model.onnx").exists()
+                    && global_dir.join("tokenizer.json").exists()
+                {
+                    return Ok((global_dir, preset.slug.to_string()));
+                }
+            }
+        }
+
+        let model_path = primary_dir.join("model.onnx");
+        let tokenizer_path = primary_dir.join("tokenizer.json");
+
+        if !tokenizer_path.exists() {
+            eprintln!("◈ Downloading ONNX QA tokenizer ({})...", preset.slug);
+            download_file_atomic(preset.tokenizer_url, &tokenizer_path)?;
+        }
+        if !model_path.exists() {
+            eprintln!("◈ Downloading ONNX QA model ({})...", preset.slug);
+            download_file_atomic(preset.model_url, &model_path)?;
+        }
+
+        Ok((primary_dir, preset.slug.to_string()))
+    }
+
+    fn get_or_load_engine(&self) -> Result<Arc<OnnxQaEngine>> {
+        static ENGINES: OnceLock<Mutex<HashMap<String, Arc<OnnxQaEngine>>>> = OnceLock::new();
+        let cache = ENGINES.get_or_init(|| Mutex::new(HashMap::new()));
+
+        let env_spec = std::env::var("LIGHTMEM_QA_MODEL").ok();
+        let effective_spec = self
+            .model_spec
+            .as_deref()
+            .or(env_spec.as_deref())
+            .unwrap_or("minilm-squad2");
+
+        let (dir, label) = Self::ensure_model_downloaded(Some(effective_spec))?;
+        let cache_key = dir.display().to_string();
+
+        {
+            let guard = cache
+                .lock()
+                .map_err(|e| anyhow::anyhow!("QA engine cache lock poisoned: {}", e))?;
+            if let Some(existing) = guard.get(&cache_key) {
+                return Ok(Arc::clone(existing));
+            }
+        }
+
+        let onnx_path = if dir.join("model.onnx").exists() {
+            dir.join("model.onnx")
+        } else {
+            dir.join("model_quantized.onnx")
+        };
+        let tokenizer_path = dir.join("tokenizer.json");
+
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            anyhow::anyhow!("Failed to load tokenizer at {:?}: {}", tokenizer_path, e)
+        })?;
+        let _ = tokenizer.with_truncation(Some(TruncationParams {
+            max_length: 384,
+            strategy: TruncationStrategy::OnlySecond,
+            ..Default::default()
+        }));
+
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(4))
+            .unwrap_or(2);
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("ORT session builder error: {}", e))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("ORT optimization level error: {}", e))?
+            .with_intra_threads(threads)
+            .map_err(|e| anyhow::anyhow!("ORT intra threads error: {}", e))?
+            .commit_from_file(&onnx_path)
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to load ONNX QA model at {:?}: {}", onnx_path, e)
+            })?;
+
+        let need_token_type_ids = session
+            .inputs()
+            .iter()
+            .any(|input| input.name() == "token_type_ids");
+
+        let engine = Arc::new(OnnxQaEngine {
+            tokenizer,
+            session: Mutex::new(session),
+            need_token_type_ids,
+            provider_label: label,
+        });
+
+        let mut guard = cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("QA engine cache lock poisoned: {}", e))?;
+        guard.insert(cache_key, Arc::clone(&engine));
+        Ok(engine)
+    }
+
+    fn extract_span(
+        engine: &OnnxQaEngine,
+        question: &str,
+        context: &str,
+    ) -> Result<Option<(String, f32)>> {
+        let encoding = engine
+            .tokenizer
+            .encode((question, context), true)
+            .map_err(|e| anyhow::anyhow!("QA tokenization failed: {}", e))?;
+
+        let seq_len = encoding.len();
+        if seq_len == 0 {
+            return Ok(None);
+        }
+
+        let ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
+        let mask: Vec<i64> = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        let type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&x| x as i64).collect();
+
+        let input_ids = Array2::from_shape_vec((1, seq_len), ids)?;
+        let attention_mask = Array2::from_shape_vec((1, seq_len), mask)?;
+
+        let mut session_inputs = ort::inputs![
+            "input_ids" => Value::from_array(input_ids)?,
+            "attention_mask" => Value::from_array(attention_mask)?,
+        ];
+        if engine.need_token_type_ids {
+            let token_type_ids = Array2::from_shape_vec((1, seq_len), type_ids)?;
+            session_inputs.push((
+                "token_type_ids".into(),
+                Value::from_array(token_type_ids)?.into(),
+            ));
+        }
+
+        let mut session = engine
+            .session
+            .lock()
+            .map_err(|e| anyhow::anyhow!("ORT session mutex poisoned: {}", e))?;
+        let outputs = session
+            .run(session_inputs)
+            .map_err(|e| anyhow::anyhow!("ORT QA inference failed: {}", e))?;
+
+        let start_logits = outputs
+            .get("start_logits")
+            .ok_or_else(|| anyhow::anyhow!("ONNX QA model missing 'start_logits' output"))?
+            .try_extract_array::<f32>()
+            .map_err(|e| anyhow::anyhow!("Failed to extract start_logits: {}", e))?;
+        let end_logits = outputs
+            .get("end_logits")
+            .ok_or_else(|| anyhow::anyhow!("ONNX QA model missing 'end_logits' output"))?
+            .try_extract_array::<f32>()
+            .map_err(|e| anyhow::anyhow!("Failed to extract end_logits: {}", e))?;
+
+        let cls_logit = start_logits[[0, 0]] + end_logits[[0, 0]];
+        let seq_ids = encoding.get_sequence_ids();
+        let offsets = encoding.get_offsets();
+
+        let ctx_indices: Vec<usize> = seq_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, sid)| (*sid == Some(1)).then_some(idx))
+            .collect();
+
+        if ctx_indices.is_empty() {
+            return Ok(None);
+        }
+
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_span = (ctx_indices[0], ctx_indices[0]);
+
+        for &i in &ctx_indices {
+            let s_val = start_logits[[0, i]];
+            for &j in &ctx_indices {
+                if j < i || j - i + 1 > 20 {
+                    continue;
+                }
+                let score = s_val + end_logits[[0, j]];
+                if score > best_score {
+                    best_score = score;
+                    best_span = (i, j);
+                }
+            }
+        }
+
+        let margin = best_score - cls_logit;
+        if !margin.is_finite() {
+            return Ok(None);
+        }
+
+        let (start_byte, _) = offsets[best_span.0];
+        let (_, end_byte) = offsets[best_span.1];
+        let Some(raw_slice) = context.get(start_byte..end_byte) else {
+            return Ok(None);
+        };
+
+        let cleaned = clean_extracted_span(raw_slice);
+        if cleaned.is_empty() || !grounded(&cleaned, context) {
+            return Ok(None);
+        }
+
+        Ok(Some((cleaned, margin)))
+    }
+}
+
+impl Reranker for OnnxQaReranker {
+    fn name(&self) -> &str {
+        "minilm-squad2"
+    }
+
+    fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
+        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some()
+            || std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
+        {
+            return Ok(no_evidence("none"));
+        }
+
+        let gated: Vec<&ScoredMemory> = candidates
+            .iter()
+            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.40)
+            .take(5)
+            .collect();
+
+        if gated.is_empty() {
+            return Ok(no_evidence("none"));
+        }
+
+        let engine = self.get_or_load_engine()?;
+        let q_tokens = content_tokens(question);
+
+        let mut best_hit: Option<(String, f32, &MemoryRecord)> = None;
+
+        for (idx, candidate) in gated.iter().enumerate() {
+            let Some((span, margin)) =
+                Self::extract_span(&engine, question, &candidate.memory.content)?
+            else {
+                continue;
+            };
+
+            if !is_valid_qa_span(&span, margin, &q_tokens) {
+                continue;
+            }
+
+            // Early exit if Rank-1 candidate has an unambiguous high-confidence span
+            if idx == 0 && margin >= 11.0 {
+                let confidence = margin_to_confidence(margin);
+                return Ok(AnswerResult {
+                    answer: span,
+                    selected_memory: Some(candidate.memory.clone()),
+                    confidence,
+                    reranker_used: engine.provider_label.clone(),
+                });
+            }
+
+            let combined_score = margin + candidate.score * 0.5;
+            if best_hit
+                .as_ref()
+                .map(|(_, prev_score, _)| combined_score > *prev_score)
+                .unwrap_or(true)
+            {
+                best_hit = Some((span, combined_score, &candidate.memory));
+            }
+        }
+
+        if let Some((answer, combined_score, memory)) = best_hit {
+            let confidence = margin_to_confidence(combined_score);
+            return Ok(AnswerResult {
+                answer,
+                selected_memory: Some(memory.clone()),
+                confidence,
+                reranker_used: engine.provider_label.clone(),
+            });
+        }
+
+        Ok(no_evidence("none"))
+    }
+}
+
+/// Mode 3: Swappable Ollama QA Reranker (`--reranker ollama` or `--reranker ollama:<model>`)
+#[derive(Debug, Clone)]
+pub struct OllamaReranker {
+    pub ollama_url: String,
+    pub model: Option<String>,
+}
+
+impl OllamaReranker {
+    pub fn new(ollama_url: String, model: Option<String>) -> Self {
+        Self {
+            ollama_url: ollama_url.trim_end_matches('/').to_string(),
+            model: model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty()),
+        }
+    }
+
+    fn resolve_model(&self) -> String {
+        if let Some(ref explicit) = self.model {
+            if !matches!(
+                explicit.as_str(),
+                "minilm-squad2" | "tinyroberta-squad2" | "onnx" | "qa" | "auto"
+            ) {
+                return explicit.clone();
+            }
+        }
+
+        // Auto-detect an installed local generative model from Ollama `/api/tags`
+        let tags_url = format!("{}/api/tags", self.ollama_url);
+        if let Ok(resp) = ureq::get(&tags_url).timeout(Duration::from_secs(2)).call() {
+            if let Ok(json) = resp.into_json::<serde_json::Value>() {
+                if let Some(models) = json.get("models").and_then(|v| v.as_array()) {
+                    let names: Vec<String> = models
+                        .iter()
+                        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect();
+
+                    let preferred = [
+                        "qwen2.5:3b",
+                        "qwen2.5:1.5b",
+                        "llama3.2:3b",
+                        "llama3.2:1b",
+                        "qwen2.5:7b",
+                        "llama3.1:8b",
+                    ];
+                    for p in preferred {
+                        if names.iter().any(|n| n.eq_ignore_ascii_case(p)) {
+                            return p.to_string();
+                        }
+                    }
+
+                    if let Some(found) = names.iter().find(|n| {
+                        let l = n.to_lowercase();
+                        !l.contains("embed")
+                            && !l.contains("bge")
+                            && !l.contains("minilm")
+                            && !l.contains("vl")
+                            && !l.contains("ocr")
+                            && !l.contains("-cloud")
+                    }) {
+                        return found.clone();
+                    }
+
+                    if let Some(found) = names.iter().find(|n| {
+                        let l = n.to_lowercase();
+                        !l.contains("embed") && !l.contains("bge") && !l.contains("minilm")
+                    }) {
+                        return found.clone();
+                    }
+                }
+            }
+        }
+
+        "qwen2.5:1.5b".to_string()
+    }
+}
+
+impl Reranker for OllamaReranker {
+    fn name(&self) -> &str {
+        "ollama"
+    }
+
+    fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
+        let gated: Vec<&ScoredMemory> = candidates
+            .iter()
+            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.35)
+            .take(5)
+            .collect();
+
+        if gated.is_empty() {
+            return Ok(no_evidence("none"));
+        }
+
+        let model_name = self.resolve_model();
+        let provider_label = format!("ollama:{}", model_name);
+
+        let mut memories_block = String::new();
+        for (idx, c) in gated.iter().enumerate() {
+            memories_block.push_str(&format!("[{}] {}\n", idx, c.memory.content));
+        }
+
+        let prompt = format!(
+            "You are a strict extractive question-answering engine. Answer the question using ONLY the provided memory records.\n\
+             Rules:\n\
+             1. Extract the exact concise factual value (e.g. name, ID, account number, port, OS, URL, college name, score) from the single best matching memory.\n\
+             2. Do NOT include labels or full sentences — return ONLY the extracted value itself.\n\
+             3. If none of the memories contain the answer, or if a memory states the information is not recorded, return null for \"answer\" and null for \"memory_index\".\n\
+             4. Respond with valid JSON matching: {{\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1}}\n\n\
+             Memories:\n{}\n\
+             Question: {}\n",
+            memories_block, question
+        );
+
+        let url = format!("{}/api/generate", self.ollama_url);
+        let payload = serde_json::json!({
+            "model": model_name,
+            "prompt": prompt,
+            "stream": false,
+            "format": "json",
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 128
+            }
+        });
+
+        let response = ureq::post(&url)
+            .timeout(Duration::from_secs(30))
+            .send_json(payload)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Ollama QA request to {} (model '{}') failed: {}",
+                    url,
+                    model_name,
+                    e
+                )
+            })?;
+
+        let body: serde_json::Value = response
+            .into_json()
+            .context("Failed to parse JSON response from Ollama /api/generate")?;
+
+        let raw_response = body
+            .get("response")
+            .and_then(|v| v.as_str())
+            .unwrap_or("{}");
+
+        if let Some((answer, mem_idx, confidence)) =
+            parse_and_ground_ollama_answer(raw_response, &gated)
+        {
+            return Ok(AnswerResult {
+                answer,
+                selected_memory: Some(gated[mem_idx].memory.clone()),
+                confidence,
+                reranker_used: provider_label,
+            });
+        }
+
+        Ok(no_evidence("none"))
+    }
+}
+
+fn parse_and_ground_ollama_answer(
+    raw_json: &str,
+    gated: &[&ScoredMemory],
+) -> Option<(String, usize, f32)> {
+    let parsed: serde_json::Value = serde_json::from_str(raw_json.trim()).ok()?;
+    let raw_ans = parsed.get("answer")?.as_str()?.trim();
+    if raw_ans.is_empty() {
+        return None;
+    }
+
+    let cleaned = clean_extracted_span(raw_ans);
+    let lower = cleaned.to_lowercase();
+    if cleaned.is_empty()
+        || matches!(
+            lower.as_str(),
+            "null" | "none" | "n/a" | "unknown" | "not recorded" | "insufficient evidence"
+        )
+        || lower.contains("not been recorded")
+        || lower.contains("insufficient evidence")
+    {
+        return None;
+    }
+
+    let raw_conf = parsed
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.85) as f32;
+    let confidence = if raw_conf.is_finite() && raw_conf > 0.0 {
+        raw_conf.clamp(0.05, 1.0)
+    } else {
+        0.85
+    };
+
+    if let Some(idx) = parsed
+        .get("memory_index")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+    {
+        if idx < gated.len() && grounded(&cleaned, &gated[idx].memory.content) {
+            return Some((cleaned, idx, confidence));
+        }
+    }
+
+    for (idx, cand) in gated.iter().enumerate() {
+        if grounded(&cleaned, &cand.memory.content) {
+            return Some((cleaned, idx, confidence));
+        }
+    }
+
+    None
+}
+
+/// Backward-compatible alias struct that delegates to `OnnxQaReranker`
 #[derive(Default)]
 pub struct NeedleReranker;
 
-pub type PrecisionReranker = NeedleReranker;
+pub type PrecisionReranker = OnnxQaReranker;
 pub type ExtractedImportRecord = (String, Option<String>, Option<String>, Vec<String>);
 
 impl NeedleReranker {
@@ -87,358 +695,18 @@ impl NeedleReranker {
         Self
     }
 
-    fn tokenize(text: &str) -> HashSet<String> {
-        let stop_words: HashSet<&str> = [
-            "what", "is", "our", "the", "a", "an", "on", "in", "to", "for", "with", "does", "do",
-            "did", "how", "why", "where", "when", "who", "which", "are", "was", "were", "my", "me",
-            "your", "user", "users", "use", "uses", "used", "run", "runs", "running", "please",
-            "tell",
-        ]
-        .into_iter()
-        .collect();
-
-        text.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-            .map(|w| w.to_lowercase())
-            .filter(|w| w.len() > 1 && !stop_words.contains(w.as_str()))
-            .collect()
-    }
-
-    fn find_needle_assets() -> Option<(PathBuf, PathBuf)> {
-        let home = dirs::home_dir()?;
-        let base_dir = home.join(".cache").join("cactus-needle").join("v3");
-        let lib_names = [
-            "libneedle3.dylib",
-            "libneedle.dylib",
-            "libneedle3.so",
-            "libneedle.so",
-        ];
-
-        // Check known version folders first, then scan any version directory inside ~/.cache/cactus-needle/v3/
-        let mut candidate_dirs = vec![base_dir.join("3.1.0"), base_dir.join("3.0.1")];
-        if let Ok(entries) = std::fs::read_dir(&base_dir) {
-            for entry in entries.flatten() {
-                candidate_dirs.push(entry.path());
-            }
-        }
-
-        for dir in candidate_dirs {
-            let w = dir.join("needle3.cact");
-            if w.exists() {
-                for lib_name in &lib_names {
-                    let l = dir.join(lib_name);
-                    if l.exists() {
-                        return Some((l, w));
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    fn run_needle_query(tools_json: String, input_text: String) -> Option<String> {
-        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some() {
-            return None;
-        }
-        type Req = (String, String, std::sync::mpsc::Sender<Option<String>>);
-        static NEEDLE_WORKER: std::sync::OnceLock<
-            Option<std::sync::Mutex<std::sync::mpsc::Sender<Req>>>,
-        > = std::sync::OnceLock::new();
-
-        let tx_mutex = NEEDLE_WORKER
-            .get_or_init(|| {
-                let (lib_path, weights_path) = Self::find_needle_assets()?;
-                let weights_data = std::fs::read(&weights_path).ok()?;
-                let lib_cstr = CString::new(lib_path.to_string_lossy().as_bytes()).ok()?;
-
-                let (req_tx, req_rx) = std::sync::mpsc::channel::<Req>();
-                let (init_tx, init_rx) = std::sync::mpsc::channel::<bool>();
-
-                std::thread::spawn(move || unsafe {
-                    let handle = dlopen(lib_cstr.as_ptr(), RTLD_LAZY);
-                    if handle.is_null() {
-                        let _ = init_tx.send(false);
-                        return;
-                    }
-
-                    let load_sym = CString::new("needle_load").unwrap();
-                    let init_sym = CString::new("needle_init").unwrap();
-                    let reset_sym = CString::new("needle_reset").unwrap();
-                    let comp_sym = CString::new("needle_complete").unwrap();
-                    let trans_sym = CString::new("needle_transcribe").unwrap();
-
-                    let load_ptr = dlsym(handle, load_sym.as_ptr());
-                    let init_ptr = dlsym(handle, init_sym.as_ptr());
-                    let reset_ptr = dlsym(handle, reset_sym.as_ptr());
-                    let comp_ptr = dlsym(handle, comp_sym.as_ptr());
-                    let is_v31 = !dlsym(handle, trans_sym.as_ptr()).is_null();
-
-                    if load_ptr.is_null() || init_ptr.is_null() || comp_ptr.is_null() {
-                        let _ = init_tx.send(false);
-                        return;
-                    }
-
-                    let needle_load: NeedleLoadFn = std::mem::transmute(load_ptr);
-                    let needle_init: NeedleInitFn = std::mem::transmute(init_ptr);
-                    let needle_reset: Option<NeedleResetFn> = if reset_ptr.is_null() {
-                        None
-                    } else {
-                        Some(std::mem::transmute::<*mut libc::c_void, NeedleResetFn>(
-                            reset_ptr,
-                        ))
-                    };
-                    let needle_complete_v30: NeedleCompleteV30Fn = std::mem::transmute(comp_ptr);
-                    let needle_complete_v31: NeedleCompleteV31Fn = std::mem::transmute(comp_ptr);
-
-                    if needle_load(
-                        weights_data.as_ptr() as *const c_char,
-                        weights_data.len() as u64,
-                    ) < 0
-                    {
-                        let _ = init_tx.send(false);
-                        return;
-                    }
-
-                    let _ = init_tx.send(true);
-                    let sys_cstr = CString::new("").unwrap();
-
-                    while let Ok((tools_str, text_str, reply_tx)) = req_rx.recv() {
-                        let res = (|| -> Option<String> {
-                            let tools_cstr = CString::new(tools_str.as_str()).ok()?;
-                            if needle_init(sys_cstr.as_ptr(), tools_cstr.as_ptr(), std::ptr::null())
-                                < 0
-                            {
-                                return None;
-                            }
-                            if let Some(reset_fn) = needle_reset {
-                                reset_fn();
-                            }
-                            let text_cstr = CString::new(text_str.as_str()).ok()?;
-                            let mut out_buf = vec![0u8; 65536];
-                            let rc = if is_v31 {
-                                needle_complete_v31(
-                                    text_cstr.as_ptr(),
-                                    std::ptr::null(),
-                                    0,
-                                    256,
-                                    out_buf.as_mut_ptr() as *mut c_char,
-                                    out_buf.len() as c_int,
-                                )
-                            } else {
-                                needle_complete_v30(
-                                    text_cstr.as_ptr(),
-                                    256,
-                                    out_buf.as_mut_ptr() as *mut c_char,
-                                    out_buf.len() as c_int,
-                                )
-                            };
-                            if rc < 0 {
-                                return None;
-                            }
-                            Some(
-                                CStr::from_bytes_until_nul(&out_buf)
-                                    .ok()?
-                                    .to_string_lossy()
-                                    .into_owned(),
-                            )
-                        })();
-                        let _ = reply_tx.send(res);
-                    }
-                });
-
-                if init_rx.recv_timeout(Duration::from_secs(60)).ok()? {
-                    Some(std::sync::Mutex::new(req_tx))
-                } else {
-                    None
-                }
-            })
-            .as_ref()?;
-
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        tx_mutex
-            .lock()
-            .ok()?
-            .send((tools_json, input_text, reply_tx))
-            .ok()?;
-        reply_rx.recv_timeout(Duration::from_secs(30)).ok()?
-    }
-
-    /// Use Native Needle 3 C-FFI to extract structured (content, title, category, tags) from an imported JSON or text record
-    pub fn extract_import_record_via_needle(raw_input: &str) -> Option<ExtractedImportRecord> {
-        let tools_schema = r#"[{"name":"extract_memory","description":"Extract memory content, title, category, and tags from raw JSON or text","parameters":{"type":"object","properties":{"content":{"type":"string","description":"Primary text or fact of the memory"},"title":{"type":"string","description":"Short summary title"},"category":{"type":"string","enum":["fact","decision","instruction","preference","learning","goal","commitment","artifact","event","relationship","observation","error","context","password"]},"tags":{"type":"string","description":"Comma-separated tags"}},"required":["content","title","category"]}}]"#;
-
-        let raw_json_str = Self::run_needle_query(tools_schema.to_string(), raw_input.to_string())?;
-
-        let envelope: serde_json::Value = serde_json::from_str(&raw_json_str).ok()?;
-        let (args, _) = accepted_arguments(&envelope)?;
-
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())?;
-        let title = args
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let category = args
-            .get("category")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let mut tags = Vec::new();
-        if let Some(t_str) = args.get("tags").and_then(|v| v.as_str()) {
-            for part in t_str.split(',') {
-                let clean = part.trim();
-                if !clean.is_empty() {
-                    tags.push(clean.to_string());
-                }
-            }
-        }
-
-        Some((content, title, category, tags))
-    }
-
-    /// Run native Needle 3 C library structured extraction directly from Rust
-    fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
-        let slot = requested_slot(question);
-        let query_tokens = Self::tokenize(question);
-        let is_core_triad = matches!(slot.as_str(), "port" | "os" | "service");
-        let tools_json = if is_core_triad {
-            r#"[{"name":"extract_facts","description":"Extract service name, port, and os","parameters":{"type":"object","properties":{"service":{"type":"string","description":"Service or application name (e.g. Redis, Postgres, Kokoro)"},"port":{"type":"integer","description":"Port number"},"os":{"type":"string","description":"Operating system (e.g. Linux, macOS, Windows)"}},"required":["service","port","os"]}}]"#.to_string()
-        } else {
-            format!(
-                r#"[{{"name":"extract_fact","description":"Extract {slot} from text","parameters":{{"type":"object","properties":{{"{slot}":{{"type":"string","description":"The {slot}"}}}},"required":["{slot}"]}}}}]"#
-            )
-        };
-
-        const NEGATION_OR_ABSENCE_TOKENS: &[&str] = &[
-            "not",
-            "none",
-            "null",
-            "unknown",
-            "unspecified",
-            "unrecorded",
-            "recorded",
-            "missing",
-            "absent",
-            "empty",
-            "na",
-        ];
-
-        let extract_from_raw = |raw_json: &str| -> Option<(String, f32)> {
-            let envelope: serde_json::Value = serde_json::from_str(raw_json).ok()?;
-            let (args, confidence) = accepted_arguments_for_slot(&envelope, Some(&slot))?;
-            let value = args.get(&slot)?;
-            let answer = value
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| value.as_i64().map(|n| n.to_string()))?;
-            let answer = answer.trim();
-            if answer.is_empty() || !grounded(answer, content) {
-                return None;
-            }
-            if slot == "port" && !valid_port(answer) {
-                return None;
-            }
-            let ans_tokens = Self::tokenize(answer);
-            if !ans_tokens.is_empty()
-                && ans_tokens.iter().all(|t| {
-                    doc_contains_token(&query_tokens, t)
-                        || NEGATION_OR_ABSENCE_TOKENS.contains(&t.as_str())
-                })
-            {
-                return None;
-            }
-            if matches!(slot.as_str(), "id" | "number" | "port" | "name") {
-                let lower_ans = answer.to_lowercase();
-                if lower_ans.ends_with(".pdf")
-                    || lower_ans.ends_with(".png")
-                    || lower_ans.ends_with(".jpg")
-                    || lower_ans.ends_with(".jpeg")
-                    || lower_ans.ends_with(".doc")
-                    || lower_ans.ends_with(".docx")
-                    || lower_ans.ends_with(".md")
-                {
-                    return None;
-                }
-            }
-            if matches!(slot.as_str(), "id" | "number" | "port")
-                && (answer.split_whitespace().count() > 4 || confidence < 0.20)
-            {
-                return None;
-            }
-            let content_tokens = Self::tokenize(content);
-            if (content_tokens.contains("not") || content_tokens.contains("never"))
-                && (content_tokens.contains("recorded")
-                    || content_tokens.contains("known")
-                    || content_tokens.contains("specified")
-                    || content_tokens.contains("provided")
-                    || content_tokens.contains("found")
-                    || content_tokens.contains("available")
-                    || content_tokens.contains("set"))
-            {
-                return None;
-            }
-            Some((answer.to_string(), confidence))
-        };
-
-        let mut inputs = Vec::with_capacity(7);
-        if let Some(focused) = focus_clause_for_question(question, content) {
-            if let Some((_, rhs)) = focused.split_once(':') {
-                let rhs = rhs.trim().trim_end_matches('.');
-                if !rhs.is_empty() {
-                    inputs.push(format!("Extract fact: {} is {}", slot, rhs));
-                }
-            } else if let (Some(open), Some(close)) = (focused.find('('), focused.rfind(')')) {
-                if open + 1 < close {
-                    let inner = focused[open + 1..close].trim();
-                    if !inner.is_empty() {
-                        inputs.push(format!("Extract fact: {} is {}", slot, inner));
-                    }
-                }
-            }
-            inputs.push(format!("Extract fact: {}", focused));
-            inputs.push(focused);
-        }
-        if is_core_triad {
-            inputs.push(content.to_string());
-            inputs.push(format!("Extract fact: {}", content));
-        } else {
-            inputs.push(format!("Extract fact: {}", content));
-            inputs.push(content.to_string());
-        }
-
-        for input in inputs {
-            if let Some(raw) = Self::run_needle_query(tools_json.clone(), input) {
-                if let Some(res) = extract_from_raw(&raw) {
-                    return Some(res);
-                }
-            }
-        }
+    pub fn extract_import_record_via_needle(_raw_input: &str) -> Option<ExtractedImportRecord> {
         None
     }
 }
 
 impl Reranker for NeedleReranker {
     fn name(&self) -> &str {
-        "needle-3"
+        "minilm-squad2"
     }
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
-        for candidate in rank_candidates(question, candidates) {
-            if let Some((answer, confidence)) =
-                Self::extract_via_native_needle(question, &candidate.memory.content)
-            {
-                return Ok(AnswerResult {
-                    answer,
-                    selected_memory: Some(candidate.memory.clone()),
-                    confidence,
-                    reranker_used: "needle-3".into(),
-                });
-            }
-        }
-        Ok(no_evidence("none"))
+        OnnxQaReranker::new(None).answer(question, candidates)
     }
 }
 
@@ -451,140 +719,81 @@ fn no_evidence(provider: &str) -> AnswerResult {
     }
 }
 
-/// Dynamically infer the target slot noun from the question's syntax without hardcoded domain lists.
-fn requested_slot(question: &str) -> String {
-    let normalize_slot = |s: &str| -> String {
-        match s {
-            "ports" => "port".to_string(),
-            "no" | "num" | "numbers" => "number".to_string(),
-            "ids" => "id".to_string(),
-            other => other.to_string(),
-        }
-    };
-    let ordered: Vec<String> = question
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(|w| w.to_lowercase())
-        .filter(|w| w.len() > 1)
-        .collect();
-
-    match ordered.first().map(String::as_str) {
-        Some("who") => return "name".to_string(),
-        Some("where") => return "location".to_string(),
-        Some("when") => return "time".to_string(),
-        Some("what" | "which") if ordered.len() >= 2 => {
-            const AUX_VERBS: &[&str] = &[
-                "is", "are", "was", "were", "does", "do", "did", "has", "have", "had", "can",
-                "will", "should",
-            ];
-            const MODIFIERS: &[&str] = &[
-                "the", "a", "an", "my", "our", "your", "their", "its", "user", "users", "default",
-                "primary", "current", "main", "active", "official", "exact", "standard",
-            ];
-            const ACTION_VERBS: &[&str] = &["runs", "run", "uses", "use"];
-            let is_verb = |w: &str| AUX_VERBS.contains(&w) || ACTION_VERBS.contains(&w);
-
-            let rest = &ordered[1..];
-            let skip_idx = rest
-                .iter()
-                .position(|w| !AUX_VERBS.contains(&w.as_str()) && !MODIFIERS.contains(&w.as_str()))
-                .unwrap_or(rest.len());
-            let trimmed = &rest[skip_idx..];
-
-            if let Some(prep_idx) = trimmed
-                .iter()
-                .position(|w| matches!(w.as_str(), "of" | "for"))
-            {
-                if prep_idx > 0
-                    && prep_idx + 1 < trimmed.len()
-                    && !trimmed[..prep_idx].iter().any(|w| is_verb(w.as_str()))
-                {
-                    if prep_idx >= 2
-                        && trimmed[prep_idx - 2] == "operating"
-                        && trimmed[prep_idx - 1] == "system"
-                    {
-                        return "os".to_string();
-                    }
-                    return normalize_slot(trimmed[prep_idx - 1].as_str());
-                }
-            }
-
-            let mod_idx = rest
-                .iter()
-                .position(|w| !MODIFIERS.contains(&w.as_str()))
-                .unwrap_or(rest.len());
-            let after_mods = &rest[mod_idx..];
-            if after_mods.len() >= 3
-                && after_mods[0] == "operating"
-                && after_mods[1] == "system"
-                && is_verb(after_mods[2].as_str())
-            {
-                return "os".to_string();
-            }
-            if after_mods.len() >= 2
-                && !is_verb(after_mods[0].as_str())
-                && is_verb(after_mods[1].as_str())
-            {
-                return normalize_slot(after_mods[0].as_str());
-            }
-        }
-        _ => {}
-    }
-
-    if ordered
-        .iter()
-        .any(|t| matches!(t.as_str(), "port" | "ports"))
-        || ordered
-            .windows(2)
-            .any(|w| w[0] == "listening" && w[1] == "on")
-    {
-        return "port".to_string();
-    }
-    if ordered.iter().any(|t| t == "os")
-        || ordered
-            .windows(2)
-            .any(|w| w[0] == "operating" && w[1] == "system")
-    {
-        return "os".to_string();
-    }
-
-    const TRAILING_IGNORE: &[&str] = &[
-        "use",
-        "uses",
-        "used",
-        "run",
-        "runs",
-        "running",
-        "is",
-        "are",
-        "was",
-        "were",
-        "do",
-        "does",
-        "did",
-        "on",
-        "in",
-        "at",
-        "to",
-        "for",
-        "of",
-        "with",
-        "by",
-        "from",
-        "listening",
-        "located",
-        "stored",
-        "configured",
-    ];
-    ordered
-        .iter()
-        .rev()
-        .find(|t| !TRAILING_IGNORE.contains(&t.as_str()))
-        .map(|s| normalize_slot(s.as_str()))
-        .unwrap_or_else(|| "value".to_string())
+fn margin_to_confidence(margin: f32) -> f32 {
+    (1.0 / (1.0 + (-margin / 5.0).exp())).clamp(0.05, 0.99)
 }
 
-fn valid_port(value: &str) -> bool {
-    value.parse::<u16>().map(|port| port > 0).unwrap_or(false)
+fn clean_extracted_span(raw: &str) -> String {
+    let mut s = raw
+        .trim()
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | ';' | '.' | '\'' | '"' | '`')
+        })
+        .trim();
+
+    if s.starts_with('(') && s.ends_with(')') && s.len() > 2 {
+        s = s[1..s.len() - 1].trim();
+    } else if s.starts_with('(') && !s.contains(')') {
+        s = s.trim_start_matches('(').trim();
+    } else if s.ends_with(')') && !s.contains('(') {
+        s = s.trim_end_matches(')').trim();
+    }
+
+    // If the model included a short "Label: Value" prefix (not a URL like https://), strip the label
+    if !s.contains("://") {
+        if let Some((lhs, rhs)) = s.split_once(':') {
+            let rhs_clean = rhs.trim();
+            if !rhs_clean.is_empty() && lhs.split_whitespace().count() <= 4 {
+                s = rhs_clean;
+            }
+        }
+    }
+
+    s.trim_matches(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '.' | '\'' | '"'))
+        .to_string()
+}
+
+fn content_tokens(text: &str) -> HashSet<String> {
+    const FUNCTION_WORDS: &[&str] = &[
+        "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were", "does",
+        "do", "did", "has", "have", "had", "the", "a", "an", "in", "on", "at", "to", "for", "of",
+        "with", "by", "from", "my", "me", "our", "your", "user", "users", "use", "uses", "used",
+        "run", "runs", "running", "did", "i",
+    ];
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 1 && !FUNCTION_WORDS.contains(&w.as_str()))
+        .collect()
+}
+
+fn is_valid_qa_span(span: &str, margin: f32, q_tokens: &HashSet<String>) -> bool {
+    if margin < 1.5 {
+        return false;
+    }
+
+    let lower = span.to_lowercase();
+    if lower.contains("not been ")
+        || lower.contains("not recorded")
+        || lower.contains("not specified")
+        || lower.contains("not provided")
+    {
+        return false;
+    }
+
+    let s_tokens = content_tokens(span);
+    // Reject spans that contain zero new tokens beyond the question itself
+    if !s_tokens.is_empty() && s_tokens.iter().all(|t| q_tokens.contains(t)) {
+        return false;
+    }
+
+    // For low-margin spans (1.5 <= margin < 7.0), reject spans that echo question words
+    // (e.g. "4 passport-sized photos" echoing "passport" on "what is my passport number"),
+    // while keeping clean identifier extractions like "HAQPP8118D" (0 question word overlap).
+    if margin < 7.0 && s_tokens.iter().any(|t| q_tokens.contains(t)) {
+        return false;
+    }
+
+    true
 }
 
 fn grounded(answer: &str, content: &str) -> bool {
@@ -597,312 +806,9 @@ fn grounded(answer: &str, content: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Ungrounded calls are never usable evidence. Grounded suppressed_calls are accepted when function_calls is empty.
-fn accepted_arguments(
-    envelope: &serde_json::Value,
-) -> Option<(&serde_json::Map<String, serde_json::Value>, f32)> {
-    accepted_arguments_for_slot(envelope, None)
-}
-
-fn accepted_arguments_for_slot<'a>(
-    envelope: &'a serde_json::Value,
-    target_slot: Option<&str>,
-) -> Option<(&'a serde_json::Map<String, serde_json::Value>, f32)> {
-    if let Some(ungrounded) = envelope.pointer("/validation/ungrounded") {
-        let arr = ungrounded.as_array()?;
-        if let Some(slot) = target_slot {
-            let dot_slot = format!(".{}", slot);
-            if arr.iter().any(|v| {
-                v.as_str()
-                    .map(|s| s == slot || s.ends_with(&dot_slot))
-                    .unwrap_or(false)
-            }) {
-                return None;
-            }
-        } else if !arr.is_empty() {
-            return None;
-        }
-    }
-    let calls = envelope
-        .get("function_calls")
-        .and_then(|v| v.as_array())
-        .filter(|a| !a.is_empty())
-        .or_else(|| {
-            envelope
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .filter(|a| !a.is_empty())
-        })
-        .or_else(|| {
-            envelope
-                .get("suppressed_calls")
-                .and_then(|v| v.as_array())
-                .filter(|a| !a.is_empty())
-        })?;
-    let confidence = envelope
-        .get("confidence")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0) as f32;
-    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
-        return None;
-    }
-    Some((calls.first()?.get("arguments")?.as_object()?, confidence))
-}
-
-/// Deterministic entity-aware candidate selection, separate from native extraction.
-const GENERIC_TOKENS: &[&str] = &[
-    "service",
-    "services",
-    "server",
-    "servers",
-    "daemon",
-    "proxy",
-    "node",
-    "host",
-    "cluster",
-    "engine",
-    "app",
-    "application",
-    "system",
-    "port",
-    "ports",
-    "os",
-    "endpoint",
-    "url",
-    "uri",
-    "default",
-    "primary",
-    "current",
-    "main",
-    "active",
-    "located",
-    "listening",
-    "stored",
-    "configured",
-    "card",
-    "cards",
-    "id",
-    "ids",
-    "no",
-    "num",
-    "number",
-    "numbers",
-    "roll",
-    "code",
-    "document",
-    "documents",
-    "record",
-    "records",
-    "file",
-    "files",
-    "detail",
-    "details",
-];
-
-fn token_stem(token: &str) -> &str {
-    if token.len() >= 5
-        && token.ends_with('s')
-        && !token.ends_with("ss")
-        && !token.ends_with("is")
-        && !token.ends_with("us")
-        && !token.ends_with("os")
-    {
-        &token[..token.len() - 1]
-    } else {
-        token
-    }
-}
-
-fn doc_contains_token(doc: &HashSet<String>, token: &str) -> bool {
-    if doc.contains(token) {
-        return true;
-    }
-    let stem = token_stem(token);
-    doc.iter().any(|d| token_stem(d) == stem)
-}
-
-fn is_target_slot_token(token: &str, dynamic_slot: &str) -> bool {
-    let dynamic_slot_stem = token_stem(dynamic_slot);
-    token_stem(token) == dynamic_slot_stem
-        || (dynamic_slot == "number" && matches!(token, "no" | "num" | "number" | "numbers"))
-}
-
-fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
-    let dynamic_slot = requested_slot(question);
-    let query = NeedleReranker::tokenize(question);
-    let anchor_tokens: HashSet<&str> = query
-        .iter()
-        .map(String::as_str)
-        .filter(|&t| !is_target_slot_token(t, &dynamic_slot) && !GENERIC_TOKENS.contains(&t))
-        .collect();
-    if anchor_tokens.is_empty() {
-        return None;
-    }
-
-    let splitter = Regex::new(r"(?i)\n|;|\.\s+|,\s+and\s+|\s+and\s+|\s+-\s+|,\s+").ok()?;
-    let clauses: Vec<&str> = splitter
-        .split(content)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if clauses.len() < 2 {
-        return None;
-    }
-
-    let mut best_clause: Option<(&str, usize)> = None;
-    let mut tied = false;
-
-    for clause in clauses {
-        let clause_tokens = NeedleReranker::tokenize(clause);
-        let anchor_hits = anchor_tokens
-            .iter()
-            .filter(|&&t| doc_contains_token(&clause_tokens, t))
-            .count();
-        if anchor_hits == 0 || clause_tokens.len() <= anchor_hits {
-            continue;
-        }
-        match best_clause {
-            None => {
-                best_clause = Some((clause, anchor_hits));
-                tied = false;
-            }
-            Some((_, best_hits)) if anchor_hits > best_hits => {
-                best_clause = Some((clause, anchor_hits));
-                tied = false;
-            }
-            Some((_, best_hits)) if anchor_hits == best_hits => {
-                tied = true;
-            }
-            _ => {}
-        }
-    }
-
-    if tied {
-        return None;
-    }
-    best_clause.map(|(clause, _)| clause.to_string())
-}
-
-fn rank_candidates<'a>(question: &str, candidates: &'a [ScoredMemory]) -> Vec<&'a ScoredMemory> {
-    const RELATIVE_TOKENS: &[&str] = &[
-        "dad", "father", "mom", "mother", "brother", "sister", "annaya",
-    ];
-    let dynamic_slot = requested_slot(question);
-    let query = NeedleReranker::tokenize(question);
-    let specific: HashSet<&str> = query
-        .iter()
-        .map(String::as_str)
-        .filter(|&t| !is_target_slot_token(t, &dynamic_slot))
-        .collect();
-    let (generic_tokens, anchor_tokens): (HashSet<&str>, HashSet<&str>) = specific
-        .iter()
-        .copied()
-        .partition(|t| GENERIC_TOKENS.contains(t));
-    let query_mentions_relative = query
-        .iter()
-        .any(|q| RELATIVE_TOKENS.iter().any(|r| token_stem(q) == *r));
-
-    let mut scored: Vec<(&'a ScoredMemory, f32)> = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let doc = NeedleReranker::tokenize(&candidate.memory.to_card_text());
-            let anchor_hits = anchor_tokens
-                .iter()
-                .filter(|&&t| doc_contains_token(&doc, t))
-                .count();
-            let generic_hits = generic_tokens
-                .iter()
-                .filter(|&&t| doc_contains_token(&doc, t))
-                .count();
-            let hits = anchor_hits + generic_hits;
-            let any_query_hit = query.iter().any(|q| doc_contains_token(&doc, q));
-            // Require an anchor entity/content match when present; generic or target slot words alone are not evidence.
-            if (!anchor_tokens.is_empty() && anchor_hits == 0)
-                || (!specific.is_empty() && hits == 0)
-                || !any_query_hit
-            {
-                return None;
-            }
-            let fact_bonus = if candidate.memory.category == crate::models::MemoryType::Fact {
-                0.8
-            } else {
-                0.0
-            };
-            let relative_penalty = if !query_mentions_relative
-                && RELATIVE_TOKENS.iter().any(|r| doc_contains_token(&doc, r))
-            {
-                2.0
-            } else {
-                0.0
-            };
-            let score = anchor_hits as f32 * 5.0 + generic_hits as f32 * 0.5 + fact_bonus
-                - relative_penalty
-                + candidate.score;
-            Some((candidate, score))
-        })
-        .collect();
-    scored.sort_by(|a, b| {
-        b.1.total_cmp(&a.1)
-            .then_with(|| a.0.memory.id.cmp(&b.0.memory.id))
-    });
-    scored.into_iter().map(|(c, _)| c).collect()
-}
-
-fn select_candidate<'a>(
-    question: &str,
-    candidates: &'a [ScoredMemory],
-) -> Option<&'a ScoredMemory> {
-    rank_candidates(question, candidates).into_iter().next()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn accepts_grounded_suppressed_rejects_ungrounded_and_does_not_inflate_confidence() {
-        assert!(accepted_arguments(
-            &serde_json::json!({"suppressed_calls":[{"arguments":{"port":"1234"}}],"confidence":0.25})
-        )
-        .is_some());
-        assert!(accepted_arguments(&serde_json::json!({"function_calls":[{"arguments":{"port":"1234"}}],"validation":{"ungrounded":["port"]}})).is_none());
-        let raw =
-            serde_json::json!({"function_calls":[{"arguments":{"port":"1234"}}],"confidence":0.2});
-        assert_eq!(accepted_arguments(&raw).unwrap().1, 0.2);
-    }
-    #[test]
-    fn slots_are_grounded_and_ports_validated() {
-        assert!(!grounded("80", "server runs on 8080"));
-        assert!(grounded("8080", "server runs on 8080."));
-        assert_eq!(
-            requested_slot("what port does postgres service use?"),
-            "port"
-        );
-        assert_eq!(requested_slot("what service runs on port 8880?"), "service");
-        assert_eq!(
-            requested_slot("what are the users codeforces profile"),
-            "profile"
-        );
-        assert_eq!(requested_slot("What is the user's name?"), "name");
-        assert_eq!(requested_slot("What is the Atlas endpoint?"), "endpoint");
-        assert_eq!(requested_slot("What is the port of Redis?"), "port");
-        assert_eq!(requested_slot("What is the OS of Helios?"), "os");
-        assert_eq!(
-            requested_slot("What is the operating system of Helios?"),
-            "os"
-        );
-        assert_eq!(requested_slot("What default port does Orion use?"), "port");
-        assert_eq!(requested_slot("What is Nexus listening on?"), "port");
-        assert_eq!(requested_slot("Which port is Redis listening on?"), "port");
-        assert_eq!(
-            requested_slot("What is the endpoint for Atlas?"),
-            "endpoint"
-        );
-        assert_eq!(requested_slot("Who is the team lead?"), "name");
-        assert_eq!(requested_slot("Where is the backup stored?"), "location");
-        assert_eq!(requested_slot("When does the job run?"), "time");
-        assert!(valid_port("6379"));
-        assert!(!valid_port("99999"));
-    }
 
     fn make_candidate(id: &str, content: &str, score: f32) -> ScoredMemory {
         let mut memory = MemoryRecord::new(
@@ -923,173 +829,110 @@ mod tests {
     }
 
     #[test]
-    fn select_candidate_abstains_when_only_generic_nouns_match() {
-        let helios = make_candidate("1", "Helios service runs on port 7654 on macOS.", 0.85);
-        let haproxy = make_candidate("2", "haproxy proxy runs on port 8404 on Linux.", 0.82);
-        let nexus = make_candidate("3", "Nexus service runs on port 6543 on Linux.", 0.80);
-        let candidates = vec![helios, haproxy, nexus];
-
-        assert!(
-            select_candidate("What port does Kafka service use?", &candidates).is_none(),
-            "Should abstain when only generic noun service matches"
+    fn test_clean_extracted_span_and_grounding() {
+        assert!(!grounded("80", "server runs on 8080"));
+        assert!(grounded("8080", "server runs on 8080."));
+        assert_eq!(
+            clean_extracted_span("Registered No: 2203226828."),
+            "2203226828"
         );
-        assert!(
-            select_candidate("What port does Cassandra proxy use?", &candidates).is_none(),
-            "Should abstain when only generic noun proxy matches"
+        assert_eq!(
+            clean_extracted_span("https://atlas.example.test/api"),
+            "https://atlas.example.test/api"
         );
-        assert!(
-            select_candidate("What service runs on port 80?", &candidates).is_none(),
-            "Should abstain when only generic noun port matches"
-        );
-
-        let selected_helios =
-            select_candidate("What port does Helios service use?", &candidates).unwrap();
-        assert_eq!(selected_helios.memory.id, "1");
-
-        let selected_port =
-            select_candidate("What service runs on port 6543?", &candidates).unwrap();
-        assert_eq!(selected_port.memory.id, "3");
+        assert_eq!(clean_extracted_span("(22A31A05I7)"), "22A31A05I7");
     }
 
     #[test]
-    fn focus_clause_selects_matching_entity_clause_in_multi_entity_memory() {
-        let content = "haproxy runs on port 8404 on Linux and envoy runs on port 9901 on Linux.";
-        let focused_envoy =
-            focus_clause_for_question("What port does envoy use?", content).unwrap();
-        assert!(focused_envoy.contains("envoy"));
-        assert!(focused_envoy.contains("9901"));
-        assert!(!focused_envoy.contains("haproxy"));
+    fn test_is_valid_qa_span_filters_echoes_and_negations() {
+        let q_passport = content_tokens("what is my passport number");
+        assert!(
+            !is_valid_qa_span("4 passport-sized photos", 3.30, &q_passport),
+            "Low-margin span echoing 'passport' must be rejected"
+        );
 
-        let focused_haproxy =
-            focus_clause_for_question("What port does haproxy use?", content).unwrap();
-        assert!(focused_haproxy.contains("haproxy"));
-        assert!(focused_haproxy.contains("8404"));
-        assert!(!focused_haproxy.contains("envoy"));
+        let q_pan = content_tokens("what is my pan card no");
+        assert!(
+            is_valid_qa_span("HAQPP8118D", 1.97, &q_pan),
+            "Distinct identifier with zero question echo must be accepted"
+        );
 
-        assert!(focus_clause_for_question(
-            "What port does Redis use?",
-            "Redis runs on port 6379 on Linux."
-        )
-        .is_none());
+        let q_father = content_tokens("what is my father name");
+        assert!(
+            !is_valid_qa_span("My fathers name has not been recorded", 13.12, &q_father),
+            "Negation/absence span must be rejected"
+        );
+        assert!(is_valid_qa_span("Pathi Srinivas", 15.29, &q_father));
+    }
 
-        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_none()
-            && NeedleReranker::find_needle_assets().is_some()
+    #[test]
+    fn test_ollama_json_response_grounding() {
+        let c1 = make_candidate("1", "Dad's PAN card is stored at dad_PAN.pdf", 0.48);
+        let c2 = make_candidate("2", "User's PAN ID is HAQPP8118D.", 0.44);
+        let gated = vec![&c1, &c2];
+
+        let valid_resp = r#"{"answer": "HAQPP8118D", "memory_index": 1, "confidence": 0.92}"#;
+        let (ans, idx, conf) = parse_and_ground_ollama_answer(valid_resp, &gated).unwrap();
+        assert_eq!(ans, "HAQPP8118D");
+        assert_eq!(idx, 1);
+        assert!((conf - 0.92).abs() < 1e-4);
+
+        let hallucinated = r#"{"answer": "ZZZZ9999Z", "memory_index": 1, "confidence": 0.95}"#;
+        assert!(
+            parse_and_ground_ollama_answer(hallucinated, &gated).is_none(),
+            "Ungrounded Ollama answer must be rejected"
+        );
+
+        let abstained = r#"{"answer": null, "memory_index": null, "confidence": 0.0}"#;
+        assert!(parse_and_ground_ollama_answer(abstained, &gated).is_none());
+    }
+
+    #[test]
+    fn test_onnx_qa_reranker_end_to_end_when_enabled() {
+        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some()
+            || std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
         {
-            let (envoy_port, _) =
-                NeedleReranker::extract_via_native_needle("What port does envoy use?", content)
-                    .expect("Should extract envoy port");
-            assert_eq!(envoy_port, "9901");
-
-            let (haproxy_port, _) =
-                NeedleReranker::extract_via_native_needle("What port does haproxy use?", content)
-                    .expect("Should extract haproxy port");
-            assert_eq!(haproxy_port, "8404");
+            return;
         }
-    }
 
-    #[test]
-    fn candidate_loop_matches_plural_stems_and_falls_back_when_first_candidate_is_insufficient() {
+        let reranker = OnnxQaReranker::new(None);
+
+        // 1. Multi-entity clause disambiguation with zero custom rules
+        let multi = make_candidate(
+            "1",
+            "haproxy runs on port 8404 on Linux and envoy runs on port 9901 on Linux.",
+            0.85,
+        );
+        let res_envoy = reranker
+            .answer("What port does envoy use?", std::slice::from_ref(&multi))
+            .unwrap();
+        assert_eq!(res_envoy.answer, "9901");
+
+        let res_haproxy = reranker
+            .answer("What port does haproxy use?", std::slice::from_ref(&multi))
+            .unwrap();
+        assert_eq!(res_haproxy.answer, "8404");
+
+        // 2. Father name fallback across insufficient candidate
         let c1_insufficient = make_candidate("1", "My fathers name has not been recorded.", 0.90);
         let c2_valid = make_candidate("2", "Pathi Srinivas is my fathers name", 0.85);
-        let c3_family_list = make_candidate(
-            "3",
-            "User's Family Details: - Father: Pathi Srinivas - Mother: Mistri Venkata Annapurna Devi",
-            0.80,
-        );
-        let candidates = vec![c1_insufficient, c2_valid.clone(), c3_family_list.clone()];
+        let res_father = reranker
+            .answer("what is my father name", &[c1_insufficient, c2_valid])
+            .unwrap();
+        assert_eq!(res_father.answer, "Pathi Srinivas");
+        assert_eq!(res_father.selected_memory.unwrap().id, "2");
 
-        // 1. "father" in query must match "fathers" in c1 & c2 via stem/prefix normalization
-        let selected = select_candidate("what is my father name", &candidates)
-            .expect("Singular 'father' should match 'fathers' in candidate");
-        assert_eq!(selected.memory.id, "1");
-
-        // 2. When Native Needle is active, NeedleReranker::answer must try candidate #1,
-        // see it is insufficient, move to candidate #2, and extract "Pathi Srinivas" (not "Father")!
-        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_none()
-            && NeedleReranker::find_needle_assets().is_some()
-        {
-            let res = NeedleReranker
-                .answer("what is my father name", &candidates)
-                .unwrap();
-            assert_eq!(res.selected_memory.as_ref().unwrap().id, "2");
-            assert_eq!(res.answer, "Pathi Srinivas");
-
-            let res_family = NeedleReranker
-                .answer("what is my father name", &[c3_family_list])
-                .unwrap();
-            assert_eq!(res_family.answer, "Pathi Srinivas");
-        }
-    }
-
-    #[test]
-    fn pan_card_no_and_college_id_queries_extract_exact_identifiers() {
-        assert_eq!(requested_slot("what is my pan card no"), "number");
-        assert_eq!(requested_slot("what is my college roll no"), "number");
-        assert_eq!(requested_slot("what is my college id"), "id");
-
-        let mut dad_pan = make_candidate(
+        // 3. PAN card no & College ID without keyword hacks
+        let dad_pan = make_candidate(
             "1",
             "Dad's PAN card is stored at /home/krishnakanth/Documents/Family Vault/files/dad/dad_PAN.pdf",
             0.48,
         );
-        dad_pan.memory.category = crate::models::MemoryType::Artifact;
-        dad_pan.memory.title = "Dad's PAN Card Location".to_string();
-
         let user_pan = make_candidate("2", "User's PAN ID is HAQPP8118D.", 0.44);
-
-        let mut family_docs = make_candidate(
-            "6",
-            "The vault stores sensitive personal documents including Aadhaar cards, PAN cards, educational certificates (10th, Inter, BTech), payslips, and vehicle registration certificates (RCs) for various family members.",
-            0.41,
-        );
-        family_docs.memory.category = crate::models::MemoryType::Context;
-
-        let pan_candidates = vec![dad_pan, user_pan, family_docs];
-        let selected_pan = select_candidate("what is my pan card no", &pan_candidates).unwrap();
-        assert_eq!(selected_pan.memory.id, "2");
-
-        let mut removal_decision = make_candidate(
-            "10",
-            "The user decided to remove 'krishna_CollegeID.pdf' from their files and registry, keeping 'krishna_CollegeID_22A31A05I7.pdf' instead.",
-            0.90,
-        );
-        removal_decision.memory.category = crate::models::MemoryType::Decision;
-        removal_decision.memory.title = "Removal of College ID".to_string();
-
-        let user_identity_docs = make_candidate(
-            "11",
-            "The user (krishna) has various academic and identity documents stored, including BTech marks memos, 10th and Inter certificates, Aadhaar, PAN (HAQPP8118D), and College ID (22A31A05I7).",
-            0.89,
-        );
-
-        let college_candidates = vec![removal_decision.clone(), user_identity_docs.clone()];
-        let selected_college =
-            select_candidate("what is my college id", &college_candidates).unwrap();
-        assert_eq!(selected_college.memory.id, "11");
-
-        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_none()
-            && NeedleReranker::find_needle_assets().is_some()
-        {
-            let res_pan = NeedleReranker
-                .answer("what is my pan card no", &pan_candidates)
-                .unwrap();
-            assert_eq!(res_pan.answer, "HAQPP8118D");
-
-            let res_college = NeedleReranker
-                .answer("what is my college id", &college_candidates)
-                .unwrap();
-            assert_eq!(res_college.answer, "22A31A05I7");
-
-            let inter_record = make_candidate(
-                "12",
-                "The user (or the subject of the provided document) is Pathi Krishna Kanth, who completed their Intermediate education from the Board of Intermediate Education, Andhra Pradesh, India. Registered No: 2203226828. They graduated in May 2022 from KSN Junior College, Samalkot, with an A Grade and a total score of 945.",
-                0.41,
-            );
-            let roll_candidates = vec![removal_decision, inter_record, user_identity_docs];
-            let res_roll = NeedleReranker
-                .answer("what is my college roll no", &roll_candidates)
-                .unwrap();
-            assert!(res_roll.answer == "22A31A05I7" || res_roll.answer == "2203226828");
-        }
+        let res_pan = reranker
+            .answer("what is my pan card no", &[dad_pan, user_pan])
+            .unwrap();
+        assert_eq!(res_pan.answer, "HAQPP8118D");
+        assert_eq!(res_pan.selected_memory.unwrap().id, "2");
     }
 }

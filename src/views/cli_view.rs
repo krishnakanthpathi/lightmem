@@ -223,7 +223,7 @@ impl CliView {
             (
                 "│",
                 "lmem answer \"<question>\"",
-                "Factual extraction via Needle 3 FFI",
+                "Extractive QA via ONNX or Ollama",
             ),
             (
                 "│",
@@ -766,6 +766,12 @@ impl CliView {
                     .as_deref()
                     .unwrap_or("Xenova/bge-small-en-v1.5")
             )
+        );
+        println!(
+            "  {} {:<16} {}",
+            Self::slate("├─"),
+            Self::slate("QA Model"),
+            Self::white_bold(cfg.qa_model.as_deref().unwrap_or("minilm-squad2"))
         );
         println!(
             "  {} {:<16} {}",

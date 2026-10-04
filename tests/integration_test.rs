@@ -55,14 +55,16 @@ fn test_core_lifecycle() {
     assert_eq!(ans.reranker_used, "top1");
     assert!(ans.selected_memory.is_some());
 
-    // 4b. Answer (Default Native Needle 3 C-FFI slot extraction)
+    // 4b. Answer (Default ONNX Extractive QA slot extraction)
     let ans_prec = lm
         .answer("what port does redis use?", None, None, 5, false)
         .expect("precision answer failed");
-    if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some() {
+    if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some()
+        || std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
+    {
         assert_eq!(ans_prec.reranker_used, "none");
     } else {
-        assert_eq!(ans_prec.reranker_used, "needle-3");
+        assert_eq!(ans_prec.reranker_used, "minilm-squad2");
         assert_eq!(ans_prec.answer, "6379");
     }
 

@@ -5,8 +5,8 @@ use crate::models::{
 use crate::repositories::Storage;
 use crate::services::{
     AnswerResult, EmbeddingProvider, Exporter, HashEmbeddingProvider, HybridSearchEngine,
-    JsonMemoryImporter, MemoryImporter, NeedleReranker, OkfMemoryImporter, OllamaEmbeddingProvider,
-    OnnxEmbeddingProvider, Reranker, Top1Reranker,
+    JsonMemoryImporter, MemoryImporter, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
+    OnnxEmbeddingProvider, OnnxQaReranker, Reranker, Top1Reranker,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -446,20 +446,28 @@ impl LightMem {
     }
 
     /// Answer a natural language question using retrieved memory candidates
-    /// and either Top-1 direct selection (0ms) or Native Needle 3 precision disambiguation & slot extraction.
+    /// and either Top-1 direct selection (0ms) or Extractive QA / Ollama reranking.
     pub fn answer(
         &self,
         question: &str,
         category: Option<MemoryType>,
         as_of: Option<DateTime<Utc>>,
         limit: usize,
-        use_needle: bool,
+        use_precision: bool,
     ) -> Result<AnswerResult> {
-        let override_reranker = if use_needle { Some("needle") } else { None };
+        let override_reranker = if use_precision {
+            if self.config.reranker.eq_ignore_ascii_case("top1") {
+                Some("onnx")
+            } else {
+                Some(self.config.reranker.as_str())
+            }
+        } else {
+            None
+        };
         self.answer_with_reranker(question, category, as_of, limit, override_reranker)
     }
 
-    /// Answer with an explicit per-query reranker override ("top1" or "needle")
+    /// Answer with an explicit per-query reranker override ("top1", "onnx", "onnx:<model>", "ollama", "ollama:<model>")
     pub fn answer_with_reranker(
         &self,
         question: &str,
@@ -470,21 +478,51 @@ impl LightMem {
     ) -> Result<AnswerResult> {
         let candidates = self.recall(question, category, as_of, limit, None)?;
 
-        let active_reranker = reranker_override.unwrap_or(&self.config.reranker);
-        anyhow::ensure!(
-            ["top1", "needle", "precision"].contains(&active_reranker.to_lowercase().as_str()),
-            "Unknown reranker: {}",
-            active_reranker
-        );
-        let needle_enabled = active_reranker.eq_ignore_ascii_case("needle")
-            || active_reranker.eq_ignore_ascii_case("precision");
+        let active_reranker = reranker_override.unwrap_or(&self.config.reranker).trim();
+        let lower = active_reranker.to_lowercase();
 
-        if needle_enabled {
-            let reranker = NeedleReranker;
-            reranker.answer(question, &candidates)
-        } else {
-            let reranker = Top1Reranker;
-            reranker.answer(question, &candidates)
+        if lower == "top1" {
+            return Top1Reranker.answer(question, &candidates);
+        }
+
+        if lower == "ollama" {
+            let reranker =
+                OllamaReranker::new(self.config.ollama_url.clone(), self.config.qa_model.clone());
+            return reranker.answer(question, &candidates);
+        }
+
+        if let Some(ollama_model) = active_reranker
+            .strip_prefix("ollama:")
+            .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
+        {
+            let reranker = OllamaReranker::new(
+                self.config.ollama_url.clone(),
+                Some(ollama_model.to_string()),
+            );
+            return reranker.answer(question, &candidates);
+        }
+
+        if let Some(onnx_model) = active_reranker
+            .strip_prefix("onnx:")
+            .or_else(|| active_reranker.strip_prefix("ONNX:"))
+        {
+            let reranker = OnnxQaReranker::new(Some(onnx_model.to_string()));
+            return reranker.answer(question, &candidates);
+        }
+
+        match lower.as_str() {
+            "onnx" | "qa" | "needle" | "precision" => {
+                let reranker = OnnxQaReranker::new(self.config.qa_model.clone());
+                reranker.answer(question, &candidates)
+            }
+            "minilm-squad2" | "minilm" | "tinyroberta-squad2" | "tinyroberta" => {
+                let reranker = OnnxQaReranker::new(Some(lower));
+                reranker.answer(question, &candidates)
+            }
+            other => anyhow::bail!(
+                "Unknown reranker: '{}'. Choose 'onnx' ('minilm-squad2', 'tinyroberta-squad2'), 'ollama' ('ollama:<model>'), or 'top1'.",
+                other
+            ),
         }
     }
 }
