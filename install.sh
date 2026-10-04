@@ -5,9 +5,8 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.1.0"
+VERSION="v0.2.0"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
-NEEDLE_CACHE_DIR="$HOME/.cache/cactus-needle/v3/3.1.0"
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -42,7 +41,7 @@ awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" 'BEGIN {
     r[2]  = "\033[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m";
     r[3]  = "\033[1;38;2;220;38;38m▸\033[0m \033[38;2;228;228;231mUniversal Standalone Installer\033[0m";
     r[4]  = "  \033[38;2;113;113;122m◫ Target     \033[1;38;2;248;250;252m" os " (" arch ")\033[0m";
-    r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38mneedle-3 FFI\033[0m";
+    r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38msquad2-qa / ollama\033[0m";
     r[6]  = "  \033[38;2;113;113;122m✦ Storage    \033[38;2;212;212;216mSQLite WAL + FTS5 + Vector\033[0m";
     r[7]  = "\033[38;2;113;113;122m────────────────────────────────────────────────\033[0m";
     r[8]  = "";
@@ -119,21 +118,9 @@ download_with_pct() {
 case "$OS" in
     Darwin)
         OS_TARGET="apple-darwin"
-        NEEDLE_LIB="libneedle.dylib"
-        if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
-            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-macosx_11_0_arm64.whl"
-        else
-            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-macosx_11_0_x86_64.whl"
-        fi
         ;;
     Linux)
         OS_TARGET="unknown-linux-gnu"
-        NEEDLE_LIB="libneedle.so"
-        if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-manylinux2014_aarch64.whl"
-        else
-            NEEDLE_WHL="cactus_needle-3.1.0-py3-none-manylinux2014_x86_64.whl"
-        fi
         ;;
     *)
         printf "\033[1;31m✕ Unsupported OS: %s\033[0m\n" "$OS"
@@ -184,33 +171,14 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
-    cargo install --git "https://github.com/${REPO}.git" --locked --force
+    cargo install --git "https://github.com/${REPO}.git" --branch feat/extractive-qa-ollama --locked --force
     if [ -f "$HOME/.cargo/bin/lmem" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
         cp "$HOME/.cargo/bin/lmem" "$INSTALL_DIR/lmem"
     fi
     printf "  \033[1;32m◈\033[0m Built and installed lmem binary... \033[1;32m100%%\033[0m\n"
 fi
 
-# 3. Provision Native Needle 3 C-FFI Engine (libneedle + needle3.cact)
-if [ ! -f "$NEEDLE_CACHE_DIR/$NEEDLE_LIB" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/$NEEDLE_LIB" ]; then
-    mkdir -p "$NEEDLE_CACHE_DIR"
-    if download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/python/${NEEDLE_WHL}" "$TMP_DIR/needle.whl" "Downloading Needle 3 C-FFI runtime (${NEEDLE_LIB})" 530108; then
-        unzip -q -j "$TMP_DIR/needle.whl" "needle/*" -d "$NEEDLE_CACHE_DIR" 2>/dev/null || true
-        if [ -f "$NEEDLE_CACHE_DIR/libneedle3.dylib" ]; then
-            cp "$NEEDLE_CACHE_DIR/libneedle3.dylib" "$NEEDLE_CACHE_DIR/libneedle.dylib"
-        fi
-        if [ -f "$NEEDLE_CACHE_DIR/libneedle3.so" ]; then
-            cp "$NEEDLE_CACHE_DIR/libneedle3.so" "$NEEDLE_CACHE_DIR/libneedle.so"
-        fi
-    fi
-fi
-
-if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-needle/v3/3.0.1/needle3.cact" ]; then
-    mkdir -p "$NEEDLE_CACHE_DIR"
-    download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" "$NEEDLE_CACHE_DIR/needle3.cact" "Downloading Needle 3 model weights (needle3.cact)" 35500000 || true
-fi
-
-# 4. Interactive ONNX Embedding Model Selection & Pre-warming (~/.lightmem/models)
+# 3. Interactive ONNX Embedding & QA Model Selection & Pre-warming (~/.lightmem/models)
 download_onnx_model() {
     model_alias="$1"
     expected_kb="$2"
@@ -340,6 +308,9 @@ case "$MODEL_CHOICE" in
         "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
         ;;
 esac
+
+# 4. Pre-warm ONNX Extractive QA Model (minilm-squad2)
+download_onnx_model "minilm-squad2" 128000
 
 # 5. Install Shell Completions with Interactive Tab + Arrow-Key Menu Navigation
 COMP_DIR="$HOME/.lightmem/completions"
