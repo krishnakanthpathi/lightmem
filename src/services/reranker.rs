@@ -388,7 +388,8 @@ impl OnnxQaReranker {
             return Ok(None);
         };
 
-        let cleaned = clean_extracted_span(raw_slice);
+        let q_tokens = content_tokens(question);
+        let cleaned = clean_extracted_span_for_question(raw_slice, &q_tokens);
         if cleaned.is_empty() || !grounded(&cleaned, context) {
             return Ok(None);
         }
@@ -751,6 +752,21 @@ fn clean_extracted_span(raw: &str) -> String {
 
     s.trim_matches(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '.' | '\'' | '"'))
         .to_string()
+}
+
+fn clean_extracted_span_for_question(raw: &str, q_tokens: &HashSet<String>) -> String {
+    let cleaned = clean_extracted_span(raw);
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if (2..=3).contains(&words.len()) {
+        let last = words[words.len() - 1];
+        let prefix_in_question = words[..words.len() - 1]
+            .iter()
+            .all(|w| q_tokens.contains(&w.to_lowercase()));
+        if prefix_in_question && last.chars().any(|c| c.is_ascii_digit()) {
+            return last.to_string();
+        }
+    }
+    cleaned
 }
 
 fn content_tokens(text: &str) -> HashSet<String> {
