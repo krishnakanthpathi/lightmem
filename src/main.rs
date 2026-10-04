@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
     long_about = None,
     before_help = CliView::banner_string(None, None)
 )]
-#[command(version = "0.1.0")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

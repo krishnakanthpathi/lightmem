@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # LightMem Universal Single-Command Installer (macOS & Linux)
-# Usage: curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.sh | sh
 
 set -e
 
