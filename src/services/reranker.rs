@@ -432,7 +432,7 @@ impl Reranker for OnnxQaReranker {
                 continue;
             };
 
-            if !is_valid_qa_span(&span, margin, &q_tokens) {
+            if !is_valid_qa_span(&span, margin, &q_tokens, engine.need_token_type_ids) {
                 continue;
             }
 
@@ -556,7 +556,7 @@ impl Reranker for OllamaReranker {
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
-            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.35)
+            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.47)
             .take(5)
             .collect();
 
@@ -782,12 +782,18 @@ fn content_tokens(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn is_valid_qa_span(span: &str, margin: f32, q_tokens: &HashSet<String>) -> bool {
+fn is_valid_qa_span(
+    span: &str,
+    margin: f32,
+    q_tokens: &HashSet<String>,
+    has_token_type_ids: bool,
+) -> bool {
     let is_alnum_code = !span.contains(' ')
         && span.len() >= 6
         && span.chars().any(|c| c.is_ascii_alphabetic())
         && span.chars().any(|c| c.is_ascii_digit());
-    let min_margin = if is_alnum_code { 1.5 } else { 6.5 };
+    let base_min = if has_token_type_ids { 6.5 } else { 3.5 };
+    let min_margin = if is_alnum_code { 1.5 } else { base_min };
     if margin < min_margin {
         return false;
     }
@@ -809,7 +815,8 @@ fn is_valid_qa_span(span: &str, margin: f32, q_tokens: &HashSet<String>) -> bool
 
     // Reject medium-margin spans (< 10.0) that echo question words
     // (e.g. "4 passport-sized photos" echoing "passport" on "what is my passport number")
-    if margin < 10.0 && s_tokens.iter().any(|t| q_tokens.contains(t)) {
+    let echo_limit = if has_token_type_ids { 10.0 } else { 6.0 };
+    if margin < echo_limit && s_tokens.iter().any(|t| q_tokens.contains(t)) {
         return false;
     }
 
@@ -867,22 +874,27 @@ mod tests {
     fn test_is_valid_qa_span_filters_echoes_and_negations() {
         let q_passport = content_tokens("what is my passport number");
         assert!(
-            !is_valid_qa_span("4 passport-sized photos", 3.30, &q_passport),
+            !is_valid_qa_span("4 passport-sized photos", 3.30, &q_passport, true),
             "Low-margin span echoing 'passport' must be rejected"
         );
 
         let q_pan = content_tokens("what is my pan card no");
         assert!(
-            is_valid_qa_span("HAQPP8118D", 1.97, &q_pan),
+            is_valid_qa_span("HAQPP8118D", 1.97, &q_pan, true),
             "Distinct identifier with zero question echo must be accepted"
         );
 
         let q_father = content_tokens("what is my father name");
         assert!(
-            !is_valid_qa_span("My fathers name has not been recorded", 13.12, &q_father),
+            !is_valid_qa_span(
+                "My fathers name has not been recorded",
+                13.12,
+                &q_father,
+                true
+            ),
             "Negation/absence span must be rejected"
         );
-        assert!(is_valid_qa_span("Pathi Srinivas", 15.29, &q_father));
+        assert!(is_valid_qa_span("Pathi Srinivas", 15.29, &q_father, true));
     }
 
     #[test]
