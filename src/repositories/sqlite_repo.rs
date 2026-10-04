@@ -617,8 +617,14 @@ impl Storage {
         if results.is_empty() {
             let clean_fallback = sanitize_fts5_query(query);
             let tokens: Vec<&str> = clean_fallback.split_whitespace().collect();
-            if tokens.len() >= 2 {
-                params_vec[0] = Box::new(tokens.join(" OR "));
+            if (3..=6).contains(&tokens.len()) {
+                let mut pairs = Vec::new();
+                for i in 0..tokens.len() {
+                    for j in (i + 1)..tokens.len() {
+                        pairs.push(format!("({} {})", tokens[i], tokens[j]));
+                    }
+                }
+                params_vec[0] = Box::new(pairs.join(" OR "));
                 let fallback_refs: Vec<&dyn rusqlite::ToSql> =
                     params_vec.iter().map(|p| p.as_ref()).collect();
                 let fallback_rows = stmt.query_map(fallback_refs.as_slice(), |row| {
@@ -839,10 +845,10 @@ fn deserialize_f32_slice(bytes: &[u8]) -> Vec<f32> {
 
 fn sanitize_fts5_query(query: &str) -> String {
     const STOPWORDS: &[&str] = &[
-        "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were",
-        "does", "do", "did", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with",
-        "by", "from", "as", "and", "or", "my", "me", "our", "your", "use", "uses", "used",
-        "run", "runs", "running", "please", "tell",
+        "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were", "does",
+        "do", "did", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by", "from",
+        "as", "and", "or", "my", "me", "our", "your", "use", "uses", "used", "run", "runs",
+        "running", "please", "tell",
     ];
 
     let raw_tokens: Vec<&str> = query
@@ -1036,10 +1042,7 @@ mod fts_tests {
             sanitize_fts5_query("198.51.100.214"),
             "\"198\"* \"51\"* \"100\"* \"214\"*"
         );
-        assert_eq!(
-            sanitize_fts5_query("16.4.2-r9"),
-            "\"16\"* \"4\"* \"2-r9\"*"
-        );
+        assert_eq!(sanitize_fts5_query("16.4.2-r9"), "\"16\"* \"4\"* \"2-r9\"*");
     }
 
     #[test]
