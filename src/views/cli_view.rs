@@ -1,6 +1,4 @@
-use crate::models::{
-    LightMemConfig, MemoryRecord, PaginatedMemories, ScoredMemory, StorageStats,
-};
+use crate::models::{LightMemConfig, MemoryRecord, PaginatedMemories, ScoredMemory, StorageStats};
 use crate::services::AnswerResult;
 use anyhow::Result;
 use colored::*;
@@ -126,7 +124,7 @@ impl CliView {
                 s.total_vectors
             )
         } else {
-            format!("hybrid SQLite FTS5 + vector store")
+            "hybrid SQLite FTS5 + vector store".to_string()
         };
 
         let right_lines: [String; 11] = [
@@ -193,9 +191,9 @@ impl CliView {
 
         let mut lines = Vec::with_capacity(13);
         lines.push(String::new());
-        for i in 0..11 {
+        for (i, right_line) in right_lines.iter().enumerate() {
             let logo_part = Self::render_logo_row(i);
-            lines.push(format!("{}   {}", logo_part, right_lines[i]));
+            lines.push(format!("{}   {}", logo_part, right_line));
         }
         lines.join("\n")
     }
@@ -210,11 +208,31 @@ impl CliView {
             Self::white_bold("QUICK COMMANDS")
         );
         let cmds = [
-            ("│", "lmem remember \"<fact>\" -t decision", "Store a categorized memory"),
-            ("│", "lmem recall \"<query>\" --limit 5", "Hybrid BM25 + vector search"),
-            ("│", "lmem answer \"<question>\"", "Factual extraction via Needle 3 FFI"),
-            ("│", "lmem list --page 1 --limit 20", "Paginated chronological index"),
-            ("╰─", "lmem stats  |  lmem --help", "Inspect vault telemetry & flags"),
+            (
+                "│",
+                "lmem remember \"<fact>\" -t decision",
+                "Store a categorized memory",
+            ),
+            (
+                "│",
+                "lmem recall \"<query>\" --limit 5",
+                "Hybrid BM25 + vector search",
+            ),
+            (
+                "│",
+                "lmem answer \"<question>\"",
+                "Factual extraction via Needle 3 FFI",
+            ),
+            (
+                "│",
+                "lmem list --page 1 --limit 20",
+                "Paginated chronological index",
+            ),
+            (
+                "╰─",
+                "lmem stats  |  lmem --help",
+                "Inspect vault telemetry & flags",
+            ),
         ];
         for (branch, cmd, desc) in cmds {
             println!(
@@ -320,7 +338,8 @@ impl CliView {
             println!(
                 "     {} {}",
                 Self::slate("│"),
-                m.content.replace('\n', &format!("\n     {} ", Self::slate("│")))
+                m.content
+                    .replace('\n', &format!("\n     {} ", Self::slate("│")))
             );
             let mut meta = vec![format!("{} {}", Self::slate("ID:"), Self::gold(&short_id))];
             if !m.tags.is_empty() {
@@ -363,7 +382,11 @@ impl CliView {
                     ))
                 );
             } else {
-                println!("{} {}", Self::crimson_bold("≡"), Self::slate("No memories found."));
+                println!(
+                    "{} {}",
+                    Self::crimson_bold("≡"),
+                    Self::slate("No memories found.")
+                );
             }
             return Ok(());
         }

@@ -1,7 +1,7 @@
 use crate::embeddings::{cosine_similarity, EmbeddingProvider};
 use crate::models::{MemoryRecord, MemoryStatus, MemoryType, ScoredMemory};
 use crate::storage::Storage;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 
@@ -80,7 +80,9 @@ impl HybridSearchEngine {
             } else if matched_any_initials {
                 total_boost += 0.12;
             } else if lower_words.iter().any(|w| w == q_tok)
-                || tags_lower.iter().any(|t| t == q_tok || t.starts_with(&format!("{}-", q_tok)))
+                || tags_lower
+                    .iter()
+                    .any(|t| t == q_tok || t.starts_with(&format!("{}-", q_tok)))
             {
                 // Exact token or tag prefix match (e.g. "kk" in "kk-linux")
                 total_boost += 0.06;
@@ -101,7 +103,42 @@ impl HybridSearchEngine {
         limit: usize,
         min_similarity: Option<f32>,
     ) -> Result<Vec<ScoredMemory>> {
-        let fetch_limit = (limit * 6).max(80);
+        Self::search_with_identity(
+            storage,
+            embedder,
+            query,
+            category,
+            status,
+            as_of,
+            limit,
+            min_similarity,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_with_identity(
+        storage: &Storage,
+        embedder: &dyn EmbeddingProvider,
+        query: &str,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+        min_similarity: Option<f32>,
+        identity: Option<&str>,
+    ) -> Result<Vec<ScoredMemory>> {
+        anyhow::ensure!(!query.trim().is_empty(), "Search query cannot be blank");
+        if let Some(min) = min_similarity {
+            anyhow::ensure!(
+                min.is_finite() && (0.0..=1.0).contains(&min),
+                "Minimum similarity must be between 0 and 1"
+            );
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fetch_limit = limit.saturating_mul(6).max(80);
         let query_tokens = Self::extract_query_tokens(query);
 
         // 1. BM25 Search via FTS5
@@ -115,8 +152,18 @@ impl HybridSearchEngine {
         let mut vector_ranks: HashMap<String, usize> = HashMap::new();
         let mut vector_scores: HashMap<String, f32> = HashMap::new();
 
-        if let Ok(query_vector) = embedder.embed(query) {
-            let candidates = storage.get_candidate_vectors(category, status, as_of)?;
+        {
+            let query_vector = embedder.embed(query).context("Query embedding failed")?;
+            crate::embeddings::validate_vector(&query_vector)?;
+            let candidates =
+                storage.get_candidate_vectors_checked(category, status, as_of, identity)?;
+            anyhow::ensure!(
+                candidates
+                    .iter()
+                    .all(|(_, vector)| vector.len() == query_vector.len()
+                        && vector.iter().all(|v| v.is_finite())),
+                "Stored embedding dimensions/values are invalid; run lmem reindex"
+            );
             let mut scored_vectors: Vec<(String, f32)> = candidates
                 .into_iter()
                 .map(|(id, vec)| {
@@ -125,13 +172,20 @@ impl HybridSearchEngine {
                 })
                 .collect();
 
-            // Sort by cosine similarity descending
-            scored_vectors
-                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Select a bounded top-k pool without sorting the full vault.
+            scored_vectors.retain(|(_, score)| *score > 0.0);
+            let compare = |a: &(String, f32), b: &(String, f32)| {
+                b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+            };
+            if scored_vectors.len() > fetch_limit {
+                scored_vectors.select_nth_unstable_by(fetch_limit, compare);
+                scored_vectors.truncate(fetch_limit);
+            }
+            scored_vectors.sort_by(compare);
 
             for (rank_idx, (id, score)) in scored_vectors.into_iter().enumerate() {
                 if let Some(min_sim) = min_similarity {
-                    if score < min_sim && !bm25_ranks.contains_key(&id) {
+                    if score < min_sim {
                         continue;
                     }
                 }
@@ -155,9 +209,11 @@ impl HybridSearchEngine {
         }
 
         // Sort candidate IDs by RRF score descending and inspect a wide pool for deduplication & acronym boosting
-        let mut ranked_candidates: Vec<(String, f32)> = rrf_scores.into_iter().collect();
-        ranked_candidates
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut ranked_candidates: Vec<(String, f32)> = rrf_scores
+            .iter()
+            .map(|(id, score)| (id.clone(), *score))
+            .collect();
+        ranked_candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let inspect_ids: Vec<String> = ranked_candidates
             .into_iter()
@@ -166,27 +222,26 @@ impl HybridSearchEngine {
             .collect();
 
         // 4. Hydrate, deduplicate identical content, and apply Acronym/Initials boost
-        let mut seen_contents: HashSet<String> = HashSet::new();
+        let mut seen_contents: HashSet<(MemoryType, String)> = HashSet::new();
         let mut results = Vec::new();
 
+        let mut memories = storage.get_memories_exact(&inspect_ids)?;
         for id in inspect_ids {
-            if let Some(mem) = storage.get_memory(&id)? {
-                let norm_content = mem
-                    .content
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase();
-                if !seen_contents.insert(norm_content) {
-                    // Skip exact duplicate memory content so top candidates are 100% unique
+            if let Some(mem) = memories.remove(&id) {
+                let key = (mem.category, crate::storage::duplicate_key(&mem.content));
+                if !seen_contents.insert(key) {
                     continue;
                 }
-
+                if let Some(min) = min_similarity {
+                    if vector_scores.get(&id).copied().unwrap_or(-1.0) < min {
+                        continue;
+                    }
+                }
                 let bm25_rank = bm25_ranks.get(&id).copied();
                 let vector_rank = vector_ranks.get(&id).copied();
-                let base_score = vector_scores.get(&id).copied().unwrap_or(0.0);
+                let base_score = rrf_scores.get(&id).copied().unwrap_or(0.0) * (K + 1.0) / 2.0;
                 let boost = Self::compute_acronym_and_lexical_boost(&query_tokens, &mem);
-                let score = (base_score + boost).min(0.99);
+                let score = (0.85 * base_score + 0.15 * boost / 0.35).min(1.0);
 
                 results.push(ScoredMemory {
                     memory: mem,
@@ -197,11 +252,11 @@ impl HybridSearchEngine {
             }
         }
 
-        // Final sort by boosted similarity score descending
+        // Keep fused ranking in the final score; it is a ranking score, not a probability.
         results.sort_by(|a, b| {
             b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.score)
+                .then_with(|| a.memory.id.cmp(&b.memory.id))
         });
         results.truncate(limit);
 

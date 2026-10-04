@@ -1,7 +1,8 @@
 use crate::models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, StorageStats};
+use crate::services::embeddings::{validate_vector, EmbeddingProvider};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,7 @@ impl Storage {
             conn: Arc::new(Mutex::new(conn)),
             path: PathBuf::from(":memory:"),
         };
+        conn_settings(&storage)?;
         storage.migrate()?;
         Ok(storage)
     }
@@ -53,22 +55,17 @@ impl Storage {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-
-        // Check if schema is already migrated to avoid unnecessary DDL locks under concurrency
-        let already_migrated: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories' LIMIT 1",
-                [],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-
-        if already_migrated {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        anyhow::ensure!(
+            version <= 2,
+            "Database schema is newer than this version of LightMem"
+        );
+        if version == 2 {
             return Ok(());
         }
-
-        conn.execute_batch(
+        tx.execute_batch(
             r#"
             -- Core memories table
             CREATE TABLE IF NOT EXISTS memories (
@@ -124,223 +121,282 @@ impl Storage {
             "#,
         )?;
 
+        // Upgrade legacy databases atomically and repair duplicate/stale FTS rows.
+        tx.execute_batch("DELETE FROM memories_fts;
+            INSERT INTO memories_fts(id, title, content, tags) SELECT id, title, content, tags FROM memories;
+            CREATE TABLE IF NOT EXISTS embedding_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL, dims INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS storage_revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL);
+            INSERT OR IGNORE INTO storage_revision VALUES (1, 0);
+            CREATE TRIGGER IF NOT EXISTS revision_ai AFTER INSERT ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;
+            CREATE TRIGGER IF NOT EXISTS revision_au AFTER UPDATE ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;
+            CREATE TRIGGER IF NOT EXISTS revision_ad AFTER DELETE ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;")?;
+        let has_key = {
+            let mut stmt = tx.prepare("PRAGMA table_info(memories)")?;
+            let names = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            names.iter().any(|name| name == "dedup_key")
+        };
+        if !has_key {
+            tx.execute(
+                "ALTER TABLE memories ADD COLUMN dedup_key TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
+        }
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_memories_dedup ON memories(status, category, dedup_key)", [])?;
+        // Store tags as JSON so commas inside a tag survive a round trip.
+        let tags: Vec<(String, String, String)> = {
+            let mut stmt = tx.prepare("SELECT id, tags, content FROM memories")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, tags, content) in tags {
+            let values: Vec<String> = tags
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .collect();
+            tx.execute(
+                "UPDATE memories SET tags=?1, dedup_key=?2 WHERE id=?3",
+                params![serde_json::to_string(&values)?, duplicate_key(&content), id],
+            )?;
+        }
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn insert_memory(&self, memory: &MemoryRecord, vector: Option<&[f32]>) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-        let mut merged_tags = memory.tags.clone();
-        let mut merged_conf = memory.confidence;
-        let mut merged_title = memory.title.clone();
-        let mut merged_created = memory.created_at;
-
-        if memory.status == MemoryStatus::Active {
-            // Inspect existing active duplicates to smart-merge tags, confidence, title, and created_at
-            let mut dup_stmt = tx.prepare(
-                r#"
-                SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at
-                FROM memories
-                WHERE status = 'active' AND id != ?1 AND LOWER(TRIM(content)) = LOWER(TRIM(?2))
-                "#,
-            )?;
-            let dup_rows = dup_stmt.query_map(params![memory.id, memory.content], row_to_memory)?;
-            for existing in dup_rows.flatten() {
-                if existing.confidence > merged_conf {
-                    merged_conf = existing.confidence;
-                }
-                if existing.created_at < merged_created {
-                    merged_created = existing.created_at;
-                }
-                // Prefer explicit non-truncated title over auto-truncated snippet
-                let cur_is_auto = merged_title.ends_with("...")
-                    || merged_title.trim().eq_ignore_ascii_case(memory.content.trim());
-                let ext_is_auto = existing.title.ends_with("...")
-                    || existing
-                        .title
-                        .trim()
-                        .eq_ignore_ascii_case(existing.content.trim());
-                if cur_is_auto && !ext_is_auto && !existing.title.trim().is_empty() {
-                    merged_title = existing.title;
-                }
-                // Union tags (case-insensitive deduplication)
-                for t in existing.tags {
-                    if !merged_tags.iter().any(|mt| mt.eq_ignore_ascii_case(&t)) {
-                        merged_tags.push(t);
-                    }
-                }
+        // Low-level writes cannot prove the embedding model identity. Invalidate it.
+        tx.execute("DELETE FROM embedding_state", [])?;
+        write_record(&tx, memory, true, |merged| {
+            if merged.to_card_text() != memory.to_card_text() {
+                return Ok(None);
             }
-            drop(dup_stmt);
-
-            tx.execute(
-                "DELETE FROM memories WHERE status = 'active' AND id != ?1 AND LOWER(TRIM(content)) = LOWER(TRIM(?2))",
-                params![memory.id, memory.content],
-            )?;
-        }
-
-        let tags_str = merged_tags.join(",");
-        let expired_str = memory.expired_at.map(|dt| dt.to_rfc3339());
-
-        tx.execute(
-            r#"
-            INSERT OR REPLACE INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-            "#,
-            params![
-                memory.id,
-                memory.category.as_str(),
-                merged_title,
-                memory.content,
-                tags_str,
-                merged_conf,
-                memory.status.as_str(),
-                memory.provenance,
-                merged_created.to_rfc3339(),
-                memory.updated_at.to_rfc3339(),
-                expired_str,
-            ],
-        )?;
-
-        if let Some(v) = vector {
-            let blob = serialize_f32_slice(v);
-            tx.execute(
-                "INSERT OR REPLACE INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
-                params![memory.id, blob, v.len() as i64],
-            )?;
-        }
-
+            Ok(vector.map(<[f32]>::to_vec))
+        })?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Scan all active memories, smart-merge duplicates (union tags, max confidence, best title, earliest created_at),
-    /// and delete redundant duplicate rows. Returns the number of duplicate records merged & removed.
-    pub fn deduplicate_and_merge(&self) -> Result<usize> {
-        let all_active = self.list_memories(None, Some(MemoryStatus::Active), None, 100_000)?;
-        let mut groups: std::collections::HashMap<String, Vec<MemoryRecord>> =
-            std::collections::HashMap::new();
+    pub fn embedding_identity(&self) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT identity FROM embedding_state WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
 
-        for mem in all_active {
-            let key = mem
-                .content
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase();
-            groups.entry(key).or_default().push(mem);
-        }
+    pub fn check_embedding_identity(&self, identity: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        check_identity(&conn, identity)
+    }
 
-        let mut removed_count = 0usize;
+    pub fn insert_indexed_batch(
+        &self,
+        memories: &[MemoryRecord],
+        embedder: &dyn EmbeddingProvider,
+        identity: &str,
+        merge: bool,
+    ) -> Result<Vec<MemoryRecord>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-        for (_key, mut records) in groups {
-            if records.len() <= 1 {
-                continue;
-            }
-
-            // Keep the newest record ID as primary, merging metadata from all duplicates
-            let mut primary = records.remove(0);
-            for dup in &records {
-                if dup.confidence > primary.confidence {
-                    primary.confidence = dup.confidence;
-                }
-                if dup.created_at < primary.created_at {
-                    primary.created_at = dup.created_at;
-                }
-                if dup.updated_at > primary.updated_at {
-                    primary.updated_at = dup.updated_at;
-                }
-                let pri_is_auto = primary.title.ends_with("...")
-                    || primary
-                        .title
-                        .trim()
-                        .eq_ignore_ascii_case(primary.content.trim());
-                let dup_is_auto = dup.title.ends_with("...")
-                    || dup.title.trim().eq_ignore_ascii_case(dup.content.trim());
-                if pri_is_auto && !dup_is_auto && !dup.title.trim().is_empty() {
-                    primary.title = dup.title.clone();
-                }
-                for t in &dup.tags {
-                    if !primary.tags.iter().any(|pt| pt.eq_ignore_ascii_case(t)) {
-                        primary.tags.push(t.clone());
-                    }
-                }
-            }
-
-            let tags_str = primary.tags.join(",");
-            tx.execute(
-                r#"
-                UPDATE memories
-                SET title = ?1, tags = ?2, confidence = ?3, created_at = ?4, updated_at = ?5
-                WHERE id = ?6
-                "#,
-                params![
-                    primary.title,
-                    tags_str,
-                    primary.confidence,
-                    primary.created_at.to_rfc3339(),
-                    primary.updated_at.to_rfc3339(),
-                    primary.id,
-                ],
-            )?;
-
-            for dup in records {
-                tx.execute("DELETE FROM memories WHERE id = ?1", params![dup.id])?;
-                removed_count += 1;
+        check_identity(&tx, identity)?;
+        let empty: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM memories)", [], |r| {
+            r.get(0)
+        })?;
+        if empty {
+            tx.execute("DELETE FROM embedding_state", [])?;
+        }
+        let mut records = Vec::with_capacity(memories.len());
+        for memory in memories {
+            records.push(write_record(&tx, memory, merge, |_| Ok(None))?);
+        }
+        // Later rows in one import may merge away an earlier survivor. Resolve all
+        // returned records to their final survivor before embedding the final cards.
+        for record in &mut records {
+            let exact = tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1", [&record.id], row_to_memory).optional()?;
+            *record = match exact {
+                Some(current) => current,
+                None if merge && record.status == MemoryStatus::Active => tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC LIMIT 1", params![record.category.as_str(), duplicate_key(&record.content)], row_to_memory)?,
+                None => anyhow::bail!("An imported record unexpectedly disappeared"),
+            };
+        }
+        let mut unique = std::collections::BTreeMap::new();
+        for record in &records {
+            unique.insert(record.id.clone(), record.clone());
+        }
+        let final_records: Vec<_> = unique.into_values().collect();
+        for batch in final_records.chunks(32) {
+            let texts: Vec<_> = batch.iter().map(MemoryRecord::to_card_text).collect();
+            let vectors = embedder.embed_batch(&texts)?;
+            anyhow::ensure!(
+                vectors.len() == batch.len(),
+                "Embedding provider returned the wrong batch size"
+            );
+            for (memory, vector) in batch.iter().zip(vectors) {
+                validate_vector(&vector)?;
+                bind_identity(&tx, identity, vector.len())?;
+                tx.execute(
+                    "INSERT INTO memory_vectors VALUES (?1, ?2, ?3)",
+                    params![memory.id, serialize_f32_slice(&vector), vector.len() as i64],
+                )?;
             }
         }
-
         tx.commit()?;
-        Ok(removed_count)
+        Ok(records)
+    }
+
+    /// Snapshot memory rows and a monotonic revision together for optimistic index migration.
+    pub fn index_snapshot(&self) -> Result<(i64, Vec<MemoryRecord>)> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        let revision = tx.query_row("SELECT revision FROM storage_revision", [], |r| r.get(0))?;
+        let records = all_records(&tx)?;
+        tx.commit()?;
+        Ok((revision, records))
+    }
+
+    pub fn replace_index(
+        &self,
+        revision: i64,
+        identity: &str,
+        vectors: &[(String, Vec<f32>)],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current: i64 =
+            tx.query_row("SELECT revision FROM storage_revision", [], |r| r.get(0))?;
+        anyhow::ensure!(
+            revision == current,
+            "Memories changed during migration; old index preserved. Retry reindex."
+        );
+        let ids: std::collections::HashSet<String> =
+            all_records(&tx)?.into_iter().map(|m| m.id).collect();
+        let supplied: std::collections::HashSet<String> =
+            vectors.iter().map(|(id, _)| id.clone()).collect();
+        anyhow::ensure!(
+            ids == supplied && ids.len() == vectors.len(),
+            "Migration must cover every memory exactly once"
+        );
+        tx.execute("DELETE FROM memory_vectors", [])?;
+        tx.execute("DELETE FROM embedding_state", [])?;
+        for (id, vector) in vectors {
+            validate_vector(vector)?;
+            bind_identity(&tx, identity, vector.len())?;
+            tx.execute(
+                "INSERT INTO memory_vectors VALUES (?1, ?2, ?3)",
+                params![id, serialize_f32_slice(vector), vector.len() as i64],
+            )?;
+        }
+        // Empty databases will bind their dimensions on the first write.
+        tx.execute("UPDATE storage_revision SET revision=revision+1", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn deduplicate_and_merge(&self) -> Result<usize> {
+        self.deduplicate_with(None)
+    }
+
+    pub fn deduplicate_indexed(
+        &self,
+        embedder: &dyn EmbeddingProvider,
+        identity: &str,
+    ) -> Result<usize> {
+        self.deduplicate_with(Some((embedder, identity)))
+    }
+
+    fn deduplicate_with(&self, indexed: Option<(&dyn EmbeddingProvider, &str)>) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some((_, identity)) = indexed {
+            check_identity(&tx, identity)?;
+        }
+        let records = all_records(&tx)?;
+        let mut groups: std::collections::BTreeMap<(String, String), Vec<MemoryRecord>> =
+            std::collections::BTreeMap::new();
+        for record in records
+            .into_iter()
+            .filter(|m| m.status == MemoryStatus::Active)
+        {
+            groups
+                .entry((
+                    record.category.as_str().into(),
+                    duplicate_key(&record.content),
+                ))
+                .or_default()
+                .push(record);
+        }
+        let mut removed = 0;
+        for records in groups.into_values().filter(|g| g.len() > 1) {
+            let primary = &records[0]; // all_records orders oldest first, with a stable ID tie-break.
+            write_record(&tx, primary, true, |merged| {
+                if let Some((embedder, identity)) = indexed {
+                    let v = embedder.embed(&merged.to_card_text())?;
+                    validate_vector(&v)?;
+                    bind_identity(&tx, identity, v.len())?;
+                    Ok(Some(v))
+                } else {
+                    Ok(None)
+                }
+            })?;
+            removed += records.len() - 1;
+        }
+        if removed > 0 && indexed.is_none() {
+            tx.execute("DELETE FROM embedding_state", [])?;
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            r#"
-            SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at
-            FROM memories WHERE id = ?1 OR id LIKE (?1 || '%')
-            LIMIT 1
-            "#,
-        )?;
+        let Some(id) = resolve_id(&conn, id)? else {
+            return Ok(None);
+        };
+        Ok(conn.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1", [id], row_to_memory).optional()?)
+    }
 
-        let mut rows = stmt.query(params![id])?;
-        if let Some(row) = rows.next()? {
-            Ok(Some(row_to_memory(row)?))
-        } else {
-            Ok(None)
+    pub fn get_memories_exact(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, MemoryRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut records = std::collections::HashMap::new();
+        for chunk in ids.chunks(400) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id IN ({})", placeholders);
+            let mut stmt = conn.prepare(&sql)?;
+            for row in stmt.query_map(rusqlite::params_from_iter(chunk), row_to_memory)? {
+                let record = row?;
+                records.insert(record.id.clone(), record);
+            }
         }
+        Ok(records)
     }
 
     pub fn forget_memory(&self, id: &str, hard_delete: bool) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let exact_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM memories WHERE id = ?1 OR id LIKE (?1 || '%') LIMIT 1",
-                params![id],
-                |r| r.get(0),
-            )
-            .ok();
-
-        let target_id = match exact_id {
-            Some(resolved) => resolved,
-            None => return Ok(false),
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some(id) = resolve_id(&tx, id)? else {
+            return Ok(false);
         };
-
-        if hard_delete {
-            let rows_affected =
-                conn.execute("DELETE FROM memories WHERE id = ?1", params![target_id])?;
-            Ok(rows_affected > 0)
+        let rows = if hard_delete {
+            tx.execute("DELETE FROM memories WHERE id=?1", [id])?
         } else {
-            let now_str = Utc::now().to_rfc3339();
-            let rows_affected = conn.execute(
-                "UPDATE memories SET status = 'expired', expired_at = ?1, updated_at = ?1 WHERE id = ?2",
-                params![now_str, target_id],
-            )?;
-            Ok(rows_affected > 0)
-        }
+            tx.execute("UPDATE memories SET status='expired', expired_at=?1, updated_at=?1 WHERE id=?2 AND status='active'", params![Utc::now().to_rfc3339(), id])?
+        };
+        tx.commit()?;
+        Ok(rows > 0)
     }
 
     pub fn count_memories(
@@ -540,10 +596,25 @@ impl Storage {
         status: Option<MemoryStatus>,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<Vec<(String, Vec<f32>)>> {
-        let conn = self.conn.lock().unwrap();
+        self.get_candidate_vectors_checked(category, status, as_of, None)
+    }
+
+    pub fn get_candidate_vectors_checked(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        identity: Option<&str>,
+    ) -> Result<Vec<(String, Vec<f32>)>> {
+        let mut connection = self.conn.lock().unwrap();
+        let snapshot = connection.transaction()?;
+        let conn = &snapshot;
+        if let Some(identity) = identity {
+            check_identity(conn, identity)?;
+        }
         let mut sql = String::from(
             r#"
-            SELECT v.id, v.embedding
+            SELECT v.id, v.embedding, v.dims
             FROM memory_vectors v
             JOIN memories m ON m.id = v.id
             WHERE 1=1
@@ -576,6 +647,10 @@ impl Storage {
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
             let id: String = row.get(0)?;
             let blob: Vec<u8> = row.get(1)?;
+            let dims: i64 = row.get(2)?;
+            if dims <= 0 || !blob.len().is_multiple_of(4) || dims as usize != blob.len() / 4 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let vec = deserialize_f32_slice(&blob);
             Ok((id, vec))
         })?;
@@ -649,15 +724,9 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
         .parse::<MemoryStatus>()
         .unwrap_or(MemoryStatus::Active);
 
-    let tags = if tags_str.trim().is_empty() {
-        Vec::new()
-    } else {
-        tags_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
+    let tags: Vec<String> = serde_json::from_str(&tags_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+    })?;
 
     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
         .map(|dt| dt.with_timezone(&Utc))
@@ -718,4 +787,159 @@ fn sanitize_fts5_query(query: &str) -> String {
         }
     }
     tokens.join(" ")
+}
+
+fn conn_settings(storage: &Storage) -> Result<()> {
+    storage
+        .conn
+        .lock()
+        .unwrap()
+        .pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
+}
+
+/// Only trim outer whitespace. Case, code indentation, and secrets remain significant.
+pub fn duplicate_key(content: &str) -> String {
+    content.trim().to_string()
+}
+
+fn all_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
+    let mut stmt = conn.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories ORDER BY created_at ASC, id ASC")?;
+    let rows = stmt.query_map([], row_to_memory)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn resolve_id(conn: &Connection, id: &str) -> Result<Option<String>> {
+    anyhow::ensure!(!id.trim().is_empty(), "Memory ID cannot be empty");
+    if let Some(exact) = conn
+        .query_row("SELECT id FROM memories WHERE id=?1", [id], |r| r.get(0))
+        .optional()?
+    {
+        return Ok(Some(exact));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id FROM memories WHERE substr(id, 1, length(?1)) = ?1 ORDER BY id LIMIT 2",
+    )?;
+    let ids = stmt
+        .query_map([id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        ids.len() <= 1,
+        "Ambiguous memory ID prefix '{}'; use a full ID",
+        id
+    );
+    Ok(ids.into_iter().next())
+}
+
+fn check_identity(conn: &Connection, identity: &str) -> Result<()> {
+    let state: Option<String> = conn
+        .query_row("SELECT identity FROM embedding_state", [], |r| r.get(0))
+        .optional()?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+    anyhow::ensure!(count == 0 || state.as_deref() == Some(identity), "Embedding migration required (stored: {}, requested: {}). Run lmem reindex to review and start migration.", state.as_deref().unwrap_or("legacy / unknown"), identity);
+    Ok(())
+}
+
+fn bind_identity(conn: &Connection, identity: &str, dims: usize) -> Result<()> {
+    let state: Option<(String, i64)> = conn
+        .query_row("SELECT identity, dims FROM embedding_state", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()?;
+    if let Some((stored, size)) = state {
+        anyhow::ensure!(
+            stored == identity && size == dims as i64,
+            "Embedding model or dimensions changed; run lmem reindex"
+        );
+    } else {
+        conn.execute(
+            "INSERT INTO embedding_state VALUES (1, ?1, ?2)",
+            params![identity, dims as i64],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_record<F>(
+    tx: &Transaction<'_>,
+    memory: &MemoryRecord,
+    merge: bool,
+    embed: F,
+) -> Result<MemoryRecord>
+where
+    F: FnOnce(&MemoryRecord) -> Result<Option<Vec<f32>>>,
+{
+    anyhow::ensure!(
+        !memory.id.trim().is_empty() && !memory.content.trim().is_empty(),
+        "Memory ID and content cannot be blank"
+    );
+    anyhow::ensure!(
+        memory.confidence.is_finite() && (0.0..=1.0).contains(&memory.confidence),
+        "Confidence must be between 0 and 1"
+    );
+    let mut merged = memory.clone();
+    let duplicates: Vec<MemoryRecord> = if merge && memory.status == MemoryStatus::Active {
+        let mut stmt = tx.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC")?;
+        let rows = stmt.query_map(
+            params![memory.category.as_str(), duplicate_key(&memory.content)],
+            row_to_memory,
+        )?;
+        rows.collect::<rusqlite::Result<_>>()?
+    } else {
+        Vec::new()
+    };
+    let exact: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+        [&memory.id],
+        |r| r.get(0),
+    )?;
+    if !exact {
+        if let Some(first) = duplicates.first() {
+            merged.id = first.id.clone();
+            merged.provenance = first.provenance.clone();
+        }
+    }
+    for existing in &duplicates {
+        merged.confidence = merged.confidence.max(existing.confidence);
+        merged.created_at = merged.created_at.min(existing.created_at);
+        merged.updated_at = merged.updated_at.max(existing.updated_at);
+        let auto = |m: &MemoryRecord| {
+            m.title
+                == m.content
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+                || m.title.ends_with("...")
+        };
+        if auto(&merged) && !auto(existing) {
+            merged.title = existing.title.clone();
+        }
+        for tag in &existing.tags {
+            if !merged.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                merged.tags.push(tag.clone());
+            }
+        }
+    }
+    let vector = embed(&merged)?;
+    tx.execute("INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, dedup_key)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+        ON CONFLICT(id) DO UPDATE SET category=excluded.category, title=excluded.title, content=excluded.content, tags=excluded.tags, confidence=excluded.confidence, status=excluded.status, provenance=excluded.provenance, created_at=excluded.created_at, updated_at=excluded.updated_at, expired_at=excluded.expired_at, dedup_key=excluded.dedup_key",
+        params![merged.id, merged.category.as_str(), merged.title, merged.content, serde_json::to_string(&merged.tags)?, merged.confidence, merged.status.as_str(), merged.provenance, merged.created_at.to_rfc3339(), merged.updated_at.to_rfc3339(), merged.expired_at.map(|t| t.to_rfc3339()), duplicate_key(&merged.content)])?;
+    tx.execute("DELETE FROM memory_vectors WHERE id=?1", [&merged.id])?;
+    if let Some(vector) = vector {
+        validate_vector(&vector)?;
+        tx.execute(
+            "INSERT INTO memory_vectors VALUES (?1,?2,?3)",
+            params![merged.id, serialize_f32_slice(&vector), vector.len() as i64],
+        )?;
+    }
+    for duplicate in duplicates {
+        if duplicate.id != merged.id {
+            tx.execute("DELETE FROM memories WHERE id=?1", [duplicate.id])?;
+        }
+    }
+    Ok(merged)
 }

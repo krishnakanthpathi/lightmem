@@ -10,6 +10,9 @@ use std::sync::Mutex;
 pub trait EmbeddingProvider: Send + Sync {
     fn name(&self) -> &str;
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|text| self.embed(text)).collect()
+    }
 }
 
 pub struct OnnxEmbeddingProvider {
@@ -24,10 +27,14 @@ impl OnnxEmbeddingProvider {
             Some("minilm") | Some("all-minilm-l6-v2") | Some("Xenova/all-MiniLM-L6-v2") => {
                 (EmbeddingModel::AllMiniLML6V2, "Xenova/all-MiniLM-L6-v2")
             }
-            Some("nomic") | Some("nomic-embed-text") | Some("nomic-ai/nomic-embed-text-v1.5") => {
-                (EmbeddingModel::NomicEmbedTextV15, "nomic-ai/nomic-embed-text-v1.5")
+            Some("nomic") | Some("nomic-embed-text") | Some("nomic-ai/nomic-embed-text-v1.5") => (
+                EmbeddingModel::NomicEmbedTextV15,
+                "nomic-ai/nomic-embed-text-v1.5",
+            ),
+            None | Some("bge-small" | "bge-small-en-v1.5" | "Xenova/bge-small-en-v1.5") => {
+                (EmbeddingModel::BGESmallENV15, "Xenova/bge-small-en-v1.5")
             }
-            _ => (EmbeddingModel::BGESmallENV15, "Xenova/bge-small-en-v1.5"),
+            Some(other) => anyhow::bail!("Unknown ONNX model: {}", other),
         };
 
         let cache_dir = crate::config::LightMemConfig::config_dir().join("models");
@@ -107,6 +114,15 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
             .next()
             .ok_or_else(|| anyhow::anyhow!("ONNX returned empty embedding"))
     }
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut guard = self
+            .model
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Mutex lock error: {}", e))?;
+        guard
+            .embed(texts, Some(32))
+            .map_err(|e| anyhow::anyhow!("ONNX batch inference error: {}", e))
+    }
 }
 
 #[derive(Clone)]
@@ -170,7 +186,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                 }
                 anyhow::bail!("Ollama returned 200 OK but embedding array was empty");
             }
-            Err(e) => {
+            Err(e @ ureq::Error::Status(404, _)) => {
                 // If /api/embeddings failed with 404, try /api/embed (newer Ollama format)
                 let alt_endpoint = format!("{}/api/embed", self.url);
                 #[derive(Serialize)]
@@ -200,6 +216,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                 }
                 anyhow::bail!("Ollama returned invalid response format");
             }
+            Err(e) => Err(e).with_context(|| format!("Failed to call Ollama at {}", endpoint)),
         }
     }
 }
@@ -277,4 +294,12 @@ fn simple_hash(s: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+pub fn validate_vector(vector: &[f32]) -> Result<()> {
+    anyhow::ensure!(
+        !vector.is_empty() && vector.iter().all(|v| v.is_finite()),
+        "Embedding must be nonempty and contain only finite values"
+    );
+    Ok(())
 }

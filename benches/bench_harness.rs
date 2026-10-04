@@ -650,7 +650,7 @@ fn bench_wal_contention(bench_dir: &Path) -> Result<ContentionResult> {
                 "--worker",
                 &worker_id.to_string(),
                 "--db",
-                &db_path.to_str().unwrap(),
+                db_path.to_str().unwrap(),
                 "--ops",
                 &ops_per_process.to_string(),
             ])
@@ -1122,7 +1122,7 @@ fn generate_markdown_report(
     md.push_str(&format!("| **1. Ingestion Throughput** | 1,000 Bulk Ingest Speed | **{:.1} mem/sec** ({:.2} ms/mem) | > 100 mem/sec (ONNX) | ✅ **PASS** |\n", b1[2].throughput_ops_sec, b1[2].avg_latency_ms));
     md.push_str(&format!("| **2. Hybrid Recall Latency** | P50 / P95 / P99 Latency | **{:.2} ms / {:.2} ms / {:.2} ms** | P95 < 25 ms | ✅ **PASS** |\n", b2.p50_ms, b2.p95_ms, b2.p99_ms));
     md.push_str(&format!("| **3. Temporal Recall Accuracy** | Historical Query Precision | **{:.1}%** (0 false positives/negatives) | 100.0% | ✅ **PASS** |\n", b3.accuracy_pct));
-    md.push_str(&format!("| **4. Multi-Process Contention** | 5 Processes WAL Stress | **0 Lock Errors** (Integrity: OK) | 0 Lock Timeouts | ✅ **PASS** |\n"));
+    md.push_str("| **4. Multi-Process Contention** | 5 Processes WAL Stress | **0 Lock Errors** (Integrity: OK) | 0 Lock Timeouts | ✅ **PASS** |\n");
     md.push_str(&format!("| **5. Memory Footprint** | RSS Delta over 1,000 Ops | **{:+0.2} MB** (Peak: {:.1} MB) | Bounded (< 500 MB) | ✅ **PASS** |\n", b5.rss_delta_mb, b5.rss_peak_mb));
     md.push_str(&format!("| **6. OKF Roundtrip Integrity** | Export/Wipe/Import Recovery | **{:.1}%** (0% Corruption) | 100.0% | ✅ **PASS** |\n", b6.recovery_rate_pct));
     md.push_str("\n---\n\n");
@@ -1224,21 +1224,11 @@ fn generate_markdown_report(
         "| **Total Memories Recovered** | **{}/{} ({:.1}%)** | ✅ PERFECT |\n",
         b6.imported_count, b6.original_count, b6.recovery_rate_pct
     ));
-    md.push_str(&format!(
-        "| **Category Classification** | **100.0%** | ✅ ALL 14 CATEGORIES INTACT |\n"
-    ));
-    md.push_str(&format!(
-        "| **Titles & Identifiers** | **100.0%** | ✅ PERFECT MATCH |\n"
-    ));
-    md.push_str(&format!(
-        "| **Tags & Shards** | **100.0%** | ✅ PERFECT MATCH |\n"
-    ));
-    md.push_str(&format!(
-        "| **Confidence Scores** | **100.0%** | ✅ PRESERVED (< 0.02 delta) |\n"
-    ));
-    md.push_str(&format!(
-        "| **Content Body** | **100.0%** | ✅ 0 BYTES CORRUPTED |\n\n"
-    ));
+    md.push_str("| **Category Classification** | **100.0%** | ✅ ALL 14 CATEGORIES INTACT |\n");
+    md.push_str("| **Titles & Identifiers** | **100.0%** | ✅ PERFECT MATCH |\n");
+    md.push_str("| **Tags & Shards** | **100.0%** | ✅ PERFECT MATCH |\n");
+    md.push_str("| **Confidence Scores** | **100.0%** | ✅ PRESERVED (< 0.02 delta) |\n");
+    md.push_str("| **Content Body** | **100.0%** | ✅ 0 BYTES CORRUPTED |\n\n");
     md.push_str("---\n");
 
     fs::write(target_file, md)?;

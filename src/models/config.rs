@@ -29,21 +29,96 @@ impl Default for LightMemConfig {
 }
 
 impl LightMemConfig {
+    /// Stable embedding-space identity, including card preprocessing and engine version.
+    pub fn embedding_identity(&self) -> Result<String> {
+        let model = match self.backend.as_str() {
+            "hash" => "hash:fnv-bigram-v1".to_string(),
+            "ollama" => format!(
+                "ollama:{}:{}",
+                self.ollama_url.trim_end_matches('/'),
+                self.embedding_model
+            ),
+            "onnx" => {
+                let name = self.onnx_model.as_deref().unwrap_or("bge-small");
+                let canonical = match name {
+                    "minilm" | "all-minilm-l6-v2" | "Xenova/all-MiniLM-L6-v2" => {
+                        "Xenova/all-MiniLM-L6-v2"
+                    }
+                    "nomic" | "nomic-embed-text" | "nomic-ai/nomic-embed-text-v1.5" => {
+                        "nomic-ai/nomic-embed-text-v1.5"
+                    }
+                    "bge-small" | "bge-small-en-v1.5" | "Xenova/bge-small-en-v1.5" => {
+                        "Xenova/bge-small-en-v1.5"
+                    }
+                    other => {
+                        let path = Path::new(other);
+                        anyhow::ensure!(
+                            path.is_dir(),
+                            "Unknown ONNX model or missing model directory: {}",
+                            other
+                        );
+                        // Fingerprint file contents, not just the path: replacing a custom model requires migration.
+                        use std::io::Read;
+                        let mut hash = 0xcbf29ce484222325u64;
+                        for file in [
+                            "model.onnx",
+                            "model_quantized.onnx",
+                            "tokenizer.json",
+                            "config.json",
+                            "special_tokens_map.json",
+                            "tokenizer_config.json",
+                        ] {
+                            let file_path = path.join(file);
+                            if !file_path.exists() {
+                                continue;
+                            }
+                            let mut source = std::fs::File::open(file_path)?;
+                            let mut buf = [0u8; 65536];
+                            loop {
+                                let n = source.read(&mut buf)?;
+                                if n == 0 {
+                                    break;
+                                }
+                                for byte in &buf[..n] {
+                                    hash ^= *byte as u64;
+                                    hash = hash.wrapping_mul(0x100000001b3);
+                                }
+                            }
+                        }
+                        return Ok(format!("card-v1:fastembed-7.1.0:custom:{:016x}", hash));
+                    }
+                };
+                format!("fastembed-7.1.0:{}", canonical)
+            }
+            other => anyhow::bail!(
+                "Unknown embedding backend: {}. Use onnx, ollama, or hash",
+                other
+            ),
+        };
+        Ok(format!("card-v1:{}", model))
+    }
+
     pub fn active_embedding_summary(&self) -> String {
         match self.backend.as_str() {
             "onnx" => match self.onnx_model.as_deref() {
                 Some("minilm") | Some("all-minilm-l6-v2") | Some("Xenova/all-MiniLM-L6-v2") => {
                     "Xenova/all-MiniLM-L6-v2 (384-dim local ONNX)".to_string()
                 }
-                Some("nomic") | Some("nomic-embed-text") | Some("nomic-ai/nomic-embed-text-v1.5") => {
+                Some("nomic")
+                | Some("nomic-embed-text")
+                | Some("nomic-ai/nomic-embed-text-v1.5") => {
                     "nomic-ai/nomic-embed-text-v1.5 (768-dim local ONNX)".to_string()
                 }
-                Some("bge-small") | Some("bge-small-en-v1.5") | Some("Xenova/bge-small-en-v1.5") | None => {
-                    "Xenova/bge-small-en-v1.5 (384-dim local ONNX)".to_string()
-                }
+                Some("bge-small")
+                | Some("bge-small-en-v1.5")
+                | Some("Xenova/bge-small-en-v1.5")
+                | None => "Xenova/bge-small-en-v1.5 (384-dim local ONNX)".to_string(),
                 Some(custom) => format!("{} (custom local ONNX)", custom),
             },
-            "ollama" => format!("{} (via Ollama @ {})", self.embedding_model, self.ollama_url),
+            "ollama" => format!(
+                "{} (via Ollama @ {})",
+                self.embedding_model, self.ollama_url
+            ),
             "hash" => "deterministic-trigram-hash (384-dim offline)".to_string(),
             other => other.to_string(),
         }
@@ -58,9 +133,13 @@ impl LightMemConfig {
     }
 
     pub fn config_dir() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".lightmem")
+        std::env::var_os("LIGHTMEM_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".lightmem")
+            })
     }
 
     pub fn config_file() -> PathBuf {
@@ -72,29 +151,17 @@ impl LightMemConfig {
     }
 
     pub fn load() -> Self {
+        Self::try_load().unwrap_or_default()
+    }
+
+    pub fn try_load() -> Result<Self> {
         let path = Self::config_file();
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(mut cfg) = serde_json::from_str::<LightMemConfig>(&content) {
-                    let mut migrated = false;
-                    if cfg.onnx_model.as_deref() == Some("bge-small") {
-                        cfg.onnx_model = Some("Xenova/bge-small-en-v1.5".to_string());
-                        migrated = true;
-                    }
-                    if cfg.ollama_url == "http://100.75.149.115:7777" {
-                        cfg.ollama_url = "http://localhost:11434".to_string();
-                        migrated = true;
-                    }
-                    if migrated {
-                        let _ = cfg.save();
-                    }
-                    return cfg;
-                }
-            }
+        if !path.exists() {
+            return Ok(Self::default());
         }
-        let cfg = Self::default();
-        let _ = cfg.save();
-        cfg
+        let content = std::fs::read_to_string(&path)?;
+        serde_json::from_str(&content)
+            .with_context(|| format!("Invalid configuration at {}", path.display()))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -103,7 +170,12 @@ impl LightMemConfig {
             .with_context(|| format!("Failed to create config dir {:?}", dir))?;
 
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(Self::config_file(), json).with_context(|| "Failed to write config file")?;
+        let temp = dir.join(format!("config-{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&temp, json).with_context(|| "Failed to write config file")?;
+        if let Err(error) = std::fs::rename(&temp, Self::config_file()) {
+            let _ = std::fs::remove_file(temp);
+            return Err(error.into());
+        }
         Ok(())
     }
 

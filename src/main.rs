@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use lightmem::{CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -34,7 +35,7 @@ enum Commands {
 
         /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password)
         #[arg(short = 't', long = "type")]
-        category: Option<String>,
+        category: Option<MemoryType>,
 
         /// Short title (defaults to first line)
         #[arg(long)]
@@ -60,11 +61,11 @@ enum Commands {
 
         /// Filter by category
         #[arg(short = 't', long = "type")]
-        category: Option<String>,
+        category: Option<MemoryType>,
 
         /// Point-in-time recall: what was active as of date (YYYY-MM-DD or RFC3339)
-        #[arg(long)]
-        as_of: Option<String>,
+        #[arg(long, value_parser = parse_as_of_date)]
+        as_of: Option<DateTime<Utc>>,
 
         /// Max results to return
         #[arg(short = 'l', long, default_value = "10")]
@@ -87,15 +88,15 @@ enum Commands {
     List {
         /// Filter by category
         #[arg(short = 't', long = "type")]
-        category: Option<String>,
+        category: Option<MemoryType>,
 
         /// Filter by status (active | expired)
         #[arg(long, default_value = "active")]
-        status: String,
+        status: MemoryStatus,
 
         /// Point-in-time view (YYYY-MM-DD)
-        #[arg(long)]
-        as_of: Option<String>,
+        #[arg(long, value_parser = parse_as_of_date)]
+        as_of: Option<DateTime<Utc>>,
 
         /// Max results per page
         #[arg(short = 'l', long, default_value = "20")]
@@ -134,6 +135,10 @@ enum Commands {
         #[arg(long)]
         okf: bool,
 
+        /// Lossless JSON backup including expired memories
+        #[arg(long, conflicts_with = "okf")]
+        json: bool,
+
         /// Output file path
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
@@ -143,6 +148,10 @@ enum Commands {
     Import {
         /// Path to import file or OKF directory
         file: PathBuf,
+
+        /// Opt in to native Needle title/category enrichment
+        #[arg(long)]
+        enrich: bool,
     },
 
     /// Ask a question and synthesize/extract the factual answer (with toggleable Native Needle 3 C-FFI reranker)
@@ -160,11 +169,11 @@ enum Commands {
 
         /// Filter candidate memories by category
         #[arg(short = 't', long = "type")]
-        category: Option<String>,
+        category: Option<MemoryType>,
 
         /// Point-in-time view (YYYY-MM-DD or RFC3339)
-        #[arg(long)]
-        as_of: Option<String>,
+        #[arg(long, value_parser = parse_as_of_date)]
+        as_of: Option<DateTime<Utc>>,
 
         /// Max candidate memories to retrieve for reranking
         #[arg(short = 'l', long, default_value = "5")]
@@ -196,6 +205,17 @@ enum Commands {
         /// Default reranker: 'top1' (0ms instant) or 'needle' (Native Needle 3 C-FFI)
         #[arg(long)]
         reranker: Option<String>,
+
+        /// Approve migration of the selected database when the embedding model changes
+        #[arg(long)]
+        yes: bool,
+    },
+
+    /// Rebuild embeddings for the configured model, with progress
+    Reindex {
+        /// Explicitly approve migration without an interactive prompt
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Display storage statistics and active database path
@@ -224,11 +244,52 @@ fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
 
 fn open_controller(db_path: Option<&Path>, global: bool) -> Result<LightMem> {
     if let Some(path) = db_path {
-        let config = LightMemConfig::load();
+        let config = LightMemConfig::try_load()?;
         LightMem::open_at(path, config)
     } else {
         LightMem::open_default(global)
     }
+}
+
+fn migrate_embeddings(lm: &LightMem, yes: bool, machine_output: bool, force: bool) -> Result<bool> {
+    if !force && !lm.embedding_migration_needed()? {
+        return Ok(true);
+    }
+    let count = lm.count(None, None, None)?;
+    eprintln!(
+        "Embedding migration for {} ({} memories)",
+        lm.db_path().display(),
+        count
+    );
+    eprintln!(
+        "  From: {}",
+        lm.stored_embedding_identity()?
+            .as_deref()
+            .unwrap_or("legacy / unknown")
+    );
+    eprintln!("  To:   {}", lm.requested_embedding_identity());
+    if !yes {
+        anyhow::ensure!(!machine_output && io::stdin().is_terminal() && io::stderr().is_terminal(),
+            "Migration needs approval. For a model change, repeat the same config command with --yes. Otherwise run lmem --db '{}' reindex --yes. No embeddings were changed.", lm.db_path().display());
+        eprint!("Rebuild embeddings now? The old index stays intact until completion. [y/N] ");
+        io::stderr().flush()?;
+        let mut response = String::new();
+        io::stdin().read_line(&mut response)?;
+        if !matches!(response.trim().to_lowercase().as_str(), "y" | "yes") {
+            eprintln!("Migration cancelled. Configuration and embeddings were not changed.");
+            return Ok(false);
+        }
+    }
+    let count = lm.reindex(|done, total| {
+        eprintln!(
+            "Embedding progress: {}/{} ({}%)",
+            done,
+            total,
+            done.saturating_mul(100).checked_div(total).unwrap_or(100)
+        );
+    })?;
+    eprintln!("Migration complete: {} embeddings committed.", count);
+    Ok(true)
 }
 
 fn main() -> Result<()> {
@@ -254,7 +315,7 @@ fn main() -> Result<()> {
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
-            let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
+            let cat = category;
             let tag_vec = tags
                 .map(|t| {
                     t.split(',')
@@ -264,6 +325,9 @@ fn main() -> Result<()> {
                 })
                 .unwrap_or_default();
 
+            if !migrate_embeddings(&lm, false, json, false)? {
+                return Ok(());
+            }
             let memory = lm.remember(&content, cat, title, tag_vec, Some(confidence))?;
             CliView::render_remembered(&memory, lm.db_path(), json)?;
         }
@@ -278,11 +342,15 @@ fn main() -> Result<()> {
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
-            let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
-            let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
+            let cat = category;
+            let as_of_dt = as_of;
 
+            if !migrate_embeddings(&lm, false, json, false)? {
+                return Ok(());
+            }
             if precision {
-                let result = lm.answer_with_reranker(&query, cat, as_of_dt, limit, Some("needle"))?;
+                let result =
+                    lm.answer_with_reranker(&query, cat, as_of_dt, limit, Some("needle"))?;
                 CliView::render_answer(&result, json)?;
             } else {
                 let results = lm.recall(&query, cat, as_of_dt, limit, min_similarity)?;
@@ -300,9 +368,9 @@ fn main() -> Result<()> {
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
-            let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
-            let st = status.parse::<MemoryStatus>().ok();
-            let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
+            let cat = category;
+            let st = Some(status);
+            let as_of_dt = as_of;
 
             let paginated = if let Some(p) = page {
                 lm.list_page(cat, st, as_of_dt, p, limit)?
@@ -318,15 +386,27 @@ fn main() -> Result<()> {
             CliView::render_forget(&id, ok, hard, json)?;
         }
 
-        Commands::Export { okf: _, output } => {
+        Commands::Export {
+            okf: _,
+            json,
+            output,
+        } => {
             let lm = open_controller(effective_db, global)?;
-            let exported_path = lm.export_okf(output.as_deref())?;
+            let exported_path = if json {
+                let target = output.unwrap_or_else(|| PathBuf::from("lightmem-backup.json"));
+                lm.export_json(&target)?
+            } else {
+                lm.export_okf(output.as_deref())?
+            };
             CliView::render_export(&exported_path);
         }
 
-        Commands::Import { file } => {
+        Commands::Import { file, enrich } => {
             let lm = open_controller(effective_db, global)?;
-            let count = lm.import_file(&file)?;
+            if !migrate_embeddings(&lm, false, false, false)? {
+                return Ok(());
+            }
+            let count = lm.import_file_with_enrichment(&file, enrich)?;
             CliView::render_import(count, &file);
         }
 
@@ -340,9 +420,12 @@ fn main() -> Result<()> {
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
-            let cat = category.and_then(|c| c.parse::<MemoryType>().ok());
-            let as_of_dt = as_of.as_deref().and_then(|s| parse_as_of_date(s).ok());
+            let cat = category;
+            let as_of_dt = as_of;
 
+            if !migrate_embeddings(&lm, false, json, false)? {
+                return Ok(());
+            }
             let override_mode = if precision {
                 Some("needle")
             } else {
@@ -359,8 +442,10 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
+            yes,
         } => {
-            let mut cfg = LightMemConfig::load();
+            let mut cfg = LightMemConfig::try_load()?;
+            let previous_identity = cfg.embedding_identity().ok();
             let mut changed = false;
 
             if let Some(b) = backend {
@@ -385,14 +470,28 @@ fn main() -> Result<()> {
                     cfg.reranker = lower;
                     changed = true;
                 } else {
-                    eprintln!("Invalid reranker '{}'. Choose 'top1' or 'needle'.", r);
+                    anyhow::bail!("Invalid reranker '{}'. Choose 'top1' or 'needle'.", r);
                 }
             }
 
             if changed {
+                let path = effective_db
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+                let lm = LightMem::open_at(&path, cfg.clone())?;
+                if previous_identity.as_deref() != Some(lm.requested_embedding_identity())
+                    && !migrate_embeddings(&lm, yes, false, false)?
+                {
+                    return Ok(());
+                }
                 cfg.save()?;
             }
             CliView::render_config(&cfg, changed);
+        }
+
+        Commands::Reindex { yes } => {
+            let lm = open_controller(effective_db, global)?;
+            migrate_embeddings(&lm, yes, false, true)?;
         }
 
         Commands::Stats { json } => {
@@ -403,6 +502,9 @@ fn main() -> Result<()> {
 
         Commands::Dedup { json } => {
             let lm = open_controller(effective_db, global)?;
+            if !migrate_embeddings(&lm, false, json, false)? {
+                return Ok(());
+            }
             let merged = lm.deduplicate()?;
             CliView::render_dedup(merged, lm.db_path(), json)?;
         }

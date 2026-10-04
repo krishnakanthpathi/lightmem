@@ -1,4 +1,4 @@
-use crate::models::{MemoryRecord, MemoryType};
+use crate::models::{MemoryRecord, MemoryStatus, MemoryType};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,12 @@ pub struct ImportCandidate {
     pub confidence: f32,
     pub provenance: String,
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub expired_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub status: Option<MemoryStatus>,
 }
 
 impl ImportCandidate {
@@ -33,7 +39,28 @@ impl ImportCandidate {
             record.created_at = ts;
             record.updated_at = ts;
         }
+        record.updated_at = self.updated_at.unwrap_or(record.updated_at);
+        record.expired_at = self.expired_at;
+        record.status = self.status.unwrap_or(MemoryStatus::Active);
         record
+    }
+}
+
+impl From<MemoryRecord> for ImportCandidate {
+    fn from(m: MemoryRecord) -> Self {
+        Self {
+            id: Some(m.id),
+            category: Some(m.category),
+            title: m.title,
+            content: m.content,
+            tags: m.tags,
+            confidence: m.confidence,
+            provenance: m.provenance,
+            created_at: Some(m.created_at),
+            updated_at: Some(m.updated_at),
+            expired_at: m.expired_at,
+            status: Some(m.status),
+        }
     }
 }
 
@@ -136,6 +163,10 @@ fn parse_category_lenient(cat_opt: Option<&str>, content: &str) -> MemoryType {
 
 /// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Native Needle 3 C-FFI + Pure-Rust Heuristic
 pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidate> {
+    parse_json_candidate(val, false)
+}
+
+fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportCandidate> {
     let mut heuristic_tags = Vec::new();
     let mut needle_title: Option<String> = None;
     let mut needle_cat: Option<String> = None;
@@ -158,9 +189,26 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         // Extract the primary descriptive string field verbatim as content, and collect short string fields as tags.
         let obj = val.as_object()?;
         let reserved = [
-            "id", "memory_id", "uuid", "_id", "title", "name", "summary", "heading", "subject",
-            "category", "memory_type", "type", "kind", "type_name", "provenance", "source",
-            "created_at", "timestamp", "date", "created",
+            "id",
+            "memory_id",
+            "uuid",
+            "_id",
+            "title",
+            "name",
+            "summary",
+            "heading",
+            "subject",
+            "category",
+            "memory_type",
+            "type",
+            "kind",
+            "type_name",
+            "provenance",
+            "source",
+            "created_at",
+            "timestamp",
+            "date",
+            "created",
         ];
         let mut best_content: Option<String> = None;
         for (k, v) in obj {
@@ -197,7 +245,7 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
     );
 
     // Consult Native Needle 3 C-FFI when category or title is omitted on the imported JSON record
-    if cat_str.is_none() || explicit_title.is_none() {
+    if enrich && (cat_str.is_none() || explicit_title.is_none()) {
         if let Some((_, n_title, n_cat, n_tags)) =
             crate::reranker::NeedleReranker::extract_import_record_via_needle(&content)
         {
@@ -224,17 +272,15 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         Some(MemoryType::Fact)
     };
 
-    let title = explicit_title
-        .or(needle_title)
-        .unwrap_or_else(|| {
-            content
-                .lines()
-                .next()
-                .unwrap_or("Imported Memory")
-                .chars()
-                .take(80)
-                .collect()
-        });
+    let title = explicit_title.or(needle_title).unwrap_or_else(|| {
+        content
+            .lines()
+            .next()
+            .unwrap_or("Imported Memory")
+            .chars()
+            .take(80)
+            .collect()
+    });
 
     let mut tags = Vec::new();
     // Check tags at root or metadata
@@ -286,8 +332,8 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
     let provenance =
         get_str_field(val, &["provenance", "source"]).unwrap_or_else(|| "imported".to_string());
 
-    let created_at = get_str_field(val, &["created_at", "timestamp", "date", "created"])
-        .and_then(|ts| {
+    let created_at =
+        get_str_field(val, &["created_at", "timestamp", "date", "created"]).and_then(|ts| {
             DateTime::parse_from_rfc3339(&ts)
                 .map(|dt| dt.with_timezone(&Utc))
                 .ok()
@@ -302,17 +348,21 @@ pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidat
         confidence,
         provenance,
         created_at,
+        updated_at: None,
+        expired_at: None,
+        status: None,
     })
 }
 
 /// Extract all JSON values from raw text (handles arrays, wrapped objects, JSONL, and single items)
-pub fn extract_raw_json_values(raw: &str) -> Vec<serde_json::Value> {
+pub fn extract_raw_json_values(raw: &str) -> Result<Vec<serde_json::Value>> {
+    anyhow::ensure!(!raw.trim().is_empty(), "Import file is empty");
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
         if let Some(arr) = parsed.as_array() {
-            return arr.clone();
+            return Ok(arr.clone());
         }
         if let Some(obj) = parsed.as_object() {
-            for wrapper in &[
+            for wrapper in [
                 "memories",
                 "data",
                 "items",
@@ -321,25 +371,24 @@ pub fn extract_raw_json_values(raw: &str) -> Vec<serde_json::Value> {
                 "records",
                 "messages",
             ] {
-                if let Some(arr) = obj.get(*wrapper).and_then(|v| v.as_array()) {
-                    return arr.clone();
+                if let Some(arr) = obj.get(wrapper).and_then(|v| v.as_array()) {
+                    return Ok(arr.clone());
                 }
             }
-            return vec![parsed];
+            return Ok(vec![parsed]);
         }
+        anyhow::bail!("Import expects JSON objects, an array, or JSONL");
     }
-
-    // Try parsing line-by-line as JSONL
     let mut out = Vec::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                out.push(v);
-            }
+    for (index, line) in raw.lines().enumerate() {
+        if !line.trim().is_empty() {
+            out.push(
+                serde_json::from_str(line)
+                    .map_err(|e| anyhow::anyhow!("Invalid JSON at line {}: {}", index + 1, e))?,
+            );
         }
     }
-    out
+    Ok(out)
 }
 
 /// Ingests JSON exports (Memanto, Mem0, Letta, LangChain, raw logs, JSONL, or wrapped objects)
@@ -347,14 +396,42 @@ pub struct JsonMemoryImporter;
 
 impl JsonMemoryImporter {
     pub fn parse_flexible(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
-        let raw_values = extract_raw_json_values(raw);
-        let mut out = Vec::with_capacity(raw_values.len());
-        for val in &raw_values {
-            if let Some(candidate) = parse_single_json_value(val) {
-                out.push(candidate);
+        self.parse_with_enrichment(raw, false)
+    }
+
+    pub fn parse_with_enrichment(&self, raw: &str, enrich: bool) -> Result<Vec<ImportCandidate>> {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(format) = value.get("format").and_then(|v| v.as_str()) {
+                anyhow::ensure!(
+                    format == "lightmem-backup-v1",
+                    "Unsupported backup format: {}",
+                    format
+                );
+                let records: Vec<MemoryRecord> = serde_json::from_value(
+                    value
+                        .get("memories")
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("Backup is missing memories"))?,
+                )?;
+                return Ok(records.into_iter().map(ImportCandidate::from).collect());
             }
         }
-        Ok(out)
+        let raw_values = extract_raw_json_values(raw)?;
+        raw_values
+            .iter()
+            .enumerate()
+            .map(|(index, val)| {
+                let candidate = parse_json_candidate(val, enrich).ok_or_else(|| {
+                    anyhow::anyhow!("Import record {} has no usable content", index + 1)
+                })?;
+                anyhow::ensure!(
+                    candidate.confidence.is_finite() && (0.0..=1.0).contains(&candidate.confidence),
+                    "Record {} has invalid confidence",
+                    index + 1
+                );
+                Ok(candidate)
+            })
+            .collect()
     }
 }
 
@@ -398,7 +475,11 @@ impl OkfMemoryImporter {
         for line in frontmatter.lines() {
             let t = line.trim();
             if t.starts_with("- ") && in_tags {
-                let tag = t.trim_start_matches("- ").trim().trim_matches('\'').trim_matches('"');
+                let tag = t
+                    .trim_start_matches("- ")
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"');
                 if !tag.is_empty() {
                     tags.push(tag.to_string());
                 }
@@ -458,6 +539,9 @@ impl OkfMemoryImporter {
             confidence,
             provenance,
             created_at,
+            updated_at: None,
+            expired_at: None,
+            status: None,
         })
     }
 }
@@ -468,6 +552,23 @@ impl MemoryImporter for OkfMemoryImporter {
     }
 
     fn parse(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
+        if raw
+            .lines()
+            .take(8)
+            .any(|line| line.trim() == "format: \"okf-bundle-v2\"")
+        {
+            return raw
+                .lines()
+                .filter_map(|line| line.strip_prefix("<!-- lightmem-record "))
+                .map(|line| {
+                    let json = line
+                        .strip_suffix(" -->")
+                        .ok_or_else(|| anyhow::anyhow!("Malformed OKF record"))?;
+                    let record: MemoryRecord = serde_json::from_str(json)?;
+                    Ok(ImportCandidate::from(record))
+                })
+                .collect();
+        }
         // 1. Check if this is a single YAML-frontmatter OKF file (from `memanto memory export --okf`)
         if !raw.contains("\n### ") {
             if let Some(single) = Self::parse_yaml_frontmatter_file(raw) {
@@ -506,6 +607,9 @@ impl MemoryImporter for OkfMemoryImporter {
                         confidence: *conf,
                         provenance: "imported:okf".to_string(),
                         created_at: created.take(),
+                        updated_at: None,
+                        expired_at: None,
+                        status: None,
                     });
                 }
             }
