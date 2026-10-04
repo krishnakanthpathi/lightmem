@@ -194,6 +194,10 @@ enum Commands {
         #[arg(long)]
         onnx_model: Option<String>,
 
+        /// Pre-download ONNX model(s) into ~/.lightmem/models ('bge-small', 'minilm', 'nomic', or 'all')
+        #[arg(long)]
+        download: Option<String>,
+
         /// Ollama server URL (e.g. http://localhost:11434)
         #[arg(long)]
         url: Option<String>,
@@ -230,6 +234,12 @@ enum Commands {
         /// Output deduplication result as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Generate shell completion scripts (zsh, bash, fish) with interactive tab/arrow navigation
+    Completions {
+        /// Target shell (zsh, bash, fish, elvish, powershell)
+        shell: clap_complete::Shell,
     },
 }
 
@@ -439,11 +449,32 @@ fn main() -> Result<()> {
         Commands::Config {
             backend,
             onnx_model,
+            download,
             url,
             model,
             reranker,
             yes,
         } => {
+            if let Some(ref dl) = download {
+                let targets: Vec<&str> = match dl.to_lowercase().as_str() {
+                    "all" => vec!["bge-small", "minilm", "nomic"],
+                    "bge-small" | "bge-small-en-v1.5" | "xenova/bge-small-en-v1.5" => {
+                        vec!["bge-small"]
+                    }
+                    "minilm" | "all-minilm-l6-v2" | "xenova/all-minilm-l6-v2" => vec!["minilm"],
+                    "nomic" | "nomic-embed-text" | "nomic-ai/nomic-embed-text-v1.5" => {
+                        vec!["nomic"]
+                    }
+                    other => anyhow::bail!(
+                        "Unknown model '{}' for --download. Choose 'bge-small', 'minilm', 'nomic', or 'all'.",
+                        other
+                    ),
+                };
+                for m in targets {
+                    let _ = lightmem::OnnxEmbeddingProvider::new(Some(m))?;
+                }
+            }
+
             let mut cfg = LightMemConfig::try_load()?;
             let previous_identity = cfg.embedding_identity().ok();
             let mut changed = false;
@@ -507,6 +538,37 @@ fn main() -> Result<()> {
             }
             let merged = lm.deduplicate()?;
             CliView::render_dedup(merged, lm.db_path(), json)?;
+        }
+
+        Commands::Completions { shell } => {
+            use clap::builder::PossibleValuesParser;
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            cmd = cmd.mut_subcommand("config", |sub| {
+                sub.mut_arg("backend", |a| {
+                    a.value_parser(PossibleValuesParser::new(["onnx", "ollama", "hash"]))
+                })
+                .mut_arg("onnx_model", |a| {
+                    a.value_parser(PossibleValuesParser::new(["bge-small", "minilm", "nomic"]))
+                })
+                .mut_arg("download", |a| {
+                    a.value_parser(PossibleValuesParser::new([
+                        "bge-small",
+                        "minilm",
+                        "nomic",
+                        "all",
+                    ]))
+                })
+                .mut_arg("reranker", |a| {
+                    a.value_parser(PossibleValuesParser::new(["needle", "top1"]))
+                })
+            });
+            cmd = cmd.mut_subcommand("answer", |sub| {
+                sub.mut_arg("reranker", |a| {
+                    a.value_parser(PossibleValuesParser::new(["needle", "top1"]))
+                })
+            });
+            clap_complete::generate(shell, &mut cmd, "lmem", &mut io::stdout());
         }
     }
 

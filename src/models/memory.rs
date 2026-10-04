@@ -4,7 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
     Fact,
@@ -20,6 +20,7 @@ pub enum MemoryType {
     Observation,
     Error,
     Context,
+    #[value(alias = "passwords")]
     Password,
 }
 
@@ -294,7 +295,7 @@ impl FromStr for MemoryType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryStatus {
     Active,

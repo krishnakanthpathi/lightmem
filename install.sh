@@ -210,24 +210,169 @@ if [ ! -f "$NEEDLE_CACHE_DIR/needle3.cact" ] && [ ! -f "$HOME/.cache/cactus-need
     download_with_pct "https://huggingface.co/Cactus-Compute/needle3/resolve/main/needle3.cact" "$NEEDLE_CACHE_DIR/needle3.cact" "Downloading Needle 3 model weights (needle3.cact)" 35500000 || true
 fi
 
-# 4. Pre-warm ONNX embedding model (~/.lightmem/models)
-ONNX_LABEL="Verifying ONNX embedding model"
-printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$ONNX_LABEL"
-"$INSTALL_DIR/lmem" recall "init" --limit 1 --json >/dev/null 2>&1 &
-onnx_pid=$!
-while kill -0 "$onnx_pid" 2>/dev/null; do
+# 4. Interactive ONNX Embedding Model Selection & Pre-warming (~/.lightmem/models)
+download_onnx_model() {
+    model_alias="$1"
+    expected_kb="$2"
+    label="Downloading ONNX model (${model_alias})"
+    base_kb=0
     if [ -d "$HOME/.lightmem/models" ]; then
-        cur_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
-        if [ -n "$cur_kb" ]; then
-            pct=$(( cur_kb * 100 / 130000 ))
-            if [ "$pct" -lt 1 ]; then pct=1; fi
-            if [ "$pct" -gt 99 ]; then pct=99; fi
-            printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$ONNX_LABEL" "$pct"
-        fi
+        base_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
+        [ -z "$base_kb" ] && base_kb=0
     fi
-    sleep 0.15
-done
-wait "$onnx_pid" || true
-printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$ONNX_LABEL"
+    printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$label"
+    "$INSTALL_DIR/lmem" config --download "$model_alias" >/dev/null 2>&1 &
+    onnx_pid=$!
+    tick=1
+    while kill -0 "$onnx_pid" 2>/dev/null; do
+        if [ -d "$HOME/.lightmem/models" ]; then
+            cur_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
+            if [ -n "$cur_kb" ]; then
+                delta_kb=$(( cur_kb - base_kb ))
+                if [ "$delta_kb" -lt 0 ]; then delta_kb=0; fi
+                pct=$(( delta_kb * 100 / expected_kb ))
+                if [ "$pct" -le "$tick" ] && [ "$tick" -lt 5 ]; then
+                    tick=$(( tick + 1 ))
+                    pct="$tick"
+                fi
+                if [ "$pct" -lt 1 ]; then pct=1; fi
+                if [ "$pct" -gt 99 ]; then pct=99; fi
+                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$pct"
+            fi
+        fi
+        sleep 0.15
+    done
+    wait "$onnx_pid" || true
+    printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$label"
+}
+
+select_model_interactive() {
+    sel=1
+    printf "\n  \033[1;31m❖\033[0m \033[1;37mSelect ONNX Embedding Model(s) to Download\033[0m \033[38;2;148;163;184m(Use ↑/↓ arrows or 1-4, then Enter):\033[0m\n" >/dev/tty
+    render_menu() {
+        idx=1
+        for item in \
+            "bge-small  ─ Xenova/bge-small-en-v1.5       (384-dim · ~130 MB · Default)" \
+            "minilm     ─ Xenova/all-MiniLM-L6-v2        (384-dim ·  ~90 MB · Ultra-Fast)" \
+            "nomic      ─ nomic-ai/nomic-embed-text-v1.5 (768-dim · ~520 MB · High-Capacity)" \
+            "all        ─ Download all 3 models (switch offline anytime via lmem config)"
+        do
+            name="${item%% *}"
+            rest="${item#* }"
+            if [ "$idx" -eq "$sel" ]; then
+                printf "\r\033[2K    \033[1;31m▸ [%d]\033[0m \033[1;37m%s\033[0m \033[38;2;248;250;252m%s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
+            else
+                printf "\r\033[2K      \033[38;2;148;163;184m[%d] %s %s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
+            fi
+            idx=$(( idx + 1 ))
+        done
+    }
+
+    if stty -g </dev/tty >/dev/null 2>&1; then
+        old_tty="$(stty -g </dev/tty)"
+        render_menu
+        while :; do
+            stty -icanon -echo min 1 time 0 </dev/tty 2>/dev/null || break
+            key="$(dd bs=1 count=1 </dev/tty 2>/dev/null)"
+            stty "$old_tty" </dev/tty 2>/dev/null || true
+            case "$key" in
+                ""|"$(printf '\r')"|"$(printf '\n')")
+                    break
+                    ;;
+                1|2|3|4)
+                    sel="$key"
+                    printf "\033[4A" >/dev/tty
+                    render_menu
+                    break
+                    ;;
+                "$(printf '\033')")
+                    stty -icanon -echo min 0 time 1 </dev/tty 2>/dev/null || true
+                    seq="$(dd bs=2 count=1 </dev/tty 2>/dev/null)"
+                    stty "$old_tty" </dev/tty 2>/dev/null || true
+                    case "$seq" in
+                        "[A"|"OA")
+                            sel=$(( sel - 1 ))
+                            [ "$sel" -lt 1 ] && sel=4
+                            ;;
+                        "[B"|"OB")
+                            sel=$(( sel + 1 ))
+                            [ "$sel" -gt 4 ] && sel=1
+                            ;;
+                    esac
+                    printf "\033[4A" >/dev/tty
+                    render_menu
+                    ;;
+            esac
+        done
+        stty "$old_tty" </dev/tty 2>/dev/null || true
+        printf "\n" >/dev/tty
+        MODEL_CHOICE="$sel"
+    else
+        render_menu
+        printf "  \033[1;31m▸\033[0m Enter choice \033[38;2;148;163;184m[1-4, default=1]\033[0m: " >/dev/tty
+        read -r MODEL_CHOICE </dev/tty || MODEL_CHOICE="1"
+        printf "\n" >/dev/tty
+    fi
+}
+
+MODEL_CHOICE="${LIGHTMEM_MODEL:-}"
+if [ -z "$MODEL_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    select_model_interactive || MODEL_CHOICE="1"
+fi
+
+case "$MODEL_CHOICE" in
+    2|minilm)
+        download_onnx_model "minilm" 90000
+        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model minilm --yes >/dev/null 2>&1 || true
+        ;;
+    3|nomic)
+        download_onnx_model "nomic" 520000
+        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model nomic --yes >/dev/null 2>&1 || true
+        ;;
+    4|all)
+        download_onnx_model "bge-small" 130000
+        download_onnx_model "minilm" 90000
+        download_onnx_model "nomic" 520000
+        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
+        ;;
+    *)
+        download_onnx_model "bge-small" 130000
+        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
+        ;;
+esac
+
+# 5. Install Shell Completions with Interactive Tab + Arrow-Key Menu Navigation
+COMP_DIR="$HOME/.lightmem/completions"
+mkdir -p "$COMP_DIR"
+"$INSTALL_DIR/lmem" completions zsh > "$COMP_DIR/_lmem" 2>/dev/null || true
+"$INSTALL_DIR/lmem" completions bash > "$COMP_DIR/lmem.bash" 2>/dev/null || true
+
+if [ -f "$HOME/.zshrc" ] || [ "${SHELL:-}" = "/bin/zsh" ] || [ "${SHELL:-}" = "/usr/bin/zsh" ]; then
+    touch "$HOME/.zshrc"
+    if ! grep -q "lightmem/completions" "$HOME/.zshrc" 2>/dev/null; then
+        cat << 'EOF' >> "$HOME/.zshrc"
+
+# LightMem CLI completions & interactive Tab/Arrow-key menu
+fpath=("$HOME/.lightmem/completions" $fpath)
+autoload -Uz compinit && compinit -C
+zstyle ':completion:*' menu select
+EOF
+    fi
+fi
+
+if [ -f "$HOME/.bashrc" ] || [ "${SHELL:-}" = "/bin/bash" ] || [ "${SHELL:-}" = "/usr/bin/bash" ]; then
+    touch "$HOME/.bashrc"
+    if ! grep -q "lightmem/completions/lmem.bash" "$HOME/.bashrc" 2>/dev/null; then
+        cat << 'EOF' >> "$HOME/.bashrc"
+
+# LightMem CLI completions & interactive Tab menu
+[ -f "$HOME/.lightmem/completions/lmem.bash" ] && source "$HOME/.lightmem/completions/lmem.bash"
+bind 'set show-all-if-ambiguous on' 2>/dev/null || true
+bind '"\t": menu-complete' 2>/dev/null || true
+bind '"\e[Z": menu-complete-backward' 2>/dev/null || true
+EOF
+    fi
+fi
+printf "  \033[1;32m◈\033[0m Configured shell completions (Tab + Arrow keys)... \033[1;32m100%%\033[0m\n"
 
 printf "\n  \033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n\n"

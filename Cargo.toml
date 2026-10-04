@@ -30,6 +30,7 @@ ureq = { version = "2.10", features = ["json"] }
 regex = "1.10"
 dirs = "5.0"
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 colored = "2.1"
 libc = "0.2"
 
