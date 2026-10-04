@@ -399,3 +399,215 @@ pub struct PaginatedMemories {
     pub total_pages: usize,
     pub has_more: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConflict {
+    pub slot: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub older_memory: MemoryRecord,
+    pub newer_memory: MemoryRecord,
+}
+
+/// Parse a human-friendly TTL duration string (e.g. "30s", "15m", "24h", "7d", "2w")
+pub fn parse_ttl_duration(raw: &str) -> Result<chrono::Duration, String> {
+    let s = raw.trim().to_lowercase();
+    if s.is_empty() {
+        return Err("TTL duration cannot be empty (examples: 30s, 15m, 24h, 7d)".to_string());
+    }
+    let (num_str, unit) = if let Some(n) = s.strip_suffix("ms") {
+        (n.trim(), "ms")
+    } else if let Some(n) = s.strip_suffix('s') {
+        (n.trim(), "s")
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n.trim(), "m")
+    } else if let Some(n) = s.strip_suffix('h') {
+        (n.trim(), "h")
+    } else if let Some(n) = s.strip_suffix('d') {
+        (n.trim(), "d")
+    } else if let Some(n) = s.strip_suffix('w') {
+        (n.trim(), "w")
+    } else {
+        (s.as_str(), "s")
+    };
+
+    let val: i64 = num_str.parse().map_err(|_| {
+        format!(
+            "Invalid TTL '{}'. Expected positive integer with unit s, m, h, d, or w (e.g. 24h, 7d)",
+            raw
+        )
+    })?;
+    if val <= 0 {
+        return Err("TTL duration must be greater than 0".to_string());
+    }
+
+    match unit {
+        "ms" => Ok(chrono::Duration::milliseconds(val)),
+        "s" => Ok(chrono::Duration::seconds(val)),
+        "m" => Ok(chrono::Duration::minutes(val)),
+        "h" => Ok(chrono::Duration::hours(val)),
+        "d" => Ok(chrono::Duration::days(val)),
+        "w" => Ok(chrono::Duration::weeks(val)),
+        _ => Err(format!("Unsupported TTL unit '{}'", unit)),
+    }
+}
+
+fn extract_subject_and_slots(
+    content: &str,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::BTreeMap<String, String>,
+) {
+    use regex::Regex;
+    use std::collections::{BTreeMap, HashSet};
+
+    let mut slots = BTreeMap::new();
+    let mut slot_tokens = HashSet::new();
+
+    if let Ok(re_port) = Regex::new(r"(?i)\bport\s*[:=]?\s*(\d{1,5})\b") {
+        let ports: Vec<String> = re_port
+            .captures_iter(content)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+            .collect();
+        if ports.len() == 1 {
+            slot_tokens.insert(ports[0].to_lowercase());
+            slots.insert("port".to_string(), ports[0].clone());
+        }
+    }
+
+    if let Ok(re_url) = Regex::new(r"(https?://[^\s,]+)") {
+        let urls: Vec<String> = re_url
+            .captures_iter(content)
+            .filter_map(|c| {
+                c.get(1)
+                    .map(|m| m.as_str().trim_end_matches('.').to_string())
+            })
+            .collect();
+        if urls.len() == 1 {
+            for part in urls[0].split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-') {
+                if !part.is_empty() {
+                    slot_tokens.insert(part.to_lowercase());
+                }
+            }
+            slots.insert("url".to_string(), urls[0].clone());
+        }
+    }
+
+    if let Ok(re_os) = Regex::new(r"(?i)\b(linux|macos|windows|ubuntu|debian|alpine|freebsd)\b") {
+        let mut os_list: Vec<String> = re_os
+            .captures_iter(content)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().to_lowercase()))
+            .collect();
+        os_list.sort();
+        os_list.dedup();
+        if os_list.len() == 1 {
+            slot_tokens.insert(os_list[0].clone());
+            slots.insert("os".to_string(), os_list[0].clone());
+        }
+    }
+
+    if slots.is_empty() {
+        if let Ok(re_kv) = Regex::new(r"(?i)^\s*([a-z0-9_\-\s]{2,40}?)\s+(?:is|=)\s+([^\s.,;]+)") {
+            if let Some(cap) = re_kv.captures(content.trim()) {
+                if let (Some(lhs), Some(rhs)) = (cap.get(1), cap.get(2)) {
+                    let val = rhs.as_str().trim().to_string();
+                    let key_name = lhs.as_str().trim().to_lowercase();
+                    slot_tokens.insert(val.to_lowercase());
+                    slots.insert(format!("value({})", key_name), val);
+                }
+            }
+        }
+    }
+
+    let stop_words: HashSet<&str> = [
+        "the",
+        "a",
+        "an",
+        "on",
+        "in",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "is",
+        "are",
+        "was",
+        "were",
+        "run",
+        "runs",
+        "running",
+        "use",
+        "uses",
+        "used",
+        "port",
+        "url",
+        "endpoint",
+        "uri",
+        "os",
+        "operating",
+        "system",
+        "node",
+        "host",
+        "server",
+        "service",
+        "cluster",
+        "engine",
+        "app",
+        "application",
+    ]
+    .into_iter()
+    .collect();
+
+    let subjects: HashSet<String> = content
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 1 && !stop_words.contains(w.as_str()) && !slot_tokens.contains(w))
+        .collect();
+
+    (subjects, slots)
+}
+
+/// Check if two active memories represent a factual contradiction on the same subject entity
+pub fn detect_memory_conflict(a: &MemoryRecord, b: &MemoryRecord) -> Option<MemoryConflict> {
+    if a.id == b.id || a.category != b.category || a.content.trim() == b.content.trim() {
+        return None;
+    }
+
+    let (subj_a, slots_a) = extract_subject_and_slots(&a.content);
+    let (subj_b, slots_b) = extract_subject_and_slots(&b.content);
+
+    if subj_a.is_empty() || subj_b.is_empty() || slots_a.is_empty() || slots_b.is_empty() {
+        return None;
+    }
+
+    let overlap = subj_a.intersection(&subj_b).count();
+    let min_len = subj_a.len().min(subj_b.len());
+    if overlap == 0 || overlap * 2 < min_len {
+        return None;
+    }
+
+    let (older, newer, older_slots, newer_slots) = if (a.created_at, &a.id) <= (b.created_at, &b.id)
+    {
+        (a, b, &slots_a, &slots_b)
+    } else {
+        (b, a, &slots_b, &slots_a)
+    };
+
+    for (slot, old_val) in older_slots {
+        if let Some(new_val) = newer_slots.get(slot) {
+            if !old_val.eq_ignore_ascii_case(new_val) {
+                return Some(MemoryConflict {
+                    slot: slot.clone(),
+                    old_value: old_val.clone(),
+                    new_value: new_val.clone(),
+                    older_memory: older.clone(),
+                    newer_memory: newer.clone(),
+                });
+            }
+        }
+    }
+
+    None
+}

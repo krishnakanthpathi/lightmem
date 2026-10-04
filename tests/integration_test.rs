@@ -510,3 +510,153 @@ fn test_smart_merge_deduplication() {
         "Tags should be unioned without duplicates"
     );
 }
+
+#[test]
+fn test_ttl_auto_expiration() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(tmp.path(), config).unwrap();
+
+    assert_eq!(
+        lightmem::parse_ttl_duration("30s").unwrap(),
+        chrono::Duration::seconds(30)
+    );
+    assert_eq!(
+        lightmem::parse_ttl_duration("24h").unwrap(),
+        chrono::Duration::hours(24)
+    );
+    assert_eq!(
+        lightmem::parse_ttl_duration("7d").unwrap(),
+        chrono::Duration::days(7)
+    );
+
+    // 1. Store a permanent memory and a short-lived TTL memory (already due)
+    let (_perm, _) = lm
+        .remember_with_options(
+            "Permanent architecture decision: SQLite WAL mode.",
+            Some(MemoryType::Decision),
+            None,
+            vec![],
+            Some(0.95),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let (ephemeral, _) = lm
+        .remember_with_options(
+            "Temporary staging token expires soon.",
+            Some(MemoryType::Context),
+            None,
+            vec!["ephemeral".to_string()],
+            Some(0.9),
+            Some(chrono::Duration::milliseconds(-100)),
+            false,
+        )
+        .unwrap();
+    assert!(ephemeral.expired_at.is_some());
+
+    // 2. Querying active memories or stats should auto-transition due TTL memories to Expired
+    let active = lm.list(None, Some(MemoryStatus::Active), None, 10).unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(active[0].content.contains("SQLite WAL mode"));
+
+    let expired_record = lm.get(&ephemeral.id).unwrap().unwrap();
+    assert_eq!(expired_record.status, MemoryStatus::Expired);
+
+    let stats = lm.stats().unwrap();
+    assert_eq!(stats.total_memories, 2);
+    assert_eq!(stats.active_memories, 1);
+    assert_eq!(stats.expired_memories, 1);
+}
+
+#[test]
+fn test_contradiction_detection_and_supersede() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(tmp.path(), config).unwrap();
+
+    // 1. Store initial port fact
+    let (old_pg, conflicts_0) = lm
+        .remember_with_options(
+            "PostgreSQL runs on port 5432.",
+            Some(MemoryType::Fact),
+            Some("Postgres Port".to_string()),
+            vec![],
+            Some(0.9),
+            None,
+            false,
+        )
+        .unwrap();
+    assert!(conflicts_0.is_empty());
+
+    // 2. Store conflicting port fact WITHOUT --supersede -> conflict detected, both remain active
+    let (new_pg, conflicts_1) = lm
+        .remember_with_options(
+            "PostgreSQL runs on port 6432.",
+            Some(MemoryType::Fact),
+            Some("Postgres Port Updated".to_string()),
+            vec![],
+            Some(0.95),
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(conflicts_1.len(), 1);
+    assert_eq!(conflicts_1[0].slot, "port");
+    assert_eq!(conflicts_1[0].old_value, "5432");
+    assert_eq!(conflicts_1[0].new_value, "6432");
+    assert_eq!(conflicts_1[0].older_memory.id, old_pg.id);
+    assert_eq!(conflicts_1[0].newer_memory.id, new_pg.id);
+
+    // 3. Resolve conflicts via find_conflicts(true)
+    let resolved = lm.find_conflicts(true).unwrap();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(
+        lm.get(&old_pg.id).unwrap().unwrap().status,
+        MemoryStatus::Expired
+    );
+    assert_eq!(
+        lm.get(&new_pg.id).unwrap().unwrap().status,
+        MemoryStatus::Active
+    );
+
+    // 4. Test immediate --supersede on remember_with_options
+    let (old_redis, _) = lm
+        .remember_with_options(
+            "Redis cache listens on port 6379.",
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+        )
+        .unwrap();
+    let (new_redis, redis_conflicts) = lm
+        .remember_with_options(
+            "Redis cache listens on port 6380.",
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.95),
+            None,
+            true,
+        )
+        .unwrap();
+    assert_eq!(redis_conflicts.len(), 1);
+    assert_eq!(
+        lm.get(&old_redis.id).unwrap().unwrap().status,
+        MemoryStatus::Expired
+    );
+    assert_eq!(
+        lm.get(&new_redis.id).unwrap().unwrap().status,
+        MemoryStatus::Active
+    );
+}

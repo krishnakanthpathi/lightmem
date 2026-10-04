@@ -356,8 +356,14 @@ impl Storage {
         Ok(removed)
     }
 
+    pub fn expire_due_memories(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        expire_due_conn(&conn)
+    }
+
     pub fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
         let Some(id) = resolve_id(&conn, id)? else {
             return Ok(None);
         };
@@ -369,6 +375,7 @@ impl Storage {
         ids: &[String],
     ) -> Result<std::collections::HashMap<String, MemoryRecord>> {
         let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
         let mut records = std::collections::HashMap::new();
         for chunk in ids.chunks(400) {
             let placeholders = std::iter::repeat_n("?", chunk.len())
@@ -406,6 +413,7 @@ impl Storage {
         as_of: Option<DateTime<Utc>>,
     ) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
         let mut query = String::from("SELECT COUNT(*) FROM memories WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -538,6 +546,7 @@ impl Storage {
         }
 
         let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
         let mut sql = String::from(
             r#"
             SELECT m.id, bm25(memories_fts) as rank
@@ -607,6 +616,7 @@ impl Storage {
         identity: Option<&str>,
     ) -> Result<Vec<(String, Vec<f32>)>> {
         let mut connection = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&connection);
         let snapshot = connection.transaction()?;
         let conn = &snapshot;
         if let Some(identity) = identity {
@@ -664,6 +674,7 @@ impl Storage {
 
     pub fn stats(&self) -> Result<StorageStats> {
         let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
 
         let total_memories: i64 =
             conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
@@ -702,6 +713,23 @@ impl Storage {
             by_category,
         })
     }
+}
+
+fn expire_due_conn(conn: &Connection) -> Result<usize> {
+    let now = Utc::now().to_rfc3339();
+    let has_due: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM memories WHERE status='active' AND expired_at IS NOT NULL AND expired_at <= ?1)",
+        [&now],
+        |r| r.get(0),
+    )?;
+    if !has_due {
+        return Ok(0);
+    }
+    let expired = conn.execute(
+        "UPDATE memories SET status='expired', updated_at=?1 WHERE status='active' AND expired_at IS NOT NULL AND expired_at <= ?1",
+        [&now],
+    )?;
+    Ok(expired)
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
@@ -903,6 +931,7 @@ where
         merged.confidence = merged.confidence.max(existing.confidence);
         merged.created_at = merged.created_at.min(existing.created_at);
         merged.updated_at = merged.updated_at.max(existing.updated_at);
+        merged.expired_at = merged.expired_at.or(existing.expired_at);
         let auto = |m: &MemoryRecord| {
             m.title
                 == m.content

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
-use lightmem::{CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use lightmem::{parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -48,6 +48,14 @@ enum Commands {
         /// Confidence score (0.0 to 1.0)
         #[arg(short = 'c', long, default_value = "0.9")]
         confidence: f32,
+
+        /// Auto-expire memory after a TTL duration (e.g. '30s', '15m', '24h', '7d', '2w')
+        #[arg(long, value_parser = parse_ttl_duration)]
+        ttl: Option<chrono::Duration>,
+
+        /// Automatically supersede (soft-retire) older conflicting memories on the same subject & slot
+        #[arg(short = 's', long)]
+        supersede: bool,
 
         /// Output created memory as JSON
         #[arg(long)]
@@ -236,6 +244,17 @@ enum Commands {
         json: bool,
     },
 
+    /// Detect contradictory active memories on the same subject & slot (and optionally retire older ones)
+    Conflicts {
+        /// Automatically soft-retire older conflicting memories so only the latest truth remains active
+        #[arg(long)]
+        resolve: bool,
+
+        /// Output conflict report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate shell completion scripts (zsh, bash, fish) with interactive tab/arrow navigation
     Completions {
         /// Target shell (zsh, bash, fish, elvish, powershell)
@@ -322,6 +341,8 @@ fn main() -> Result<()> {
             title,
             tags,
             confidence,
+            ttl,
+            supersede,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
@@ -338,8 +359,22 @@ fn main() -> Result<()> {
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
-            let memory = lm.remember(&content, cat, title, tag_vec, Some(confidence))?;
-            CliView::render_remembered(&memory, lm.db_path(), json)?;
+            let (memory, conflicts) = lm.remember_with_options(
+                &content,
+                cat,
+                title,
+                tag_vec,
+                Some(confidence),
+                ttl,
+                supersede,
+            )?;
+            CliView::render_remembered_with_conflicts(
+                &memory,
+                &conflicts,
+                supersede,
+                lm.db_path(),
+                json,
+            )?;
         }
 
         Commands::Recall {
@@ -540,10 +575,21 @@ fn main() -> Result<()> {
             CliView::render_dedup(merged, lm.db_path(), json)?;
         }
 
+        Commands::Conflicts { resolve, json } => {
+            let lm = open_controller(effective_db, global)?;
+            let conflicts = lm.find_conflicts(resolve)?;
+            CliView::render_conflicts(&conflicts, resolve, lm.db_path(), json)?;
+        }
+
         Commands::Completions { shell } => {
             use clap::builder::PossibleValuesParser;
             use clap::CommandFactory;
             let mut cmd = Cli::command();
+            cmd = cmd.mut_subcommand("remember", |sub| {
+                sub.mut_arg("ttl", |a| {
+                    a.value_parser(PossibleValuesParser::new(["1h", "24h", "7d", "30d"]))
+                })
+            });
             cmd = cmd.mut_subcommand("config", |sub| {
                 sub.mut_arg("backend", |a| {
                     a.value_parser(PossibleValuesParser::new(["onnx", "ollama", "hash"]))

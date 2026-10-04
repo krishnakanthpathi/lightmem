@@ -1,6 +1,6 @@
 use crate::models::{
-    LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory,
-    StorageStats,
+    detect_memory_conflict, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
+    PaginatedMemories, ScoredMemory, StorageStats,
 };
 use crate::repositories::Storage;
 use crate::services::{
@@ -128,6 +128,23 @@ impl LightMem {
         tags: Vec<String>,
         confidence: Option<f32>,
     ) -> Result<MemoryRecord> {
+        let (record, _) =
+            self.remember_with_options(content, category, title, tags, confidence, None, false)?;
+        Ok(record)
+    }
+
+    /// Store a new memory into the database with optional TTL and contradiction superseding
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_options(
+        &self,
+        content: &str,
+        category: Option<MemoryType>,
+        title: Option<String>,
+        tags: Vec<String>,
+        confidence: Option<f32>,
+        ttl: Option<chrono::Duration>,
+        supersede: bool,
+    ) -> Result<(MemoryRecord, Vec<MemoryConflict>)> {
         let clean_content = content.trim().to_string();
         if clean_content.is_empty() {
             anyhow::bail!("Memory content cannot be blank");
@@ -149,7 +166,7 @@ impl LightMem {
             conf.is_finite() && (0.0..=1.0).contains(&conf),
             "Confidence must be between 0 and 1"
         );
-        let memory = MemoryRecord::new(
+        let mut memory = MemoryRecord::new(
             resolved_type,
             resolved_title,
             clean_content,
@@ -157,16 +174,75 @@ impl LightMem {
             conf,
             Some("explicit_statement".to_string()),
         );
+        if let Some(ttl_duration) = ttl {
+            memory.expired_at = Some(Utc::now() + ttl_duration);
+        }
 
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        let mut stored = self.storage.insert_indexed_batch(
+        let mut stored_batch = self.storage.insert_indexed_batch(
             &[memory],
             self.embedder()?.as_ref(),
             &self.embedding_identity,
             true,
         )?;
-        Ok(stored.remove(0))
+        let stored = stored_batch.remove(0);
+
+        let active_peers = self.storage.list_memories(
+            Some(stored.category),
+            Some(MemoryStatus::Active),
+            None,
+            0,
+        )?;
+        let mut conflicts = Vec::new();
+        for peer in &active_peers {
+            if peer.id == stored.id {
+                continue;
+            }
+            if let Some(conflict) = detect_memory_conflict(&stored, peer) {
+                if conflict.older_memory.id == peer.id {
+                    conflicts.push(conflict);
+                }
+            }
+        }
+
+        if supersede {
+            for conflict in &conflicts {
+                let _ = self
+                    .storage
+                    .forget_memory(&conflict.older_memory.id, false)?;
+            }
+        }
+
+        Ok((stored, conflicts))
+    }
+
+    /// Scan all active memories for contradictions on the same subject entity and slot.
+    /// When `resolve` is true, automatically soft-retires the older conflicting memories.
+    pub fn find_conflicts(&self, resolve: bool) -> Result<Vec<MemoryConflict>> {
+        let active = self
+            .storage
+            .list_memories(None, Some(MemoryStatus::Active), None, 0)?;
+        let mut conflicts = Vec::new();
+        let mut retired_ids = std::collections::HashSet::new();
+
+        for i in 0..active.len() {
+            for j in (i + 1)..active.len() {
+                if let Some(conflict) = detect_memory_conflict(&active[i], &active[j]) {
+                    if retired_ids.contains(&conflict.older_memory.id) {
+                        continue;
+                    }
+                    if resolve {
+                        let _ = self
+                            .storage
+                            .forget_memory(&conflict.older_memory.id, false)?;
+                    }
+                    retired_ids.insert(conflict.older_memory.id.clone());
+                    conflicts.push(conflict);
+                }
+            }
+        }
+        Ok(conflicts)
     }
 
     /// Semantic + BM25 Hybrid Recall

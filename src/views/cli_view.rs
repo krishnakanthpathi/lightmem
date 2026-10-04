@@ -1,4 +1,6 @@
-use crate::models::{LightMemConfig, MemoryRecord, PaginatedMemories, ScoredMemory, StorageStats};
+use crate::models::{
+    LightMemConfig, MemoryConflict, MemoryRecord, PaginatedMemories, ScoredMemory, StorageStats,
+};
 use crate::services::AnswerResult;
 use anyhow::Result;
 use colored::*;
@@ -267,6 +269,16 @@ impl CliView {
     }
 
     pub fn render_remembered(memory: &MemoryRecord, db_path: &Path, json: bool) -> Result<()> {
+        Self::render_remembered_with_conflicts(memory, &[], false, db_path, json)
+    }
+
+    pub fn render_remembered_with_conflicts(
+        memory: &MemoryRecord,
+        conflicts: &[MemoryConflict],
+        superseded: bool,
+        db_path: &Path,
+        json: bool,
+    ) -> Result<()> {
         if json {
             println!("{}", serde_json::to_string_pretty(memory)?);
             return Ok(());
@@ -274,16 +286,133 @@ impl CliView {
 
         let short_id: String = memory.id.chars().take(8).collect();
         let db_str = Self::format_path(db_path);
+        let ttl_suffix = memory
+            .expired_at
+            .map(|exp| {
+                format!(
+                    " {} {}",
+                    Self::slate("· TTL expires"),
+                    Self::gold(&exp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                )
+            })
+            .unwrap_or_default();
+
         println!(
-            "{} {} [{}] {} {} {} {}",
+            "{} {} [{}] {} {} {} {}{}",
             Self::crimson_bold("◈"),
             Self::emerald_bold("Stored"),
             Self::violet_bold(memory.category.as_str()),
             Self::white_bold(&memory.title),
             Self::gold(&format!("({})", short_id)),
             Self::slate("in"),
+            Self::slate(&db_str),
+            ttl_suffix
+        );
+
+        for c in conflicts {
+            let old_short: String = c.older_memory.id.chars().take(8).collect();
+            if superseded {
+                println!(
+                    "  {} {} {} {} ({}={} -> {}={})",
+                    Self::crimson_bold("⇄"),
+                    Self::emerald_bold("Superseded"),
+                    Self::gold(&format!("({})", old_short)),
+                    Self::slate(&c.older_memory.title),
+                    Self::slate(&c.slot),
+                    Self::rose(&c.old_value),
+                    Self::slate(&c.slot),
+                    Self::emerald_bold(&c.new_value)
+                );
+            } else {
+                println!(
+                    "  {} {} {} {} ({}={} vs {}={}) {}",
+                    Self::crimson_bold("⇄"),
+                    Self::gold("Conflict detected with"),
+                    Self::gold(&format!("({})", old_short)),
+                    Self::slate(&c.older_memory.title),
+                    Self::slate(&c.slot),
+                    Self::rose(&c.old_value),
+                    Self::slate(&c.slot),
+                    Self::emerald_bold(&c.new_value),
+                    Self::slate("— pass --supersede or run `lmem conflicts --resolve`")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn render_conflicts(
+        conflicts: &[MemoryConflict],
+        resolved: bool,
+        db_path: &Path,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let payload = serde_json::json!({
+                "resolved": resolved,
+                "count": conflicts.len(),
+                "conflicts": conflicts,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+            return Ok(());
+        }
+
+        let db_str = Self::format_path(db_path);
+        if conflicts.is_empty() {
+            println!(
+                "{} {} {} {}",
+                Self::crimson_bold("⇄"),
+                Self::emerald_bold("Zero active contradictions found"),
+                Self::slate("in"),
+                Self::slate(&db_str)
+            );
+            return Ok(());
+        }
+
+        let header = if resolved {
+            "Resolved contradictions (older memories retired)"
+        } else {
+            "Active contradictions detected"
+        };
+        println!(
+            "{} {} ({}) {} {}",
+            Self::crimson_bold("⇄"),
+            Self::white_bold(header),
+            Self::crimson_bold(&conflicts.len().to_string()),
+            Self::slate("in"),
             Self::slate(&db_str)
         );
+        for (idx, c) in conflicts.iter().enumerate() {
+            let old_short: String = c.older_memory.id.chars().take(8).collect();
+            let new_short: String = c.newer_memory.id.chars().take(8).collect();
+            println!(
+                "  {} [{}] {} ({}: {} -> {})",
+                Self::crimson_bold(&format!("{:02}.", idx + 1)),
+                Self::violet_bold(&c.slot),
+                Self::white_bold(&c.newer_memory.title),
+                Self::slate("update"),
+                Self::rose(&c.old_value),
+                Self::emerald_bold(&c.new_value)
+            );
+            println!(
+                "     {} {} {} {}",
+                Self::slate("├─ Older:"),
+                Self::gold(&format!("({})", old_short)),
+                Self::slate(&c.older_memory.content),
+                if resolved {
+                    Self::rose("[retired]")
+                } else {
+                    Self::gold("[active]")
+                }
+            );
+            println!(
+                "     {} {} {} {}",
+                Self::slate("╰─ Newer:"),
+                Self::gold(&format!("({})", new_short)),
+                Self::white_bold(&c.newer_memory.content),
+                Self::emerald_bold("[active]")
+            );
+        }
         Ok(())
     }
 

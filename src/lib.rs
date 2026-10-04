@@ -12,8 +12,8 @@ pub use services::{embeddings, exporter, importer, reranker, search};
 // Primary SDK Re-exports
 pub use controllers::{LightMem, MemoryController};
 pub use models::{
-    LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory,
-    StorageStats,
+    detect_memory_conflict, parse_ttl_duration, LightMemConfig, MemoryConflict, MemoryRecord,
+    MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory, StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
 pub use services::{
