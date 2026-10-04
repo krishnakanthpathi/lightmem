@@ -302,6 +302,7 @@ impl NeedleReranker {
     /// Run native Needle 3 C library structured extraction directly from Rust
     fn extract_via_native_needle(question: &str, content: &str) -> Option<(String, f32)> {
         let slot = requested_slot(question);
+        let query_tokens = Self::tokenize(question);
         let is_core_triad = matches!(slot.as_str(), "port" | "os" | "service");
         let tools_json = if is_core_triad {
             r#"[{"name":"extract_facts","description":"Extract service name, port, and os","parameters":{"type":"object","properties":{"service":{"type":"string","description":"Service or application name (e.g. Redis, Postgres, Kokoro)"},"port":{"type":"integer","description":"Port number"},"os":{"type":"string","description":"Operating system (e.g. Linux, macOS, Windows)"}},"required":["service","port","os"]}}]"#.to_string()
@@ -310,6 +311,20 @@ impl NeedleReranker {
                 r#"[{{"name":"extract_fact","description":"Extract {slot} from text","parameters":{{"type":"object","properties":{{"{slot}":{{"type":"string","description":"The {slot}"}}}},"required":["{slot}"]}}}}]"#
             )
         };
+
+        const NEGATION_OR_ABSENCE_TOKENS: &[&str] = &[
+            "not",
+            "none",
+            "null",
+            "unknown",
+            "unspecified",
+            "unrecorded",
+            "recorded",
+            "missing",
+            "absent",
+            "empty",
+            "na",
+        ];
 
         let extract_from_raw = |raw_json: &str| -> Option<(String, f32)> {
             let envelope: serde_json::Value = serde_json::from_str(raw_json).ok()?;
@@ -326,11 +341,38 @@ impl NeedleReranker {
             if slot == "port" && !valid_port(answer) {
                 return None;
             }
+            let ans_tokens = Self::tokenize(answer);
+            if !ans_tokens.is_empty()
+                && ans_tokens.iter().all(|t| {
+                    doc_contains_token(&query_tokens, t)
+                        || NEGATION_OR_ABSENCE_TOKENS.contains(&t.as_str())
+                })
+            {
+                return None;
+            }
+            let content_tokens = Self::tokenize(content);
+            if (content_tokens.contains("not") || content_tokens.contains("never"))
+                && (content_tokens.contains("recorded")
+                    || content_tokens.contains("known")
+                    || content_tokens.contains("specified")
+                    || content_tokens.contains("provided")
+                    || content_tokens.contains("found")
+                    || content_tokens.contains("available")
+                    || content_tokens.contains("set"))
+            {
+                return None;
+            }
             Some((answer.to_string(), confidence))
         };
 
-        let mut inputs = Vec::with_capacity(4);
+        let mut inputs = Vec::with_capacity(6);
         if let Some(focused) = focus_clause_for_question(question, content) {
+            if let Some((_, rhs)) = focused.split_once(':') {
+                let rhs = rhs.trim();
+                if !rhs.is_empty() {
+                    inputs.push(format!("Extract fact: {} is {}", slot, rhs));
+                }
+            }
             inputs.push(format!("Extract fact: {}", focused));
             inputs.push(focused);
         }
@@ -359,18 +401,17 @@ impl Reranker for NeedleReranker {
     }
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
-        let Some(best_candidate) = select_candidate(question, candidates) else {
-            return Ok(no_evidence("none"));
-        };
-        if let Some((answer, confidence)) =
-            Self::extract_via_native_needle(question, &best_candidate.memory.content)
-        {
-            return Ok(AnswerResult {
-                answer,
-                selected_memory: Some(best_candidate.memory.clone()),
-                confidence,
-                reranker_used: "needle-3".into(),
-            });
+        for candidate in rank_candidates(question, candidates) {
+            if let Some((answer, confidence)) =
+                Self::extract_via_native_needle(question, &candidate.memory.content)
+            {
+                return Ok(AnswerResult {
+                    answer,
+                    selected_memory: Some(candidate.memory.clone()),
+                    confidence,
+                    reranker_used: "needle-3".into(),
+                });
+            }
         }
         Ok(no_evidence("none"))
     }
@@ -403,9 +444,8 @@ fn requested_slot(question: &str) -> String {
                 "will", "should",
             ];
             const MODIFIERS: &[&str] = &[
-                "the", "a", "an", "my", "our", "your", "their", "its", "user", "users",
-                "default", "primary", "current", "main", "active", "official", "exact",
-                "standard",
+                "the", "a", "an", "my", "our", "your", "their", "its", "user", "users", "default",
+                "primary", "current", "main", "active", "official", "exact", "standard",
             ];
             const ACTION_VERBS: &[&str] = &["runs", "run", "uses", "use"];
             let is_verb = |w: &str| AUX_VERBS.contains(&w) || ACTION_VERBS.contains(&w);
@@ -485,9 +525,32 @@ fn requested_slot(question: &str) -> String {
     }
 
     const TRAILING_IGNORE: &[&str] = &[
-        "use", "uses", "used", "run", "runs", "running", "is", "are", "was", "were", "do",
-        "does", "did", "on", "in", "at", "to", "for", "of", "with", "by", "from", "listening",
-        "located", "stored", "configured",
+        "use",
+        "uses",
+        "used",
+        "run",
+        "runs",
+        "running",
+        "is",
+        "are",
+        "was",
+        "were",
+        "do",
+        "does",
+        "did",
+        "on",
+        "in",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "listening",
+        "located",
+        "stored",
+        "configured",
     ];
     ordered
         .iter()
@@ -595,19 +658,42 @@ const GENERIC_TOKENS: &[&str] = &[
     "configured",
 ];
 
+fn token_stem(token: &str) -> &str {
+    if token.len() >= 5
+        && token.ends_with('s')
+        && !token.ends_with("ss")
+        && !token.ends_with("is")
+        && !token.ends_with("us")
+        && !token.ends_with("os")
+    {
+        &token[..token.len() - 1]
+    } else {
+        token
+    }
+}
+
+fn doc_contains_token(doc: &HashSet<String>, token: &str) -> bool {
+    if doc.contains(token) {
+        return true;
+    }
+    let stem = token_stem(token);
+    doc.iter().any(|d| token_stem(d) == stem)
+}
+
 fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
     let dynamic_slot = requested_slot(question);
+    let dynamic_slot_stem = token_stem(&dynamic_slot);
     let query = NeedleReranker::tokenize(question);
     let anchor_tokens: HashSet<&str> = query
         .iter()
         .map(String::as_str)
-        .filter(|&t| t != dynamic_slot.as_str() && !GENERIC_TOKENS.contains(&t))
+        .filter(|&t| token_stem(t) != dynamic_slot_stem && !GENERIC_TOKENS.contains(&t))
         .collect();
     if anchor_tokens.is_empty() {
         return None;
     }
 
-    let splitter = Regex::new(r"(?i)\n|;|\.\s+|,\s+and\s+|\s+and\s+").ok()?;
+    let splitter = Regex::new(r"(?i)\n|;|\.\s+|,\s+and\s+|\s+and\s+|\s+-\s+").ok()?;
     let clauses: Vec<&str> = splitter
         .split(content)
         .map(str::trim)
@@ -624,7 +710,7 @@ fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
         let clause_tokens = NeedleReranker::tokenize(clause);
         let anchor_hits = anchor_tokens
             .iter()
-            .filter(|&&t| clause_tokens.contains(t))
+            .filter(|&&t| doc_contains_token(&clause_tokens, t))
             .count();
         if anchor_hits == 0 || clause_tokens.len() <= anchor_hits {
             continue;
@@ -651,50 +737,56 @@ fn focus_clause_for_question(question: &str, content: &str) -> Option<String> {
     best_clause.map(|(clause, _)| clause.to_string())
 }
 
-fn select_candidate<'a>(
-    question: &str,
-    candidates: &'a [ScoredMemory],
-) -> Option<&'a ScoredMemory> {
+fn rank_candidates<'a>(question: &str, candidates: &'a [ScoredMemory]) -> Vec<&'a ScoredMemory> {
     let dynamic_slot = requested_slot(question);
+    let dynamic_slot_stem = token_stem(&dynamic_slot);
     let query = NeedleReranker::tokenize(question);
     let specific: HashSet<&str> = query
         .iter()
         .map(String::as_str)
-        .filter(|&t| t != dynamic_slot.as_str())
+        .filter(|&t| token_stem(t) != dynamic_slot_stem)
         .collect();
     let (generic_tokens, anchor_tokens): (HashSet<&str>, HashSet<&str>) = specific
         .iter()
         .copied()
         .partition(|t| GENERIC_TOKENS.contains(t));
-    candidates
+    let mut scored: Vec<(&'a ScoredMemory, f32)> = candidates
         .iter()
         .filter_map(|candidate| {
             let doc = NeedleReranker::tokenize(&candidate.memory.to_card_text());
             let anchor_hits = anchor_tokens
                 .iter()
-                .filter(|&&t| doc.contains(t))
+                .filter(|&&t| doc_contains_token(&doc, t))
                 .count();
             let generic_hits = generic_tokens
                 .iter()
-                .filter(|&&t| doc.contains(t))
+                .filter(|&&t| doc_contains_token(&doc, t))
                 .count();
             let hits = anchor_hits + generic_hits;
+            let any_query_hit = query.iter().any(|q| doc_contains_token(&doc, q));
             // Require an anchor entity/content match when present; generic or target slot words alone are not evidence.
             if (!anchor_tokens.is_empty() && anchor_hits == 0)
                 || (!specific.is_empty() && hits == 0)
-                || query.is_disjoint(&doc)
+                || !any_query_hit
             {
                 return None;
             }
-            let score =
-                anchor_hits as f32 * 5.0 + generic_hits as f32 * 0.5 + candidate.score;
+            let score = anchor_hits as f32 * 5.0 + generic_hits as f32 * 0.5 + candidate.score;
             Some((candidate, score))
         })
-        .max_by(|a, b| {
-            a.1.total_cmp(&b.1)
-                .then_with(|| b.0.memory.id.cmp(&a.0.memory.id))
-        })
-        .map(|(candidate, _)| candidate)
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.0.memory.id.cmp(&b.0.memory.id))
+    });
+    scored.into_iter().map(|(c, _)| c).collect()
+}
+
+fn select_candidate<'a>(
+    question: &str,
+    candidates: &'a [ScoredMemory],
+) -> Option<&'a ScoredMemory> {
+    rank_candidates(question, candidates).into_iter().next()
 }
 
 #[cfg(test)]
@@ -734,10 +826,7 @@ mod tests {
         );
         assert_eq!(requested_slot("What default port does Orion use?"), "port");
         assert_eq!(requested_slot("What is Nexus listening on?"), "port");
-        assert_eq!(
-            requested_slot("Which port is Redis listening on?"),
-            "port"
-        );
+        assert_eq!(requested_slot("Which port is Redis listening on?"), "port");
         assert_eq!(
             requested_slot("What is the endpoint for Atlas?"),
             "endpoint"
@@ -829,6 +918,40 @@ mod tests {
                 NeedleReranker::extract_via_native_needle("What port does haproxy use?", content)
                     .expect("Should extract haproxy port");
             assert_eq!(haproxy_port, "8404");
+        }
+    }
+
+    #[test]
+    fn candidate_loop_matches_plural_stems_and_falls_back_when_first_candidate_is_insufficient() {
+        let c1_insufficient = make_candidate("1", "My fathers name has not been recorded.", 0.90);
+        let c2_valid = make_candidate("2", "Pathi Srinivas is my fathers name", 0.85);
+        let c3_family_list = make_candidate(
+            "3",
+            "User's Family Details: - Father: Pathi Srinivas - Mother: Mistri Venkata Annapurna Devi",
+            0.80,
+        );
+        let candidates = vec![c1_insufficient, c2_valid.clone(), c3_family_list.clone()];
+
+        // 1. "father" in query must match "fathers" in c1 & c2 via stem/prefix normalization
+        let selected = select_candidate("what is my father name", &candidates)
+            .expect("Singular 'father' should match 'fathers' in candidate");
+        assert_eq!(selected.memory.id, "1");
+
+        // 2. When Native Needle is active, NeedleReranker::answer must try candidate #1,
+        // see it is insufficient, move to candidate #2, and extract "Pathi Srinivas" (not "Father")!
+        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_none()
+            && NeedleReranker::find_needle_assets().is_some()
+        {
+            let res = NeedleReranker
+                .answer("what is my father name", &candidates)
+                .unwrap();
+            assert_eq!(res.selected_memory.as_ref().unwrap().id, "2");
+            assert_eq!(res.answer, "Pathi Srinivas");
+
+            let res_family = NeedleReranker
+                .answer("what is my father name", &[c3_family_list])
+                .unwrap();
+            assert_eq!(res_family.answer, "Pathi Srinivas");
         }
     }
 }
