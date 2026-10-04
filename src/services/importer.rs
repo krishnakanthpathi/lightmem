@@ -100,65 +100,87 @@ fn get_str_field(val: &serde_json::Value, keys: &[&str]) -> Option<String> {
     None
 }
 
+fn try_parse_category_lenient(c: &str) -> Option<MemoryType> {
+    let trimmed = c.trim().to_lowercase();
+    if trimmed.is_empty()
+        || matches!(
+            trimmed.as_str(),
+            "entity" | "node" | "item" | "record"
+        )
+    {
+        return None;
+    }
+    if let Ok(matched) = trimmed.parse::<MemoryType>() {
+        return Some(matched);
+    }
+    if trimmed.contains("pass")
+        || trimmed.contains("secret")
+        || trimmed.contains("token")
+        || trimmed.contains("cred")
+        || trimmed == "key"
+        || trimmed == "keys"
+        || trimmed.contains("api_key")
+        || trimmed.contains("apikey")
+        || trimmed.contains("secret_key")
+        || trimmed.contains("private_key")
+        || trimmed.contains("passkey")
+    {
+        return Some(MemoryType::Password);
+    }
+    if trimmed.contains("instruct")
+        || trimmed.contains("rule")
+        || trimmed.contains("runbook")
+        || trimmed.contains("procedure")
+        || trimmed == "process"
+    {
+        return Some(MemoryType::Instruction);
+    }
+    if trimmed.contains("decis") || trimmed.contains("choice") {
+        return Some(MemoryType::Decision);
+    }
+    if trimmed.contains("pref") || trimmed.contains("like") {
+        return Some(MemoryType::Preference);
+    }
+    if trimmed.contains("learn") || trimmed.contains("lesson") || trimmed.contains("insight") {
+        return Some(MemoryType::Learning);
+    }
+    if trimmed.contains("goal") || trimmed.contains("target") || trimmed.contains("objective") {
+        return Some(MemoryType::Goal);
+    }
+    if trimmed.contains("commit") || trimmed.contains("todo") || trimmed.contains("task") {
+        return Some(MemoryType::Commitment);
+    }
+    if trimmed.contains("artif")
+        || trimmed.contains("code")
+        || trimmed == "doc"
+        || trimmed == "docs"
+        || trimmed.contains("document")
+    {
+        return Some(MemoryType::Artifact);
+    }
+    if trimmed.contains("event") || trimmed.contains("incident") || trimmed.contains("meeting") {
+        return Some(MemoryType::Event);
+    }
+    if trimmed.contains("relat") || trimmed.contains("team") || trimmed.contains("owner") {
+        return Some(MemoryType::Relationship);
+    }
+    if trimmed.contains("obser") || trimmed.contains("metric") {
+        return Some(MemoryType::Observation);
+    }
+    if trimmed.contains("error") || trimmed.contains("bug") || trimmed.contains("issue") {
+        return Some(MemoryType::Error);
+    }
+    if trimmed.contains("context") || trimmed.contains("background") {
+        return Some(MemoryType::Context);
+    }
+    None
+}
+
 /// Helper to parse categories leniently across all 14 categories
 fn parse_category_lenient(cat_opt: Option<&str>, content: &str) -> MemoryType {
-    if let Some(c) = cat_opt {
-        let trimmed = c.trim().to_lowercase();
-        if let Ok(matched) = trimmed.parse::<MemoryType>() {
-            return matched;
-        }
-        if trimmed.contains("pass")
-            || trimmed.contains("secret")
-            || trimmed.contains("token")
-            || trimmed.contains("cred")
-            || trimmed.contains("key")
-        {
-            return MemoryType::Password;
-        }
-        if trimmed.contains("instruct")
-            || trimmed.contains("rule")
-            || trimmed.contains("runbook")
-            || trimmed.contains("proc")
-        {
-            return MemoryType::Instruction;
-        }
-        if trimmed.contains("decis") || trimmed.contains("choice") {
-            return MemoryType::Decision;
-        }
-        if trimmed.contains("pref") || trimmed.contains("like") {
-            return MemoryType::Preference;
-        }
-        if trimmed.contains("learn") || trimmed.contains("lesson") || trimmed.contains("insight") {
-            return MemoryType::Learning;
-        }
-        if trimmed.contains("goal") || trimmed.contains("target") || trimmed.contains("objective") {
-            return MemoryType::Goal;
-        }
-        if trimmed.contains("commit") || trimmed.contains("todo") || trimmed.contains("task") {
-            return MemoryType::Commitment;
-        }
-        if trimmed.contains("artif") || trimmed.contains("code") || trimmed.contains("doc") {
-            return MemoryType::Artifact;
-        }
-        if trimmed.contains("event") || trimmed.contains("incident") || trimmed.contains("meeting")
-        {
-            return MemoryType::Event;
-        }
-        if trimmed.contains("relat") || trimmed.contains("team") || trimmed.contains("owner") {
-            return MemoryType::Relationship;
-        }
-        if trimmed.contains("obser") || trimmed.contains("metric") {
-            return MemoryType::Observation;
-        }
-        if trimmed.contains("error") || trimmed.contains("bug") || trimmed.contains("issue") {
-            return MemoryType::Error;
-        }
-        if trimmed.contains("context") || trimmed.contains("background") {
-            return MemoryType::Context;
-        }
-    }
-
-    MemoryType::infer(content)
+    cat_opt
+        .and_then(try_parse_category_lenient)
+        .unwrap_or_else(|| MemoryType::infer(content))
 }
 
 /// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Native Needle 3 C-FFI + Pure-Rust Heuristic
@@ -170,6 +192,8 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
     let mut heuristic_tags = Vec::new();
     let mut needle_title: Option<String> = None;
     let mut needle_cat: Option<String> = None;
+    let mut mcp_relation_title: Option<String> = None;
+    let mut mcp_relation_default_cat: Option<MemoryType> = None;
 
     let content = get_str_field(
         val,
@@ -185,6 +209,32 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
             "statement",
         ],
     )
+    .or_else(|| {
+        let arr = val.get("observations")?.as_array()?;
+        let items: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::trim))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        if let Some(et) = get_str_field(val, &["entityType", "entity_type"]) {
+            let tag = et.to_lowercase();
+            if !heuristic_tags.contains(&tag) {
+                heuristic_tags.push(tag);
+            }
+        }
+        Some(items.join("; "))
+    })
+    .or_else(|| {
+        let from = get_str_field(val, &["from"])?;
+        let to = get_str_field(val, &["to"])?;
+        let relation_type = get_str_field(val, &["relationType", "relation_type"])?;
+        mcp_relation_title = Some(format!("{} -> {}", from, to));
+        mcp_relation_default_cat = Some(MemoryType::Relationship);
+        Some(format!("{} {} {}", from, relation_type, to))
+    })
     .or_else(|| {
         // Extract the primary descriptive string field verbatim as content, and collect short string fields as tags.
         let obj = val.as_object()?;
@@ -203,6 +253,10 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
             "type",
             "kind",
             "type_name",
+            "entityType",
+            "entity_type",
+            "relationType",
+            "relation_type",
             "provenance",
             "source",
             "created_at",
@@ -238,14 +292,19 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
         best_content
     })?;
 
-    let explicit_title = get_str_field(val, &["title", "name", "summary", "heading", "subject"]);
+    let explicit_title = get_str_field(val, &["title", "name", "summary", "heading", "subject"])
+        .or(mcp_relation_title);
     let cat_str = get_str_field(
         val,
         &["category", "memory_type", "type", "kind", "type_name"],
     );
+    let explicit_cat = cat_str.as_deref().and_then(try_parse_category_lenient);
 
     // Consult Native Needle 3 C-FFI when category or title is omitted on the imported JSON record
-    if enrich && (cat_str.is_none() || explicit_title.is_none()) {
+    if enrich
+        && ((explicit_cat.is_none() && mcp_relation_default_cat.is_none())
+            || explicit_title.is_none())
+    {
         if let Some((_, n_title, n_cat, n_tags)) =
             crate::reranker::NeedleReranker::extract_import_record_via_needle(&content)
         {
@@ -262,8 +321,10 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
     // Rule inference (MemoryType::infer) takes priority for unambiguous signals (password, panic, we decided, always...),
     // and falls back to Needle 3's extracted category when rule inference defaults to Fact.
     let inferred_rule_cat = MemoryType::infer(&content);
-    let category = if let Some(explicit_c) = cat_str.as_deref() {
-        Some(parse_category_lenient(Some(explicit_c), &content))
+    let category = if let Some(explicit_c) = explicit_cat {
+        Some(explicit_c)
+    } else if let Some(rel_cat) = mcp_relation_default_cat {
+        Some(rel_cat)
     } else if inferred_rule_cat != MemoryType::Fact {
         Some(inferred_rule_cat)
     } else if let Some(nc) = needle_cat.as_deref() {
@@ -362,6 +423,18 @@ pub fn extract_raw_json_values(raw: &str) -> Result<Vec<serde_json::Value>> {
             return Ok(arr.clone());
         }
         if let Some(obj) = parsed.as_object() {
+            if obj.get("entities").and_then(|v| v.as_array()).is_some()
+                || obj.get("relations").and_then(|v| v.as_array()).is_some()
+            {
+                let mut combined = Vec::new();
+                if let Some(entities) = obj.get("entities").and_then(|v| v.as_array()) {
+                    combined.extend(entities.iter().cloned());
+                }
+                if let Some(relations) = obj.get("relations").and_then(|v| v.as_array()) {
+                    combined.extend(relations.iter().cloned());
+                }
+                return Ok(combined);
+            }
             for wrapper in [
                 "memories",
                 "data",
@@ -402,18 +475,23 @@ impl JsonMemoryImporter {
     pub fn parse_with_enrichment(&self, raw: &str, enrich: bool) -> Result<Vec<ImportCandidate>> {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(format) = value.get("format").and_then(|v| v.as_str()) {
-                anyhow::ensure!(
-                    format == "lightmem-backup-v1",
-                    "Unsupported backup format: {}",
-                    format
-                );
-                let records: Vec<MemoryRecord> = serde_json::from_value(
-                    value
-                        .get("memories")
-                        .cloned()
-                        .ok_or_else(|| anyhow::anyhow!("Backup is missing memories"))?,
-                )?;
-                return Ok(records.into_iter().map(ImportCandidate::from).collect());
+                let is_backup_envelope = format == "lightmem-backup-v1"
+                    || format.starts_with("lightmem-backup")
+                    || value.get("memories").and_then(|v| v.as_array()).is_some();
+                if is_backup_envelope {
+                    anyhow::ensure!(
+                        format == "lightmem-backup-v1",
+                        "Unsupported backup format: {}",
+                        format
+                    );
+                    let records: Vec<MemoryRecord> = serde_json::from_value(
+                        value
+                            .get("memories")
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("Backup is missing memories"))?,
+                    )?;
+                    return Ok(records.into_iter().map(ImportCandidate::from).collect());
+                }
             }
         }
         let raw_values = extract_raw_json_values(raw)?;
@@ -777,5 +855,167 @@ impl MemoryImporter for OkfMemoryImporter {
         );
 
         Ok(candidates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_format_key_on_regular_memory_does_not_collide_with_backup_envelope() {
+        let importer = JsonMemoryImporter;
+        let raw = r#"{"format": "parquet", "content": "Analytics table uses Apache Parquet"}"#;
+        let candidates = importer
+            .parse(raw)
+            .expect("Regular memory with 'format' key should not fail as unsupported backup");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].content, "Analytics table uses Apache Parquet");
+
+        // Actual backup envelopes with unsupported versions must still error
+        let bad_backup_1 = r#"{"format": "lightmem-backup-v999", "memories": []}"#;
+        assert!(importer
+            .parse(bad_backup_1)
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported backup format"));
+
+        let bad_backup_2 = r#"{"format": "custom-backup", "memories": []}"#;
+        assert!(importer
+            .parse(bad_backup_2)
+            .unwrap_err()
+            .to_string()
+            .contains("Unsupported backup format"));
+    }
+
+    #[test]
+    fn parses_anthropic_mcp_knowledge_graph_entities_and_relations() {
+        let importer = JsonMemoryImporter;
+        let raw = r#"{
+            "entities": [
+                {
+                    "type": "entity",
+                    "name": "Postgres",
+                    "entityType": "database",
+                    "observations": ["Runs on port 5432", "Uses WAL"]
+                },
+                {
+                    "type": "entity",
+                    "name": "Auth Service",
+                    "entityType": "microservice",
+                    "observations": ["We decided to use Ed25519 JWT tokens"]
+                }
+            ],
+            "relations": [
+                {
+                    "type": "relation",
+                    "from": "API Gateway",
+                    "to": "Postgres",
+                    "relationType": "connects_to"
+                },
+                {
+                    "from": "Worker",
+                    "to": "Redis",
+                    "relationType": "reads_from"
+                }
+            ]
+        }"#;
+
+        let candidates = importer
+            .parse(raw)
+            .expect("Should parse Anthropic MCP knowledge graph");
+        assert_eq!(candidates.len(), 4);
+
+        assert_eq!(candidates[0].title, "Postgres");
+        assert_eq!(candidates[0].content, "Runs on port 5432; Uses WAL");
+        assert!(candidates[0].tags.contains(&"database".to_string()));
+        assert_eq!(candidates[0].category, Some(MemoryType::Fact));
+
+        assert_eq!(candidates[1].title, "Auth Service");
+        assert_eq!(
+            candidates[1].content,
+            "We decided to use Ed25519 JWT tokens"
+        );
+        assert!(candidates[1].tags.contains(&"microservice".to_string()));
+        assert_eq!(candidates[1].category, Some(MemoryType::Decision));
+
+        assert_eq!(candidates[2].title, "API Gateway -> Postgres");
+        assert_eq!(candidates[2].content, "API Gateway connects_to Postgres");
+        assert_eq!(candidates[2].category, Some(MemoryType::Relationship));
+
+        assert_eq!(candidates[3].title, "Worker -> Redis");
+        assert_eq!(candidates[3].content, "Worker reads_from Redis");
+        assert_eq!(candidates[3].category, Some(MemoryType::Relationship));
+    }
+
+    #[test]
+    fn parse_category_lenient_avoids_overbroad_substring_collisions() {
+        // False-positive substrings should fall through to MemoryType::infer(content)
+        assert_eq!(
+            parse_category_lenient(Some("primary_key"), "Users table uses UUIDv7"),
+            MemoryType::Fact
+        );
+        assert_eq!(
+            parse_category_lenient(Some("hotkey"), "Cmd+K opens the command palette"),
+            MemoryType::Fact
+        );
+        assert_eq!(
+            parse_category_lenient(Some("docker"), "Kokoro TTS runs in a container"),
+            MemoryType::Fact
+        );
+        assert_eq!(
+            parse_category_lenient(Some("multiprocess"), "Worker pool spawns 4 OS processes"),
+            MemoryType::Fact
+        );
+
+        // True-positive category keywords must still map to their intended categories
+        for k in [
+            "key",
+            "keys",
+            "api_key",
+            "apikey",
+            "secret_key",
+            "private_key",
+            "passkey",
+        ] {
+            assert_eq!(
+                parse_category_lenient(Some(k), "some value"),
+                MemoryType::Password,
+                "Expected Password for category '{}'",
+                k
+            );
+        }
+        for k in ["procedure", "process", "deployment_procedure"] {
+            assert_eq!(
+                parse_category_lenient(Some(k), "some value"),
+                MemoryType::Instruction,
+                "Expected Instruction for category '{}'",
+                k
+            );
+        }
+        for k in ["doc", "docs", "document", "documentation"] {
+            assert_eq!(
+                parse_category_lenient(Some(k), "some value"),
+                MemoryType::Artifact,
+                "Expected Artifact for category '{}'",
+                k
+            );
+        }
+
+        // Generic container types ("entity", "node", "item", "record") must allow content inference
+        for container in ["entity", "node", "item", "record"] {
+            assert_eq!(
+                parse_category_lenient(Some(container), "We decided to adopt Rust 2024"),
+                MemoryType::Decision,
+                "Container type '{}' should allow inferring Decision from content",
+                container
+            );
+            assert_eq!(
+                parse_category_lenient(Some(container), "Always run cargo test before commit"),
+                MemoryType::Instruction,
+                "Container type '{}' should allow inferring Instruction from content",
+                container
+            );
+        }
     }
 }
