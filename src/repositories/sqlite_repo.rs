@@ -873,7 +873,7 @@ fn sanitize_fts5_query(query: &str) -> String {
         "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were", "does",
         "do", "did", "the", "a", "an", "in", "on", "at", "to", "for", "of", "with", "by", "from",
         "as", "and", "or", "my", "me", "our", "your", "use", "uses", "used", "run", "runs",
-        "running", "please", "tell",
+        "running", "please", "tell", "no", "num", "number", "numbers", "card", "cards", "roll",
     ];
 
     let raw_tokens: Vec<&str> = query
