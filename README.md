@@ -1,22 +1,22 @@
 # ❖ LightMem (`lmem`)
 
-**Local agent memory engine and CLI, written in Rust with SQLite, ONNX Runtime, and optional native Needle inference.**
+**Local agent memory engine and CLI, written in Rust with SQLite, ONNX Runtime (`fastembed` + SQuAD-2.0 Extractive QA), and swappable Ollama models.**
 
-LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **entity-aware candidate selection and Native Needle 3 C-FFI structured extraction** (`libneedle`), **temporal point-in-time queries** (`--as-of`), **14-category auto-inference**, and **multi-format JSON / JSONL / OKF / Memanto Markdown ingestion**.
+LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and **multi-format JSON / JSONL / OKF / MCP Knowledge Graph / Memanto Markdown ingestion**.
 
 ---
 
 ## ◈ One-Line Install (macOS & Linux)
 
-Install `lmem` + Native Needle 3 runtime (`libneedle` + `needle3.cact`) with a single command:
+Install the prebuilt `lmem` `v0.2.0` binary and pre-cache the local ONNX embedding (`bge-small`) and Extractive QA (`minilm-squad2`) models with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.sh | sh
 ```
 
 ### Build from Source (Rust / Cargo)
 ```bash
-git clone https://github.com/krishnakanthpathi/lightmem.git
+git clone -b feat/extractive-qa-ollama https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
 ```
@@ -28,25 +28,25 @@ cargo install --path . --force
 ```text
 lightmem/
 ├── Cargo.toml
-├── install.sh                      # Universal macOS / Linux installer
+├── install.sh                      # Universal macOS / Linux installer (v0.2.0)
 ├── src/
 │   ├── lib.rs                      # Library root & public re-exports
 │   ├── main.rs                     # CLI router (Clap -> Controller -> View)
 │   ├── models/                     # Domain Entities & Value Objects
 │   │   ├── mod.rs
-│   │   ├── memory.rs               # 14-category MemoryType::infer, MemoryRecord, PaginatedResult
-│   │   ├── config.rs               # LightMemConfig & RerankerProvider
+│   │   ├── memory.rs               # 14-category MemoryType::infer, MemoryRecord, MemoryConflict
+│   │   ├── config.rs               # LightMemConfig & reranker/embedding identities
 │   │   └── stats.rs                # StorageStats telemetry model
 │   ├── repositories/               # Data Access Layer
 │   │   ├── mod.rs
 │   │   └── sqlite_repo.rs          # SQLite WAL + FTS5 + vector blob persistence
 │   ├── services/                   # Business & Domain Engines
 │   │   ├── mod.rs
-│   │   ├── embeddings.rs           # FastEmbed ONNX (BGE by default), Ollama, & Hash engines
-│   │   ├── search.rs               # Hybrid RRF (BM25 + Cosine) + lexical boosts
-│   │   ├── reranker.rs             # Top-1 & Native Needle 3 C-FFI worker thread
-│   │   ├── importer.rs             # JSON / JSONL / OKF / Memanto Markdown importer
-│   │   └── exporter.rs             # Open Knowledge Format (OKF) bundle exporter
+│   │   ├── embeddings.rs           # FastEmbed ONNX (bge-small, minilm, nomic), Ollama, & Hash
+│   │   ├── search.rs               # Hybrid RRF (BM25 + Cosine) + acronym/lexical boosts
+│   │   ├── reranker.rs             # OnnxQaReranker (SQuAD-2.0), OllamaReranker, & Top1Reranker
+│   │   ├── importer.rs             # JSON / JSONL / OKF / MCP Graph / Memanto Markdown importer
+│   │   └── exporter.rs             # Open Knowledge Format (OKF v2) & JSON backup exporter
 │   ├── controllers/                # Application Orchestration
 │   │   ├── mod.rs
 │   │   └── memory_controller.rs    # MemoryController (LightMem) with OnceLock lazy ONNX init
@@ -54,7 +54,10 @@ lightmem/
 │       ├── mod.rs
 │       └── cli_view.rs             # 24-bit TrueColor Crimson Cloud HUD, vector icons, & JSON output
 └── tests/
-    └── integration_test.rs
+    ├── integration_test.rs
+    ├── integrity_and_migration.rs
+    ├── cli_migration.rs
+    └── review_regressions.rs
 ```
 
 ---
@@ -68,23 +71,38 @@ lmem
 # Store a memory (category is auto-inferred across 14 types if -t is omitted)
 lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
 
-# Hybrid semantic + keyword recall
-lmem recall "postgres port" --limit 5
+# Store a memory and automatically merge/supersede any conflicting older memory
+lmem remember "PostgreSQL 16 runs on port 6432" --title "Postgres Port" --supersede
 
-# Factual question answering (uses Native Needle 3 C-FFI by default; override with -r top1 or -r needle)
-lmem answer "what port does postgres use?"
+# Hybrid semantic + keyword recall (with optional --as-of or single-day --date filter)
+lmem recall "postgres port" --limit 5
+lmem recall "who is kk" --date 2026-09-21
+lmem recall "postgres port" --as-of 2026-09-21
+
+# Extractive Question Answering (uses local ONNX minilm-squad2 by default)
+lmem answer "what is my pan card no"
+lmem answer "what is my father name" -r tinyroberta-squad2
+lmem answer "who is kk" -r ollama:gemma4:31b-cloud
 lmem answer "what port does postgres use?" -r top1
 
-# Paginated chronological list
+# Paginated chronological list (supports --date and --as-of)
 lmem list --page 1 --limit 20
+lmem list --date 2026-09-21
 lmem list --offset 20 --limit 20 -t decision
 
-# Import structured or unstructured JSON, JSONL, OKF directory, or Memanto memory.md
+# Detect and merge duplicate or conflicting memories using vector similarity + reranker
+lmem conflicts                        # Interactive step-by-step [y]es / [n]o / [a]ll / [q]uit
+lmem conflicts --yes                  # Force-merge all detected conflicts
+lmem conflicts --yes -r ollama:qwen2.5:3b
+lmem conflicts --min-similarity 0.85
+
+# Import structured or unstructured JSON, JSONL, OKF directory, MCP Graph, or Memanto memory.md
 lmem import memories.json
 lmem import ~/.memanto/on-prem/exports/memory.md
 
-# Export to Open Knowledge Format (OKF)
+# Export to Open Knowledge Format (OKF v2) or lossless JSON backup
 lmem export --okf -o backup.okf
+lmem export --json -o backup.json
 
 # Vault storage statistics & category distribution
 lmem stats
@@ -92,113 +110,61 @@ lmem stats
 
 ---
 
+## ⇄ Switching Rerankers & Embedding Models
+
+LightMem supports three swappable reranker backends for `lmem answer`, `lmem recall --precision`, and `lmem conflicts`:
+
+| Reranker | Command to Set Default | Per-Query Flag (`-r`) | Peak RAM | Typical Latency |
+| :--- | :--- | :--- | :--- | :--- |
+| **`minilm-squad2`** *(default)* | `lmem config --reranker minilm-squad2` | `-r minilm-squad2` | ~358 MB | ~600 ms |
+| **`tinyroberta-squad2`** | `lmem config --reranker tinyroberta-squad2` | `-r tinyroberta-squad2` | ~669 MB | ~1.2 s |
+| **`ollama:<model>`** *(local or cloud)* | `lmem config --reranker ollama:qwen2.5:3b` | `-r ollama:gemma4:31b-cloud` | ~207 MB (`lmem`) | ~1–11 s |
+| **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
+
+```bash
+# Pre-download ONNX models for offline usage
+lmem config --download minilm-squad2
+lmem config --download tinyroberta-squad2
+lmem config --download all
+
+# Switch embedding backend (prompts for safe atomic re-indexing)
+lmem config --backend onnx --onnx-model bge-small
+lmem config --backend ollama --model nomic-embed-text --url http://localhost:11434
+```
+
+---
+
+## ⇄ Nearest-Neighbor Conflict & Duplicate Resolution (`lmem conflicts`)
+
+Instead of brittle hardcoded slot regexes, `lmem conflicts` scans active memories by finding each memory's **closest vector neighbor** (`cosine_similarity`) combined with **meaningful token overlap**:
+
+1. **Exact & Near-Duplicate Detection**: Memories with high vector similarity and token overlap are paired and sorted by similarity descending.
+2. **Timestamp Transparency**: Every pair displays exact UTC creation timestamps (`[OLDER · YYYY-MM-DD HH:MM:SS UTC]` vs `[NEWER · YYYY-MM-DD HH:MM:SS UTC]`) alongside similarity `%` and overlap `%`.
+3. **Interactive or Batch Resolution**:
+   - In an interactive terminal, `lmem conflicts` prompts on each pair:
+     `Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit`
+   - Passing `--yes` (`-y`, alias `--resolve`) merges all pairs automatically.
+4. **Reranker-Guided Merging**: When merging, the active reranker (`OnnxQaReranker`, `OllamaReranker`, or `Top1Reranker`) synthesizes the merged record (prioritizing the `NEWER` memory's updated facts while preserving non-conflicting clauses from `OLDER`, unioning tags case-insensitively, keeping max confidence, re-embedding the survivor, and expiring the `OLDER` record).
+
+---
+
+## ◷ Temporal Filtering (`--as-of` vs `--date`)
+
+- **`--as-of <YYYY-MM-DD|RFC3339>`**: Cumulative point-in-time snapshot — returns memories created on or before that timestamp that were still active at that moment.
+- **`--date <YYYY-MM-DD>`**: Single-day filter — returns memories created or updated on that exact UTC calendar day (supported in `lmem recall`, `lmem list`, and `lmem answer`).
+
+---
+
 ## ⌖ Run Tests
 
 ```bash
-cargo test
-```
+# Fast offline test suite (skips ONNX weight download)
+LIGHTMEM_QA_DISABLE=1 cargo test --locked
 
-## Safe embedding model changes
+# Full test suite including live ONNX Extractive QA inference
+cargo test --locked
 
-```bash
-# Shows the old/new model and selected database, then asks [y/N].
-lmem config --backend onnx --onnx-model minilm
-
-# Explicit approval for scripts (same model-change command).
-lmem config --backend onnx --onnx-model minilm --yes
-
-# Rebuild the current model's index, including legacy databases with unknown vectors.
-lmem reindex
-lmem --db /path/to/project.db reindex --yes
-```
-
-Progress is printed to stderr in batches. The old index remains usable until all
-replacement vectors validate and commit together. A failed model load, invalid
-vector, or concurrent memory/index change leaves the previous index intact.
-Declining a configuration-change prompt leaves both configuration and embeddings
-unchanged. Noninteractive and JSON commands never prompt or start migration
-without explicit approval. `reindex` repairs missing vectors as well.
-
-Configuration is shared, but each database has its own embedding identity and
-requires its own migration. Only the selected database is migrated. Listing,
-exporting, and deleting memories do not need to load an embedding model.
-Existing databases have unknown model identities; they must be explicitly
-reindexed before semantic reads/writes, even if the configured model appears
-unchanged. Numbered SQLite schema upgrades repair old FTS entries automatically.
-
-Model identity includes backend/model, preprocessing version, and engine version;
-custom ONNX directories are fingerprinted by file contents. Ollama identity uses
-server URL and model name. If the weights behind an unchanged Ollama tag or hosted
-ONNX model change, explicitly run `reindex`; mutable remote revisions are not
-automatically detected. Migration stages vectors in memory, so peak RAM grows
-with vault size. `LIGHTMEM_CONFIG_DIR` isolates configuration/model cache for tests.
-
-## Deduplication
-
-Deduplication is deterministic and does **not** use Needle. Active memories merge
-only when category and content match after trimming outer whitespace. Case,
-internal whitespace, code indentation, secrets, different categories, and
-paraphrases remain distinct. Ordinary duplicate writes preserve the existing ID,
-union tags case-insensitively, retain the earliest creation time, keep the highest
-confidence and prefer explicit titles. The returned record is the stored result.
-The final merged card is re-embedded in the same transaction.
-
-`lmem dedup` applies the same rule to existing records, keeping the oldest ID
-(with ID as the tie-break), refreshing its embedding and removing redundant
-records. It is idempotent. Explicit same-ID imports update that record; backups
-preserve records as-is and do not deduplicate them. No semantic similarity model
-is allowed to automatically delete merely similar memories.
-
-## Backups and strict imports
-
-```bash
-lmem export --json -o backup.json   # all statuses and complete record metadata
-lmem import backup.json            # restore IDs/timestamps/status/provenance/tags
-lmem export --okf -o readable.md   # active records; lossless OKF v2 metadata
-lmem import readable.md
-lmem import external.json --enrich # explicitly enable optional Needle enrichment
-```
-
-JSON backups use `lightmem-backup-v1`. OKF v2 includes a canonical JSON record in
-each HTML comment; readable text is for display and the metadata is authoritative
-on import. Headings, separators, code fences, commas in tags and Unicode survive
-round trips. Legacy OKF v1 remains readable, but its unescaped Markdown boundaries
-cannot recover content already lost in an older export/import.
-
-Imports validate all input before committing. Malformed JSONL reports the line
-number; unsupported records fail rather than being silently skipped. Directory
-imports use one transaction and skip symlinks. Parsing does not call Needle unless
-`--enrich` is given. Embedding failures roll back writes rather than silently
-creating unindexed records. Bulk embedding uses batches; the write transaction
-holds a database writer lock during inference, so long imports can block writers.
-
-## Answer reliability and validation
-
-Retrieval keeps the RRF score through final ranking. `score` is a ranking score,
-not a probability; `--min-similarity` filters by raw cosine similarity. Candidate
-hydration is batched and vector selection bounds the sorted candidate pool,
-although exact vector search still scans the vault.
-
-Needle extracts only the requested field, and only accepted, grounded calls are
-used. Suppressed/ungrounded calls are rejected. Native confidence is never
-artificially raised; missing confidence is reported as zero. The result reports
-`needle-3`, `regex-fallback`, or `none`; regex confidence is zero (uncalibrated).
-Missing entity matches, ambiguous regex matches, and rejected native output produce an abstention. Conservative entity matching
-can miss paraphrases. `top1` returns the first retrieved record after an evidence
-check. Neither mode's confidence should be treated as a calibrated probability.
-
-```bash
-LIGHTMEM_NEEDLE_DISABLE=1 cargo test --locked
+# Formatting & strict clippy lint check
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-# Optional synthetic smoke evaluation with native Needle assets installed:
-cargo run --locked --example needle_eval
 ```
-
-Pull requests run tests, formatting and lint checks on Linux and macOS. Native
-Needle inference is an optional evaluation because the model/library are not
-bundled into CI. The eight-case example includes grounded facts and absent facts;
-it is a smoke check, not a comprehensive accuracy benchmark.
-
-
-
