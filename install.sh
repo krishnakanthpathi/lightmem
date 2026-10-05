@@ -41,7 +41,7 @@ awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" 'BEGIN {
     r[2]  = "\033[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m";
     r[3]  = "\033[1;38;2;220;38;38m▸\033[0m \033[38;2;228;228;231mUniversal Standalone Installer\033[0m";
     r[4]  = "  \033[38;2;113;113;122m◫ Target     \033[1;38;2;248;250;252m" os " (" arch ")\033[0m";
-    r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38msquad2-qa / ollama\033[0m";
+    r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx (bge-small)\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38monnx (minilm-squad2)\033[0m";
     r[6]  = "  \033[38;2;113;113;122m✦ Storage    \033[38;2;212;212;216mSQLite WAL + FTS5 + Vector\033[0m";
     r[7]  = "\033[38;2;113;113;122m────────────────────────────────────────────────\033[0m";
     r[8]  = "";
@@ -80,11 +80,11 @@ download_with_pct() {
     url="$1"
     dest="$2"
     label="$3"
-    expected_bytes="${4:-12500000}"
+    expected_bytes="${4:-14600000}"
     rm -f "$dest"
     printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$label"
 
-    curl -fsSL --happy-eyeballs-timeout-ms 200 --connect-timeout 3 "$url" -o "$dest" 2>/dev/null &
+    (curl -4 -fsSL --retry 3 --connect-timeout 10 "$url" -o "$dest" 2>/dev/null || curl -fsSL --retry 3 --connect-timeout 10 "$url" -o "$dest" 2>/dev/null) &
     dl_pid=$!
 
     warmup_pct=1

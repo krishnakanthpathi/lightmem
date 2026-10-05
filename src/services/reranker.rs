@@ -962,6 +962,9 @@ fn is_valid_qa_span(
         || lower.contains("not recorded")
         || lower.contains("not specified")
         || lower.contains("not provided")
+        || lower.contains("x0000x")
+        || lower.contains("xxxx")
+        || lower.contains("***")
     {
         return false;
     }

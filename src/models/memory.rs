@@ -712,7 +712,9 @@ pub fn detect_memory_conflict_with_similarity(
     }
 
     let word_min = words_a.len().min(words_b.len()).max(1);
+    let word_max = words_a.len().max(words_b.len()).max(1);
     let word_overlap = word_inter as f32 / word_min as f32;
+    let max_overlap = word_inter as f32 / word_max as f32;
 
     let all_inter = all_a.intersection(&all_b).count();
     let all_min = all_a.len().min(all_b.len()).max(1);
@@ -726,7 +728,7 @@ pub fn detect_memory_conflict_with_similarity(
         raw_vec_sim.max(word_overlap * 0.92)
     };
 
-    if effective_sim < min_similarity || word_overlap < 0.50 {
+    if effective_sim < min_similarity || word_overlap < 0.55 || max_overlap < 0.45 {
         return None;
     }
 
