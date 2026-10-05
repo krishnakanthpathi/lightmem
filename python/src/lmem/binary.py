@@ -56,7 +56,7 @@ def get_binary_path() -> str:
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.2.0") -> str:
+def ensure_binary_downloaded(version: str = "v0.2.1") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
