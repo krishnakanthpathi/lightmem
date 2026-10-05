@@ -135,6 +135,16 @@ enum Commands {
         json: bool,
     },
 
+    /// Retrieve a single memory by ID or title
+    Get {
+        /// Memory ID (UUID) or title
+        term: String,
+
+        /// Output memory as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Forget or expire a memory (or all memories with --all)
     Forget {
         /// Memory ID to forget (or omit when using --all)
@@ -597,6 +607,20 @@ fn main() -> Result<()> {
                 lm.list_paginated_with_date(cat, st, as_of_dt, date, limit, offset)?
             };
             CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
+        }
+
+        Commands::Get { term, json } => {
+            let lm = open_controller(effective_db, global)?;
+            if let Some(record) = lm.get(&term)? {
+                CliView::render_remembered(&record, lm.db_path(), json)?;
+            } else {
+                if json {
+                    println!("null");
+                } else {
+                    eprintln!("Memory not found: {}", term);
+                }
+                std::process::exit(1);
+            }
         }
 
         Commands::Forget {
