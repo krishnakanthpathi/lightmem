@@ -1,10 +1,10 @@
 # LightMem (lmem) Universal Windows PowerShell Installer
-# Usage: irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
-$Branch = "feat/extractive-qa-ollama"
+$Branch = "neural-reranker"
 $ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.0" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Target = "x86_64-pc-windows-msvc"

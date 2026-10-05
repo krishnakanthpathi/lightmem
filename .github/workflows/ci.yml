@@ -2,7 +2,7 @@ name: Test and lint
 on:
   pull_request:
   push:
-    branches: [main, feat/extractive-qa-ollama]
+    branches: [main, neural-reranker]
 permissions:
   contents: read
 jobs:

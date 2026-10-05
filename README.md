@@ -12,17 +12,17 @@ Install the prebuilt `lmem` `v0.2.0` binary and pre-cache the local ONNX embeddi
 
 ### macOS & Linux
 ```bash
-curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh
 ```
 
 ### Windows (PowerShell)
 ```powershell
-irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.ps1 | iex
+irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.ps1 | iex
 ```
 
 ### Build from Source (Rust / Cargo)
 ```bash
-git clone -b feat/extractive-qa-ollama https://github.com/krishnakanthpathi/lightmem.git
+git clone -b neural-reranker https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
 ```

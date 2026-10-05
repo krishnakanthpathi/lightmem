@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # LightMem Universal Single-Command Installer (macOS & Linux)
-# Usage: curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh
 
 set -e
 
@@ -171,7 +171,7 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
-    cargo install --git "https://github.com/${REPO}.git" --branch feat/extractive-qa-ollama --locked --force
+    cargo install --git "https://github.com/${REPO}.git" --branch neural-reranker --locked --force
     if [ -f "$HOME/.cargo/bin/lmem" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
         cp "$HOME/.cargo/bin/lmem" "$INSTALL_DIR/lmem"
     fi
