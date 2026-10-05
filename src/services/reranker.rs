@@ -632,11 +632,39 @@ impl Reranker for OllamaReranker {
     }
 }
 
+fn extract_json_slice(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    (start <= end).then_some(&trimmed[start..=end])
+}
+
+fn is_answer_grounded_in(answer: &str, mem: &MemoryRecord) -> bool {
+    if grounded(answer, &mem.content) || (!mem.title.is_empty() && grounded(answer, &mem.title)) {
+        return true;
+    }
+    // For multi-word descriptive answers from LLMs (e.g. "who is kk"), verify every
+    // content token (and every digit sequence) in the answer comes from the selected memory.
+    let ans_tokens = content_tokens(answer);
+    if ans_tokens.len() >= 2 {
+        let mut mem_tokens = content_tokens(&mem.content);
+        if !mem.title.is_empty() {
+            mem_tokens.extend(content_tokens(&mem.title));
+        }
+        let all_tokens_present = ans_tokens.iter().all(|t| mem_tokens.contains(t));
+        if all_tokens_present {
+            return true;
+        }
+    }
+    false
+}
+
 fn parse_and_ground_ollama_answer(
     raw_json: &str,
     gated: &[&ScoredMemory],
 ) -> Option<(String, usize, f32)> {
-    let parsed: serde_json::Value = serde_json::from_str(raw_json.trim()).ok()?;
+    let json_slice = extract_json_slice(raw_json)?;
+    let parsed: serde_json::Value = serde_json::from_str(json_slice).ok()?;
     let raw_ans = parsed.get("answer")?.as_str()?.trim();
     if raw_ans.is_empty() {
         return None;
@@ -670,13 +698,13 @@ fn parse_and_ground_ollama_answer(
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
     {
-        if idx < gated.len() && grounded(&cleaned, &gated[idx].memory.content) {
+        if idx < gated.len() && is_answer_grounded_in(&cleaned, &gated[idx].memory) {
             return Some((cleaned, idx, confidence));
         }
     }
 
     for (idx, cand) in gated.iter().enumerate() {
-        if grounded(&cleaned, &cand.memory.content) {
+        if is_answer_grounded_in(&cleaned, &cand.memory) {
             return Some((cleaned, idx, confidence));
         }
     }
@@ -917,6 +945,12 @@ mod tests {
 
         let abstained = r#"{"answer": null, "memory_index": null, "confidence": 0.0}"#;
         assert!(parse_and_ground_ollama_answer(abstained, &gated).is_none());
+
+        let markdown_fenced =
+            "```json\n{\"answer\": \"HAQPP8118D\", \"memory_index\": 1, \"confidence\": 1.0}\n```";
+        let (ans_f, idx_f, _) = parse_and_ground_ollama_answer(markdown_fenced, &gated).unwrap();
+        assert_eq!(ans_f, "HAQPP8118D");
+        assert_eq!(idx_f, 1);
     }
 
     #[test]
