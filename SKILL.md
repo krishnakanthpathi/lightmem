@@ -35,9 +35,9 @@ lmem remember "API Gateway routes to [[PostgreSQL DB]]" # Auto-links via [[wikil
 lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0  # Explicit directional relation
 lmem unlink <SRC_ID> <DST_ID>                       # Remove link
 lmem related <MEMORY_ID> --hops 2                  # Multi-hop graph traversal with hop-decay scoring
-lmem graph --browser                               # Interactive Obsidian HTML Canvas graph in default browser
-lmem graph --terminal                              # ASCII/Unicode network tree in terminal
+lmem graph                                         # ASCII/Unicode network tree in terminal
 lmem graph --focus <MEMORY_ID> --hops 2            # Neighborhood subgraph view
+lmem graph --json                                  # Export graph nodes and edges as JSON
 
 # 4. Extractive QA / LLM Grounded Answer (extracts the exact span from top candidates)
 lmem answer "what port does postgresql use"

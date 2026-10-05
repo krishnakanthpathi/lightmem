@@ -344,12 +344,8 @@ enum Commands {
         json: bool,
     },
 
-    /// Obsidian-style interactive force graph view or terminal network tree
+    /// Terminal network tree or JSON knowledge graph
     Graph {
-        /// Automatically open the interactive HTML graph view in default browser
-        #[arg(short = 'b', long)]
-        browser: bool,
-
         /// Focus the graph on a specific memory neighborhood (ID or title)
         #[arg(short = 'f', long)]
         focus: Option<String>,
@@ -357,14 +353,6 @@ enum Commands {
         /// Maximum hop radius when focused on a memory neighborhood
         #[arg(short = 'n', long, default_value = "2")]
         hops: usize,
-
-        /// Output path for the generated graph HTML file
-        #[arg(short = 'o', long)]
-        output: Option<PathBuf>,
-
-        /// Render text network tree directly in the terminal
-        #[arg(short = 't', long)]
-        terminal: bool,
 
         /// Output graph nodes and edges as JSON
         #[arg(long)]
@@ -920,22 +908,13 @@ fn main() -> Result<()> {
         }
 
         Commands::Graph {
-            browser,
             focus,
             hops,
-            output,
-            terminal,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
             let snapshot = lm.graph(focus.as_deref(), Some(hops))?;
-            CliView::render_graph(
-                &snapshot,
-                terminal,
-                output.as_deref(),
-                browser,
-                json,
-            )?;
+            CliView::render_graph(&snapshot, json)?;
         }
 
         Commands::Autolink {

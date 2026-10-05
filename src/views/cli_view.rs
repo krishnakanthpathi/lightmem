@@ -252,8 +252,8 @@ impl CliView {
             ),
             (
                 "│",
-                "lmem graph --browser",
-                "Interactive Obsidian-style force graph",
+                "lmem graph",
+                "Terminal network tree & connection map",
             ),
             (
                 "│",
@@ -1002,9 +1002,6 @@ impl CliView {
 
     pub fn render_graph(
         snapshot: &GraphSnapshot,
-        terminal: bool,
-        output_path: Option<&Path>,
-        browser: bool,
         json: bool,
     ) -> Result<()> {
         if json {
@@ -1012,47 +1009,7 @@ impl CliView {
             return Ok(());
         }
 
-        if terminal {
-            print!("{}", crate::services::render_terminal(snapshot));
-            return Ok(());
-        }
-
-        let saved_path = crate::services::export_and_open_html(snapshot, output_path)?;
-        println!(
-            "\n  {} {}",
-            Self::crimson_bold("❖"),
-            Self::white_bold("INTERACTIVE KNOWLEDGE GRAPH GENERATED")
-        );
-        println!(
-            "  {}",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
-        );
-        println!(
-            "  {} Visualized: {} memories · {} connections",
-            Self::crimson_bold("◈"),
-            Self::white_bold(&snapshot.nodes.len().to_string()),
-            Self::white_bold(&snapshot.edges.len().to_string())
-        );
-        println!(
-            "  {} HTML Canvas: {}",
-            Self::crimson_bold("◈"),
-            Self::emerald_bold(&saved_path.display().to_string())
-        );
-        if browser {
-            println!(
-                "  {} {}",
-                Self::crimson_bold("✦"),
-                Self::gold("Opened interactive graph view in default browser.")
-            );
-        } else {
-            println!(
-                "  {} Run {} to automatically open in your default browser.",
-                Self::slate("Tip:"),
-                Self::gold("lmem graph --browser")
-            );
-        }
-        println!();
-
+        print!("{}", crate::services::render_terminal(snapshot));
         Ok(())
     }
 
@@ -1101,9 +1058,9 @@ impl CliView {
             Self::white_bold(&total_edges.to_string())
         );
         println!(
-            "  {} Run {} to inspect the updated interactive canvas.\n",
+            "  {} Run {} to inspect the connection tree.\n",
             Self::slate("Tip:"),
-            Self::gold("lmem graph --browser")
+            Self::gold("lmem graph")
         );
         Ok(())
     }
