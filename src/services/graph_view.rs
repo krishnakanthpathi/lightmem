@@ -45,28 +45,28 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     /* Top Bar HUD */
     .top-bar {{
       position: absolute;
-      top: 16px;
-      left: 16px;
-      right: 16px;
+      top: 24px;
+      left: 24px;
+      right: 24px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      gap: 16px;
       pointer-events: none;
       z-index: 10;
     }}
     .hud-card {{
       pointer-events: auto;
-      background: rgba(18, 20, 29, 0.85);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      padding: 10px 16px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+      background: rgba(18, 20, 29, 0.88);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 14px;
+      padding: 12px 20px;
+      box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 16px;
     }}
     .logo {{
       font-weight: 700;
@@ -74,19 +74,19 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
       letter-spacing: 1px;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
       color: #f8fafc;
     }}
     .logo-icon {{
       color: #6366f1;
-      font-size: 16px;
+      font-size: 18px;
     }}
     .stats-badge {{
       font-size: 12px;
       color: #94a3b8;
       background: rgba(255, 255, 255, 0.06);
-      padding: 4px 8px;
-      border-radius: 6px;
+      padding: 5px 10px;
+      border-radius: 8px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }}
     .search-box {{
@@ -98,62 +98,62 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
       pointer-events: auto;
       background: rgba(15, 17, 26, 0.9);
       border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 8px;
-      padding: 8px 12px 8px 32px;
+      border-radius: 10px;
+      padding: 9px 14px 9px 36px;
       color: #f1f5f9;
       font-size: 13px;
       outline: none;
-      width: 240px;
-      transition: all 0.2s ease;
+      width: 260px;
+      transition: all 0.25s ease;
     }}
     .search-input:focus {{
       border-color: #6366f1;
-      width: 320px;
-      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+      width: 360px;
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
     }}
     .search-icon {{
       position: absolute;
-      left: 10px;
+      left: 12px;
       color: #64748b;
-      font-size: 13px;
+      font-size: 14px;
     }}
     .btn {{
       pointer-events: auto;
       background: rgba(255, 255, 255, 0.07);
       border: 1px solid rgba(255, 255, 255, 0.1);
       color: #cbd5e1;
-      border-radius: 8px;
-      padding: 8px 14px;
-      font-size: 12px;
+      border-radius: 10px;
+      padding: 9px 16px;
+      font-size: 12.5px;
       font-weight: 500;
       cursor: pointer;
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 8px;
       transition: all 0.15s ease;
     }}
     .btn:hover {{
-      background: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.13);
       color: #ffffff;
-      border-color: rgba(255, 255, 255, 0.2);
+      border-color: rgba(255, 255, 255, 0.22);
     }}
     /* Categories filter bar */
     .filter-bar {{
       position: absolute;
-      bottom: 20px;
+      bottom: 28px;
       left: 50%;
       transform: translateX(-50%);
       pointer-events: auto;
-      background: rgba(18, 20, 29, 0.85);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 30px;
-      padding: 6px 12px;
+      background: rgba(18, 20, 29, 0.88);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 40px;
+      padding: 8px 18px;
       display: flex;
       align-items: center;
-      gap: 6px;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      gap: 8px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
       z-index: 10;
       max-width: 90vw;
       overflow-x: auto;
@@ -161,9 +161,9 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     .category-pill {{
       display: flex;
       align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      padding: 4px 10px;
+      gap: 8px;
+      font-size: 12px;
+      padding: 6px 14px;
       border-radius: 20px;
       cursor: pointer;
       background: transparent;
@@ -231,36 +231,36 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     /* Right Sliding Detail Drawer */
     .drawer {{
       position: absolute;
-      top: 16px;
-      right: 16px;
-      bottom: 16px;
-      width: 400px;
-      max-width: calc(100vw - 32px);
-      background: rgba(18, 20, 29, 0.95);
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
+      top: 24px;
+      right: 24px;
+      bottom: 24px;
+      width: 440px;
+      max-width: calc(100vw - 48px);
+      background: rgba(18, 20, 29, 0.96);
+      backdrop-filter: blur(28px);
+      -webkit-backdrop-filter: blur(28px);
       border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 16px;
-      box-shadow: -10px 10px 40px rgba(0, 0, 0, 0.6);
+      border-radius: 20px;
+      box-shadow: -12px 12px 48px rgba(0, 0, 0, 0.65);
       display: flex;
       flex-direction: column;
       z-index: 30;
-      transform: translateX(calc(100% + 24px));
-      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      transform: translateX(calc(100% + 32px));
+      transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1);
       user-select: text;
     }}
     .drawer.open {{
       transform: translateX(0);
     }}
     .drawer-header {{
-      padding: 16px 20px;
+      padding: 20px 24px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       display: flex;
       align-items: center;
       justify-content: space-between;
     }}
     .drawer-title {{
-      font-size: 15px;
+      font-size: 16px;
       font-weight: 600;
       color: #f8fafc;
       overflow: hidden;
@@ -271,11 +271,11 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
       background: none;
       border: none;
       color: #94a3b8;
-      font-size: 18px;
+      font-size: 20px;
       cursor: pointer;
-      border-radius: 6px;
-      width: 28px;
-      height: 28px;
+      border-radius: 8px;
+      width: 32px;
+      height: 32px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -286,12 +286,12 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
       background: rgba(255, 255, 255, 0.08);
     }}
     .drawer-body {{
-      padding: 20px;
+      padding: 24px 28px;
       overflow-y: auto;
       flex: 1;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 20px;
     }}
     .drawer-badge-row {{
       display: flex;
@@ -535,11 +535,11 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     // Graph Data Structures
     const nodeMap = new Map();
     const nodes = graphData.nodes.map(n => {{
-      const baseRadius = 6 + Math.min(n.degree * 2, 16);
+      const baseRadius = 7 + Math.min(n.degree * 2.2, 18);
       const node = {{
         ...n,
-        x: (Math.random() - 0.5) * (width * 0.7) + width / 2,
-        y: (Math.random() - 0.5) * (height * 0.7) + height / 2,
+        x: (Math.random() - 0.5) * (width * 1.6) + width / 2,
+        y: (Math.random() - 0.5) * (height * 1.6) + height / 2,
         vx: 0,
         vy: 0,
         radius: baseRadius,
@@ -558,9 +558,9 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     document.getElementById('stats-badge').innerText = `${{nodes.length}} nodes · ${{edges.length}} links`;
 
     // Camera Transform (Pan & Zoom)
-    let zoom = 1.0;
-    let panX = 0;
-    let panY = 0;
+    let zoom = 0.78;
+    let panX = width * 0.11;
+    let panY = height * 0.11;
     let isPanning = false;
     let startPanX = 0;
     let startPanY = 0;
@@ -571,12 +571,12 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     let selectedNode = null;
     let searchQuery = '';
 
-    // Physics Simulation Engine
+    // Physics Simulation Engine (Spacious Obsidian-style layout)
     let simulationAlpha = 1.0;
-    const repulsionStrength = 900;
-    const springLength = 85;
-    const springStrength = 0.04;
-    const centerGravity = 0.015;
+    const repulsionStrength = 4200;
+    const springLength = 220;
+    const springStrength = 0.035;
+    const centerGravity = 0.005;
     const damping = 0.82;
 
     function stepPhysics() {{
@@ -594,8 +594,8 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
           let dy = b.y - a.y;
           let distSq = dx * dx + dy * dy || 1;
           let dist = Math.sqrt(distSq);
-          if (dist < 400) {{
-            let force = (repulsionStrength / (distSq + 20)) * simulationAlpha;
+          if (dist < 1000) {{
+            let force = (repulsionStrength / (distSq + 50)) * simulationAlpha;
             let fx = (dx / dist) * force;
             let fy = (dy / dist) * force;
             a.vx -= fx;
@@ -645,7 +645,7 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
     }}
 
     // Warm up initial simulation
-    for (let i = 0; i < 60; i++) stepPhysics();
+    for (let i = 0; i < 90; i++) stepPhysics();
 
     // Render loop
     function render() {{
@@ -767,12 +767,12 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
         ctx.stroke();
 
         // Node Label (show if zoom is high enough, or if hovered/selected/search matched)
-        const showLabel = isHovered || isSelected || (searchQuery && isSearchMatch) || (zoom > 1.2 && isCatMatch);
+        const showLabel = isHovered || isSelected || (searchQuery && isSearchMatch) || (zoom > 0.85 && isCatMatch);
         if (showLabel && nodeAlpha > 0.4) {{
           ctx.font = `${{Math.max(10, 11 / zoom)}}px -apple-system, sans-serif`;
           ctx.fillStyle = '#f8fafc';
           ctx.textAlign = 'center';
-          ctx.fillText(node.label, node.x, node.y + radius + 12 / zoom);
+          ctx.fillText(node.label, node.x, node.y + radius + 15 / zoom);
         }}
       }}
 
@@ -966,9 +966,9 @@ pub fn generate_html(snapshot: &GraphSnapshot) -> String {
 
     // Reset View Button
     document.getElementById('btn-reset').addEventListener('click', () => {{
-      zoom = 1.0;
-      panX = 0;
-      panY = 0;
+      zoom = 0.78;
+      panX = width * 0.11;
+      panY = height * 0.11;
       simulationAlpha = 0.5;
     }});
 

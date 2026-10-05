@@ -600,6 +600,12 @@ impl LightMem {
         self.storage.get_links_for_memory(memory_id)
     }
 
+    /// Automatically discover and connect memories via title mentions, shared tags, and vector similarity
+    pub fn autolink(&self, min_similarity: Option<f32>) -> Result<usize> {
+        let threshold = min_similarity.unwrap_or(0.75).clamp(0.1, 1.0);
+        self.storage.autolink_vault(threshold)
+    }
+
     /// Traverse knowledge graph up to N hops from a starting memory
     pub fn related(&self, memory_id: &str, hops: usize) -> Result<Vec<RelatedMemory>> {
         self.storage.traverse_multi_hop(memory_id, hops)

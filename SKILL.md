@@ -29,6 +29,8 @@ lmem recall "postgres port" -t fact --min-similarity 0.5 --json
 lmem recall "service gateway" --multi-hop          # Expands recall hits with 1-hop graph neighbors
 
 # 3. Knowledge Graph, Linking & Multi-Hop Traversal
+lmem autolink                                      # Auto-link vault via title mentions, shared tags, and vector similarity
+lmem autolink --min-similarity 0.80 --json         # Configure similarity threshold or export JSON report
 lmem remember "API Gateway routes to [[PostgreSQL DB]]" # Auto-links via [[wikilinks]]
 lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0  # Explicit directional relation
 lmem unlink <SRC_ID> <DST_ID>                       # Remove link

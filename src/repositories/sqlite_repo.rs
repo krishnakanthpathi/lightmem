@@ -2,7 +2,7 @@ use crate::models::{
     extract_wikilinks, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus,
     MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
 };
-use crate::services::embeddings::{validate_vector, EmbeddingProvider};
+use crate::services::embeddings::{cosine_similarity, validate_vector, EmbeddingProvider};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -785,6 +785,184 @@ impl Storage {
         }
 
         Ok(linked)
+    }
+
+    pub fn autolink_vault(&self, min_similarity: f32) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
+        let now = Utc::now().to_rfc3339();
+
+        struct Candidate {
+            id: String,
+            title: String,
+            content_lower: String,
+            tags: Vec<String>,
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, title, content, tags FROM memories WHERE status = 'active'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let title: String = r.get(1)?;
+            let content: String = r.get(2)?;
+            let tags_str: String = r.get(3)?;
+            Ok(Candidate {
+                id,
+                title: title.trim().to_string(),
+                content_lower: content.to_lowercase(),
+                tags: parse_tags_column(&tags_str),
+            })
+        })?;
+        let candidates: Vec<Candidate> = rows.collect::<rusqlite::Result<_>>()?;
+
+        let mut vec_stmt = conn.prepare(
+            "SELECT v.id, v.embedding FROM memory_vectors v JOIN memories m ON v.id = m.id WHERE m.status = 'active'",
+        )?;
+        let mut vectors: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+        let vec_rows = vec_stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let blob: Vec<u8> = r.get(1)?;
+            Ok((id, deserialize_f32_slice(&blob)))
+        })?;
+        for item in vec_rows {
+            let (id, vec) = item?;
+            vectors.insert(id, vec);
+        }
+        drop(stmt);
+        drop(vec_stmt);
+
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut insert_stmt = tx.prepare(
+            "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+
+        let mut total_created = 0;
+
+        const GENERIC_TITLES: &[&str] = &[
+            "untitled", "note", "fact", "decision", "memory", "scratch", "test", "todo", "temp",
+        ];
+        const GENERIC_TAGS: &[&str] = &[
+            "fact", "decision", "imported", "auto", "default", "quick", "general", "temp",
+        ];
+
+        // 1. Title mentions
+        for b in &candidates {
+            let b_title_clean = b.title.trim();
+            if b_title_clean.chars().count() >= 4 {
+                let b_title_lower = b_title_clean.to_lowercase();
+                if !GENERIC_TITLES.contains(&b_title_lower.as_str()) {
+                    for a in &candidates {
+                        if a.id != b.id && a.content_lower.contains(&b_title_lower) {
+                            if let Some(idx) = a.content_lower.find(&b_title_lower) {
+                                let before_ok = if idx == 0 {
+                                    true
+                                } else {
+                                    let prev = a.content_lower.as_bytes()[idx - 1] as char;
+                                    !prev.is_alphanumeric()
+                                };
+                                let after_idx = idx + b_title_lower.len();
+                                let after_ok = if after_idx >= a.content_lower.len() {
+                                    true
+                                } else {
+                                    let next = a.content_lower.as_bytes()[after_idx] as char;
+                                    !next.is_alphanumeric()
+                                };
+                                if before_ok && after_ok {
+                                    total_created += insert_stmt.execute(params![
+                                        &a.id,
+                                        &b.id,
+                                        "mentions",
+                                        1.0f32,
+                                        &now
+                                    ])?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Shared non-generic tags (>= 2)
+        for i in 0..candidates.len() {
+            let a = &candidates[i];
+            let a_tags: std::collections::HashSet<String> = a
+                .tags
+                .iter()
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty() && !GENERIC_TAGS.contains(&t.as_str()))
+                .collect();
+            if a_tags.is_empty() {
+                continue;
+            }
+
+            for j in (i + 1)..candidates.len() {
+                let b = &candidates[j];
+                let shared_count = b
+                    .tags
+                    .iter()
+                    .map(|t| t.trim().to_lowercase())
+                    .filter(|t| a_tags.contains(t))
+                    .count();
+
+                if shared_count >= 2 {
+                    total_created += insert_stmt.execute(params![
+                        &a.id,
+                        &b.id,
+                        "shared_topic",
+                        0.8f32,
+                        &now
+                    ])?;
+                    total_created += insert_stmt.execute(params![
+                        &b.id,
+                        &a.id,
+                        "shared_topic",
+                        0.8f32,
+                        &now
+                    ])?;
+                }
+            }
+        }
+
+        // 3. Semantic vector cosine similarity (>= min_similarity)
+        for i in 0..candidates.len() {
+            let a_id = &candidates[i].id;
+            let Some(a_vec) = vectors.get(a_id) else {
+                continue;
+            };
+
+            for j in (i + 1)..candidates.len() {
+                let b_id = &candidates[j].id;
+                let Some(b_vec) = vectors.get(b_id) else {
+                    continue;
+                };
+
+                let sim = cosine_similarity(a_vec, b_vec);
+                if sim >= min_similarity {
+                    let weight = ((sim * 100.0).round() / 100.0).clamp(0.1, 1.0);
+                    total_created += insert_stmt.execute(params![
+                        a_id,
+                        b_id,
+                        "relates_to",
+                        weight,
+                        &now
+                    ])?;
+                    total_created += insert_stmt.execute(params![
+                        b_id,
+                        a_id,
+                        "relates_to",
+                        weight,
+                        &now
+                    ])?;
+                }
+            }
+        }
+
+        drop(insert_stmt);
+        tx.commit()?;
+        Ok(total_created)
     }
 
     pub fn forget_memory(&self, id: &str, hard_delete: bool) -> Result<bool> {
@@ -1721,6 +1899,76 @@ mod fts_tests {
         storage.forget_memory(&mem_b.id, true).unwrap();
         let links_after_cascade = storage.get_links_for_memory(&mem_a.id).unwrap();
         assert_eq!(links_after_cascade.len(), 0);
+    }
+
+    #[test]
+    fn test_autolink_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("autolink_test.db");
+        let storage = Storage::open(&db_path).unwrap();
+
+        // 1. Memory A mentions Memory B's title in plain text
+        let mem_b = MemoryRecord::new(
+            MemoryType::Fact,
+            "Redis Cache".to_string(),
+            "Redis in-memory caching cluster running on port 6379".to_string(),
+            vec!["redis".to_string(), "cache".to_string()],
+            0.9,
+            None,
+        );
+        let vec_b = vec![0.5f32, 0.5, 0.5, 0.5];
+        storage.insert_memory(&mem_b, Some(&vec_b)).unwrap();
+
+        let mem_a = MemoryRecord::new(
+            MemoryType::Instruction,
+            "Auth Service Setup".to_string(),
+            "Connect user sessions to Redis Cache before accepting API traffic".to_string(),
+            vec!["auth".to_string()],
+            0.9,
+            None,
+        );
+        let vec_a = vec![0.1f32, 0.9, 0.0, 0.0];
+        storage.insert_memory(&mem_a, Some(&vec_a)).unwrap();
+
+        // 2. Memory C and Memory D share 2 non-generic tags ("database", "cluster")
+        let mem_c = MemoryRecord::new(
+            MemoryType::Decision,
+            "Database Replication".to_string(),
+            "Postgres primary replicates WAL to two standby read replicas".to_string(),
+            vec!["database".to_string(), "cluster".to_string(), "postgres".to_string()],
+            0.9,
+            None,
+        );
+        let vec_c = vec![0.8f32, 0.2, 0.1, 0.0];
+        storage.insert_memory(&mem_c, Some(&vec_c)).unwrap();
+
+        let mem_d = MemoryRecord::new(
+            MemoryType::Fact,
+            "Failover Mechanism".to_string(),
+            "Patroni triggers leader election if primary heartbeat misses 3 pings".to_string(),
+            vec!["database".to_string(), "cluster".to_string(), "patroni".to_string()],
+            0.9,
+            None,
+        );
+        // Very similar vector to mem_c (cosine sim > 0.95)
+        let vec_d = vec![0.82f32, 0.19, 0.08, 0.0];
+        storage.insert_memory(&mem_d, Some(&vec_d)).unwrap();
+
+        // Run autolink
+        let new_links = storage.autolink_vault(0.75).unwrap();
+        assert!(new_links >= 3, "Expected at least 3 links created, got {}", new_links);
+
+        // Verify mem_a mentions mem_b
+        let links_a = storage.get_links_for_memory(&mem_a.id).unwrap();
+        assert!(links_a.iter().any(|l| l.target_id == mem_b.id && l.relation == "mentions"));
+
+        // Verify mem_c and mem_d are linked via shared_topic and relates_to
+        let links_c = storage.get_links_for_memory(&mem_c.id).unwrap();
+        assert!(links_c.iter().any(|l| l.target_id == mem_d.id && (l.relation == "shared_topic" || l.relation == "relates_to")));
+
+        // Idempotency: second run should add 0 new links
+        let second_run = storage.autolink_vault(0.75).unwrap();
+        assert_eq!(second_run, 0);
     }
 }
 

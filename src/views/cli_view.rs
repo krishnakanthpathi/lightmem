@@ -1055,4 +1055,57 @@ impl CliView {
 
         Ok(())
     }
+
+    pub fn render_autolink(
+        new_links: usize,
+        total_nodes: usize,
+        total_edges: usize,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "new_links": new_links,
+                "total_nodes": total_nodes,
+                "total_edges": total_edges,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        println!(
+            "\n  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("AUTOLINK VAULT KNOWLEDGE GRAPH")
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
+        );
+        if new_links > 0 {
+            println!(
+                "  {} Created {} new knowledge connections across {} memories",
+                Self::crimson_bold("✦"),
+                Self::emerald_bold(&new_links.to_string()),
+                Self::white_bold(&total_nodes.to_string())
+            );
+        } else {
+            println!(
+                "  {} Vault is already fully connected (0 new links discovered)",
+                Self::crimson_bold("✦")
+            );
+        }
+        println!(
+            "  {} Graph state: {} nodes · {} total links",
+            Self::crimson_bold("◈"),
+            Self::white_bold(&total_nodes.to_string()),
+            Self::white_bold(&total_edges.to_string())
+        );
+        println!(
+            "  {} Run {} to inspect the updated interactive canvas.\n",
+            Self::slate("Tip:"),
+            Self::gold("lmem graph --browser")
+        );
+        Ok(())
+    }
 }
+

@@ -371,6 +371,18 @@ enum Commands {
         json: bool,
     },
 
+    /// Automatically discover and connect memories via title mentions, shared tags, and vector similarity
+    #[command(alias = "auto-link")]
+    Autolink {
+        /// Minimum cosine similarity threshold for semantic links (0.1 to 1.0)
+        #[arg(long, default_value = "0.75")]
+        min_similarity: f32,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate shell completion scripts (zsh, bash, fish) with interactive tab/arrow navigation
     Completions {
         /// Target shell (zsh, bash, fish, elvish, powershell)
@@ -922,6 +934,21 @@ fn main() -> Result<()> {
                 terminal,
                 output.as_deref(),
                 browser,
+                json,
+            )?;
+        }
+
+        Commands::Autolink {
+            min_similarity,
+            json,
+        } => {
+            let lm = open_controller(effective_db, global)?;
+            let new_links = lm.autolink(Some(min_similarity))?;
+            let snapshot = lm.graph(None, None)?;
+            CliView::render_autolink(
+                new_links,
+                snapshot.nodes.len(),
+                snapshot.edges.len(),
                 json,
             )?;
         }
