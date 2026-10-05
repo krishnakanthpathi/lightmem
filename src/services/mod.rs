@@ -1,9 +1,12 @@
+pub mod connect;
 pub mod embeddings;
 pub mod exporter;
 pub mod graph_view;
 pub mod importer;
 pub mod reranker;
 pub mod search;
+
+pub use connect::{ConnectResult, ConnectService, PlatformInfo};
 
 pub use embeddings::{
     cosine_similarity, EmbeddingProvider, HashEmbeddingProvider, OllamaEmbeddingProvider,

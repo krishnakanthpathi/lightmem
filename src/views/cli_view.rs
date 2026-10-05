@@ -266,6 +266,11 @@ impl CliView {
                 "Paginated chronological index",
             ),
             (
+                "│",
+                "lmem connect <agent>",
+                "Deploy skill to Antigravity, Codex, Hermes, etc.",
+            ),
+            (
                 "╰─",
                 "lmem stats  |  lmem --help",
                 "Inspect vault telemetry & flags",
@@ -1062,6 +1067,118 @@ impl CliView {
             Self::slate("Tip:"),
             Self::gold("lmem graph")
         );
+        Ok(())
+    }
+
+    pub fn render_connect(results: &[crate::services::ConnectResult], json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(results)?);
+            return Ok(());
+        }
+
+        println!(
+            "\n  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("CONNECT LIGHTMEM AGENT SKILLS")
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
+        );
+
+        if results.is_empty() {
+            println!(
+                "  {} No agent platforms were selected or detected.",
+                Self::slate("▪")
+            );
+            println!(
+                "  {} Run {} to see all supported platforms.",
+                Self::slate("Tip:"),
+                Self::gold("lmem connect --list")
+            );
+            println!();
+            return Ok(());
+        }
+
+        println!(
+            "  {} Deployed LightMem skill to {} platform(s):\n",
+            Self::crimson_bold("✦"),
+            Self::white_bold(&results.len().to_string())
+        );
+
+        for r in results {
+            let path_str = Self::format_path(&r.target_file);
+            let badge = if r.created {
+                Self::emerald_bold("[new]")
+            } else {
+                Self::gold("[updated]")
+            };
+            println!(
+                "  {} [{}] {} {} {}",
+                Self::crimson_bold("◈"),
+                Self::violet_bold(&r.platform),
+                badge,
+                Self::white_bold(&path_str),
+                Self::slate(&format!("({})", r.message))
+            );
+        }
+
+        println!();
+        println!(
+            "  {} Your AI agents can now automatically read and run {} commands!",
+            Self::slate("Tip:"),
+            Self::gold("lmem")
+        );
+        println!();
+        Ok(())
+    }
+
+    pub fn render_platforms_list(
+        platforms: &[crate::services::PlatformInfo],
+        workspace: bool,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(platforms)?);
+            return Ok(());
+        }
+
+        let mode_str = if workspace { "Workspace (local)" } else { "Global (~/)" };
+        println!(
+            "\n  {} {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("SUPPORTED AGENT PLATFORMS"),
+            Self::slate(&format!("({})", mode_str))
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
+        );
+
+        for p in platforms {
+            let status = if p.detected {
+                Self::emerald_bold("● detected")
+            } else {
+                Self::slate("○ not found")
+            };
+            let path_str = Self::format_path(&p.target_file);
+            println!(
+                "  {} {:<16} {:<14} {}",
+                Self::crimson_bold("▪"),
+                Self::white_bold(&p.id),
+                status,
+                Self::slate(&path_str)
+            );
+        }
+
+        println!();
+        println!(
+            "  {} Run {} to install to a platform, or {} for all.",
+            Self::slate("Usage:"),
+            Self::gold("lmem connect <platform>"),
+            Self::gold("lmem connect all")
+        );
+        println!();
         Ok(())
     }
 }

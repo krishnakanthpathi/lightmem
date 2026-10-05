@@ -75,8 +75,16 @@ lmem config --reranker minilm-squad2               # Default local ONNX Extracti
 lmem config --reranker tinyroberta-squad2          # High-accuracy RoBERTa ONNX Extractive QA (~11ms)
 lmem config --reranker ollama:qwen2.5:3b           # Local Ollama generative QA & conflict merger
 lmem config --reranker top1                        # 0ms instant vector rank-1 return
-lmem config --backend onnx --onnx-model bge-small  # Switch embedding model (prompts for atomic reindex)
 lmem config --download all                         # Pre-cache ONNX embedding + QA models for offline use
+
+# 10. AI Agent Platform Connection (dumps LightMem SKILL.md folder)
+lmem connect                                       # Auto-detect all installed agent platforms and deploy skill
+lmem connect antigravity                           # Deploy to Google Antigravity (~/.gemini/config/skills/lightmem/SKILL.md)
+lmem connect codex                                 # Deploy to OpenAI Codex (~/.codex/skills/lightmem/SKILL.md)
+lmem connect hermes                                # Deploy to Hermes Agent (~/.hermes/skills/productivity/lightmem/SKILL.md)
+lmem connect cursor                                # Deploy to Cursor (.cursor/rules/lightmem.mdc)
+lmem connect all                                   # Deploy to all supported agent platforms
+lmem connect --list                                # Inspect detected agent platforms on the system
 ```
 
 ---

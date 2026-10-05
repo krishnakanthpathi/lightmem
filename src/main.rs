@@ -371,6 +371,28 @@ enum Commands {
         json: bool,
     },
 
+    /// Connect and deploy LightMem agent skill to AI environments (Antigravity, Codex, Hermes, Cursor, Claude, Agents)
+    Connect {
+        /// Target agent platform: 'antigravity', 'codex', 'hermes', 'cursor', 'claude', 'agents', or 'all' (auto-detects if omitted)
+        platform: Option<String>,
+
+        /// Install skill into the current workspace directory instead of user global config
+        #[arg(short = 'w', long)]
+        workspace: bool,
+
+        /// Custom target directory path to write the lightmem skill into
+        #[arg(short = 'p', long)]
+        path: Option<PathBuf>,
+
+        /// List supported agent platforms and detection status without installing
+        #[arg(short = 'l', long)]
+        list: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate shell completion scripts (zsh, bash, fish) with interactive tab/arrow navigation
     Completions {
         /// Target shell (zsh, bash, fish, elvish, powershell)
@@ -930,6 +952,26 @@ fn main() -> Result<()> {
                 snapshot.edges.len(),
                 json,
             )?;
+        }
+
+        Commands::Connect {
+            platform,
+            workspace,
+            path,
+            list,
+            json,
+        } => {
+            if list {
+                let platforms = lightmem::ConnectService::list_platforms(workspace);
+                CliView::render_platforms_list(&platforms, workspace, json)?;
+            } else {
+                let results = lightmem::ConnectService::connect(
+                    platform.as_deref(),
+                    workspace,
+                    path.as_deref(),
+                )?;
+                CliView::render_connect(&results, json)?;
+            }
         }
 
         Commands::Completions { shell } => {
