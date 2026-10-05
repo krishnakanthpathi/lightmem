@@ -11,6 +11,7 @@ from .models import (
     RelatedMemory,
     StorageStats,
     PaginatedList,
+    MemoryInspection,
 )
 from .binary import get_binary_path
 
@@ -23,5 +24,6 @@ __all__ = [
     "RelatedMemory",
     "StorageStats",
     "PaginatedList",
+    "MemoryInspection",
     "get_binary_path",
 ]

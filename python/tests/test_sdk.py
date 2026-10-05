@@ -105,6 +105,22 @@ class TestLightMemSDK(unittest.TestCase):
         unlinked = self.client.unlink(m1.id, m2.id, relation="depends_on")
         self.assertTrue(unlinked)
 
+    def test_inspect_and_deduplicate(self):
+        m1 = self.client.remember(content="Unique microservice endpoint", title="Microservice A")
+        m2 = self.client.remember(content="Service dependency node", title="Service B")
+        self.client.link(m1.id, m2.id, relation="calls")
+
+        # Inspect
+        inspection = self.client.inspect(m1.id)
+        self.assertIsNotNone(inspection)
+        self.assertEqual(inspection.memory.id, m1.id)
+        self.assertEqual(len(inspection.links), 1)
+        self.assertEqual(inspection.links[0]["relation"], "calls")
+
+        # Deduplicate on clean vault
+        merged = self.client.deduplicate()
+        self.assertEqual(merged, 0)
+
     def test_forget_and_deduplicate(self):
         m = self.client.remember(content="Temporary staging token is secret123")
         self.assertEqual(self.client.stats().total_memories, 1)

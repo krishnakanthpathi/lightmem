@@ -11,6 +11,7 @@ from .models import (
     RelatedMemory,
     StorageStats,
     PaginatedList,
+    MemoryInspection,
 )
 
 
@@ -170,6 +171,14 @@ class LightMem:
         try:
             data = self._call("get", [memory_id])
             return Memory.from_dict(data) if data else None
+        except RuntimeError:
+            return None
+
+    # 5b. Inspect Memory & Graph Links
+    def inspect(self, memory_id: str) -> Optional[MemoryInspection]:
+        try:
+            data = self._call("inspect", [memory_id])
+            return MemoryInspection.from_dict(data) if data else None
         except RuntimeError:
             return None
 

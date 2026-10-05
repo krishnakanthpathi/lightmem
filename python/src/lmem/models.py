@@ -19,18 +19,32 @@ class Memory:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Memory:
+        mem_data = data.get("memory", data)
         return cls(
-            id=data.get("id", ""),
-            category=data.get("category", "fact"),
-            title=data.get("title", ""),
-            content=data.get("content", ""),
-            tags=data.get("tags", []),
-            confidence=float(data.get("confidence", 0.9)),
-            status=data.get("status", "active"),
-            provenance=data.get("provenance", "explicit_statement"),
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
-            expired_at=data.get("expired_at"),
+            id=mem_data.get("id", ""),
+            category=mem_data.get("category", "fact"),
+            title=mem_data.get("title", ""),
+            content=mem_data.get("content", ""),
+            tags=mem_data.get("tags", []),
+            confidence=float(mem_data.get("confidence", 0.9)),
+            status=mem_data.get("status", "active"),
+            provenance=mem_data.get("provenance", "explicit_statement"),
+            created_at=mem_data.get("created_at", ""),
+            updated_at=mem_data.get("updated_at", ""),
+            expired_at=mem_data.get("expired_at"),
+        )
+
+
+@dataclass
+class MemoryInspection:
+    memory: Memory
+    links: List[Dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> MemoryInspection:
+        return cls(
+            memory=Memory.from_dict(data.get("memory", data)),
+            links=data.get("links", []),
         )
 
 

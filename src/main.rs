@@ -135,12 +135,21 @@ enum Commands {
         json: bool,
     },
 
-    /// Retrieve a single memory by ID or title
-    Get {
+    /// Deeply inspect a memory record, its metadata, and knowledge graph links
+    #[command(alias = "get", alias = "show")]
+    Inspect {
         /// Memory ID (UUID) or title
         term: String,
 
-        /// Output memory as JSON
+        /// Output memory details as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Deduplicate identical or near-duplicate memories by merging tags, titles, and timestamps
+    #[command(alias = "dedup")]
+    Deduplicate {
+        /// Output result as JSON
         #[arg(long)]
         json: bool,
     },
@@ -609,10 +618,11 @@ fn main() -> Result<()> {
             CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
         }
 
-        Commands::Get { term, json } => {
+        Commands::Inspect { term, json } => {
             let lm = open_controller(effective_db, global)?;
             if let Some(record) = lm.get(&term)? {
-                CliView::render_remembered(&record, lm.db_path(), json)?;
+                let links = lm.get_links(&record.id).unwrap_or_default();
+                CliView::render_inspect(&record, &links, lm.db_path(), json)?;
             } else {
                 if json {
                     println!("null");
@@ -621,6 +631,12 @@ fn main() -> Result<()> {
                 }
                 std::process::exit(1);
             }
+        }
+
+        Commands::Deduplicate { json } => {
+            let lm = open_controller(effective_db, global)?;
+            let merged = lm.deduplicate()?;
+            CliView::render_dedup(merged, json)?;
         }
 
         Commands::Forget {

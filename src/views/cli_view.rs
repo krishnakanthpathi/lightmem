@@ -666,6 +666,94 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_inspect(
+        memory: &MemoryRecord,
+        links: &[crate::models::link::MemoryLink],
+        db_path: &Path,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "memory": memory,
+                "links": links,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        let short_id: String = memory.id.chars().take(8).collect();
+        let db_str = Self::format_path(db_path);
+        println!(
+            "\n{} {} {} [{}] {}",
+            Self::crimson_bold("◈"),
+            Self::white_bold(&memory.title),
+            Self::gold(&format!("({})", short_id)),
+            Self::violet_bold(memory.category.as_str()),
+            if memory.status == crate::models::MemoryStatus::Active {
+                Self::emerald_bold("● active")
+            } else {
+                Self::slate("○ expired")
+            }
+        );
+        println!("  {} {}", Self::slate("Vault:"), Self::slate(&db_str));
+        println!("\n  {}", memory.content);
+
+        let tags_str = if memory.tags.is_empty() {
+            "none".to_string()
+        } else {
+            memory.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ")
+        };
+
+        println!("\n  {} {}", Self::slate("├─ Tags:       "), Self::gold(&tags_str));
+        println!("  {} {}", Self::slate("├─ Confidence: "), Self::white_bold(&format!("{:.2}", memory.confidence)));
+        println!("  {} {}", Self::slate("├─ Provenance: "), Self::slate(&memory.provenance));
+        println!("  {} {}", Self::slate("├─ Created:    "), Self::slate(&memory.created_at.to_rfc3339()));
+        if let Some(exp) = memory.expired_at {
+            println!("  {} {}", Self::slate("╰─ Expired:    "), Self::gold(&exp.to_rfc3339()));
+        } else {
+            println!("  {} {}", Self::slate("╰─ Updated:    "), Self::slate(&memory.updated_at.to_rfc3339()));
+        }
+
+        if !links.is_empty() {
+            println!("\n  {} Knowledge Graph Links ({}):", Self::crimson_bold("◫"), links.len());
+            for link in links {
+                let target_short = if link.target_id.len() >= 8 { &link.target_id[..8] } else { &link.target_id };
+                println!(
+                    "    ├─ ──{}──▶ ({}) {}",
+                    Self::violet_bold(&link.relation),
+                    Self::gold(target_short),
+                    Self::slate(&format!("[weight: {:.1}]", link.weight))
+                );
+            }
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_dedup(merged_count: usize, json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "merged": merged_count,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        if merged_count == 0 {
+            println!(
+                "  {} No duplicate memories found. Vault is canonical.",
+                Self::emerald_bold("✓")
+            );
+        } else {
+            println!(
+                "  {} Merged {} duplicate memories into canonical cards.",
+                Self::crimson_bold("◈"),
+                Self::white_bold(&merged_count.to_string())
+            );
+        }
+        Ok(())
+    }
+
     pub fn render_clear(removed: usize, hard: bool, db_path: &Path, json: bool) -> Result<()> {
         if json {
             println!(

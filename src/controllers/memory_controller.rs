@@ -556,9 +556,9 @@ impl LightMem {
         self.storage.list_memories(category, status, as_of, limit)
     }
 
-    /// Retrieve single memory by ID
+    /// Retrieve single memory by ID or title
     pub fn get(&self, id: &str) -> Result<Option<MemoryRecord>> {
-        self.storage.get_memory(id)
+        self.storage.get_memory_by_id_or_title(id)
     }
 
     /// Forget (soft-delete or hard delete) a memory
