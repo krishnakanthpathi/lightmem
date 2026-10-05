@@ -207,12 +207,20 @@ impl OnnxQaReranker {
         let model_path = primary_dir.join("model.onnx");
         let tokenizer_path = primary_dir.join("tokenizer.json");
 
-        if !tokenizer_path.exists() {
-            eprintln!("◈ Downloading ONNX QA tokenizer ({})...", preset.slug);
+        let tokenizer_valid = tokenizer_path
+            .metadata()
+            .map(|m| m.len() > 1_000)
+            .unwrap_or(false);
+        if !tokenizer_valid {
+            println!("◈ Downloading ONNX QA tokenizer ({})...", preset.slug);
             download_file_atomic(preset.tokenizer_url, &tokenizer_path)?;
         }
-        if !model_path.exists() {
-            eprintln!("◈ Downloading ONNX QA model ({})...", preset.slug);
+        let model_valid = model_path
+            .metadata()
+            .map(|m| m.len() > 1_000_000)
+            .unwrap_or(false);
+        if !model_valid {
+            println!("◈ Downloading ONNX QA model ({})...", preset.slug);
             download_file_atomic(preset.model_url, &model_path)?;
         }
 
@@ -410,17 +418,18 @@ impl Reranker for OnnxQaReranker {
             return Ok(no_evidence("none"));
         }
 
+        let engine = self.get_or_load_engine()?;
+
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
-            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.47)
+            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.35)
             .take(10)
             .collect();
 
         if gated.is_empty() {
-            return Ok(no_evidence("none"));
+            return Ok(no_evidence(&engine.provider_label));
         }
 
-        let engine = self.get_or_load_engine()?;
         let q_tokens = content_tokens(question);
 
         let mut best_hit: Option<(String, f32, &MemoryRecord)> = None;
@@ -467,7 +476,7 @@ impl Reranker for OnnxQaReranker {
             });
         }
 
-        Ok(no_evidence("none"))
+        Ok(no_evidence(&engine.provider_label))
     }
 
     fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
@@ -597,18 +606,18 @@ impl Reranker for OllamaReranker {
     }
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
+        let model_name = self.resolve_model();
+        let provider_label = format!("ollama:{}", model_name);
+
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
-            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.47)
+            .filter(|c| c.bm25_rank.is_some() || c.score >= 0.35)
             .take(5)
             .collect();
 
         if gated.is_empty() {
-            return Ok(no_evidence("none"));
+            return Ok(no_evidence(&provider_label));
         }
-
-        let model_name = self.resolve_model();
-        let provider_label = format!("ollama:{}", model_name);
 
         let mut memories_block = String::new();
         for (idx, c) in gated.iter().enumerate() {
@@ -671,7 +680,7 @@ impl Reranker for OllamaReranker {
             });
         }
 
-        Ok(no_evidence("none"))
+        Ok(no_evidence(&provider_label))
     }
 
     fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
@@ -942,7 +951,7 @@ fn is_valid_qa_span(
         && span.len() >= 6
         && span.chars().any(|c| c.is_ascii_alphabetic())
         && span.chars().any(|c| c.is_ascii_digit());
-    let base_min = if has_token_type_ids { 6.5 } else { 3.5 };
+    let base_min = if has_token_type_ids { 4.5 } else { 3.0 };
     let min_margin = if is_alnum_code { 1.5 } else { base_min };
     if margin < min_margin {
         return false;

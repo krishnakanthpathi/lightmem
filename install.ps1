@@ -60,12 +60,12 @@ if ($UserPath -notlike "*$InstallDir*") {
 }
 
 Write-Host "  ◈ Pre-caching default ONNX embedding (bge-small) and Extractive QA (minilm-squad2) models..." -ForegroundColor Cyan
-try {
-    & $ExePath config --download bge-small
-    & $ExePath config --download minilm-squad2
-} catch {
-    Write-Host "  ! Model pre-cache skipped (models will download on first query)." -ForegroundColor Yellow
-}
+$PrevErrPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $ExePath config --download bge-small
+& $ExePath config --download minilm-squad2
+& $ExePath config --backend onnx --onnx-model bge-small --reranker minilm-squad2 --yes
+$ErrorActionPreference = $PrevErrPref
 
 Write-Host ""
 Write-Host "  ✦ LightMem ($ReleaseTag) is ready! Run: lmem" -ForegroundColor Green
