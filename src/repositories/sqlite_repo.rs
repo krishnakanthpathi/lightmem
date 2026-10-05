@@ -1,4 +1,7 @@
-use crate::models::{MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, StorageStats};
+use crate::models::{
+    extract_wikilinks, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus,
+    MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
+};
 use crate::services::embeddings::{validate_vector, EmbeddingProvider};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -59,10 +62,10 @@ impl Storage {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 2,
+            version <= 3,
             "Database schema is newer than this version of LightMem"
         );
-        if version == 2 {
+        if version == 3 {
             let needs_tag_or_key_repair: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM memories WHERE tags NOT LIKE '[%' OR (dedup_key = '' AND TRIM(content) != ''))",
@@ -76,88 +79,120 @@ impl Storage {
             }
             return Ok(());
         }
+
+        if version < 2 {
+            tx.execute_batch(
+                r#"
+                -- Core memories table
+                CREATE TABLE IF NOT EXISTS memories (
+                    id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    status TEXT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expired_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+                CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+                CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+
+                -- FTS5 full-text index
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                    id UNINDEXED,
+                    title,
+                    content,
+                    tags,
+                    tokenize='porter unicode61'
+                );
+
+                -- FTS synchronization triggers
+                CREATE TRIGGER IF NOT EXISTS trg_memories_ai AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(id, title, content, tags) 
+                    VALUES (new.id, new.title, new.content, new.tags);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_memories_ad AFTER DELETE ON memories BEGIN
+                    DELETE FROM memories_fts WHERE id = old.id;
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_memories_au AFTER UPDATE ON memories BEGIN
+                    DELETE FROM memories_fts WHERE id = old.id;
+                    INSERT INTO memories_fts(id, title, content, tags) 
+                    VALUES (new.id, new.title, new.content, new.tags);
+                END;
+
+                -- Vector embeddings table
+                CREATE TABLE IF NOT EXISTS memory_vectors (
+                    id TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    dims INTEGER NOT NULL,
+                    FOREIGN KEY(id) REFERENCES memories(id) ON DELETE CASCADE
+                );
+                "#,
+            )?;
+
+            // Upgrade legacy databases atomically and repair duplicate/stale FTS rows.
+            tx.execute_batch("DELETE FROM memories_fts;
+                INSERT INTO memories_fts(id, title, content, tags) SELECT id, title, content, tags FROM memories;
+                CREATE TABLE IF NOT EXISTS embedding_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL, dims INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS storage_revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL);
+                INSERT OR IGNORE INTO storage_revision VALUES (1, 0);
+                CREATE TRIGGER IF NOT EXISTS revision_ai AFTER INSERT ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;
+                CREATE TRIGGER IF NOT EXISTS revision_au AFTER UPDATE ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;
+                CREATE TRIGGER IF NOT EXISTS revision_ad AFTER DELETE ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;")?;
+            let has_key = {
+                let mut stmt = tx.prepare("PRAGMA table_info(memories)")?;
+                let names = stmt
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                names.iter().any(|name| name == "dedup_key")
+            };
+            if !has_key {
+                tx.execute(
+                    "ALTER TABLE memories ADD COLUMN dedup_key TEXT NOT NULL DEFAULT ''",
+                    [],
+                )?;
+            }
+            tx.execute("CREATE INDEX IF NOT EXISTS idx_memories_dedup ON memories(status, category, dedup_key)", [])?;
+            // Store tags as JSON so commas inside a tag survive a round trip.
+            repair_legacy_tags_and_dedup_keys(&tx)?;
+        } else {
+            let needs_tag_or_key_repair: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE tags NOT LIKE '[%' OR (dedup_key = '' AND TRIM(content) != ''))",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if needs_tag_or_key_repair {
+                repair_legacy_tags_and_dedup_keys(&tx)?;
+            }
+        }
+
+        // Schema v3: memory_links table
         tx.execute_batch(
             r#"
-            -- Core memories table
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                category TEXT NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                tags TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                status TEXT NOT NULL,
-                provenance TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS memory_links (
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                relation TEXT NOT NULL DEFAULT 'relates_to',
+                weight REAL NOT NULL DEFAULT 1.0,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                expired_at TEXT
+                PRIMARY KEY (source_id, target_id, relation),
+                FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE
             );
-
-            CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
-            CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
-            CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
-
-            -- FTS5 full-text index
-            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                id UNINDEXED,
-                title,
-                content,
-                tags,
-                tokenize='porter unicode61'
-            );
-
-            -- FTS synchronization triggers
-            CREATE TRIGGER IF NOT EXISTS trg_memories_ai AFTER INSERT ON memories BEGIN
-                INSERT INTO memories_fts(id, title, content, tags) 
-                VALUES (new.id, new.title, new.content, new.tags);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_memories_ad AFTER DELETE ON memories BEGIN
-                DELETE FROM memories_fts WHERE id = old.id;
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_memories_au AFTER UPDATE ON memories BEGIN
-                DELETE FROM memories_fts WHERE id = old.id;
-                INSERT INTO memories_fts(id, title, content, tags) 
-                VALUES (new.id, new.title, new.content, new.tags);
-            END;
-
-            -- Vector embeddings table
-            CREATE TABLE IF NOT EXISTS memory_vectors (
-                id TEXT PRIMARY KEY,
-                embedding BLOB NOT NULL,
-                dims INTEGER NOT NULL,
-                FOREIGN KEY(id) REFERENCES memories(id) ON DELETE CASCADE
-            );
+            CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id);
+            CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
             "#,
         )?;
-
-        // Upgrade legacy databases atomically and repair duplicate/stale FTS rows.
-        tx.execute_batch("DELETE FROM memories_fts;
-            INSERT INTO memories_fts(id, title, content, tags) SELECT id, title, content, tags FROM memories;
-            CREATE TABLE IF NOT EXISTS embedding_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL, dims INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS storage_revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL);
-            INSERT OR IGNORE INTO storage_revision VALUES (1, 0);
-            CREATE TRIGGER IF NOT EXISTS revision_ai AFTER INSERT ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;
-            CREATE TRIGGER IF NOT EXISTS revision_au AFTER UPDATE ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;
-            CREATE TRIGGER IF NOT EXISTS revision_ad AFTER DELETE ON memories BEGIN UPDATE storage_revision SET revision=revision+1; END;")?;
-        let has_key = {
-            let mut stmt = tx.prepare("PRAGMA table_info(memories)")?;
-            let names = stmt
-                .query_map([], |r| r.get::<_, String>(1))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            names.iter().any(|name| name == "dedup_key")
-        };
-        if !has_key {
-            tx.execute(
-                "ALTER TABLE memories ADD COLUMN dedup_key TEXT NOT NULL DEFAULT ''",
-                [],
-            )?;
-        }
-        tx.execute("CREATE INDEX IF NOT EXISTS idx_memories_dedup ON memories(status, category, dedup_key)", [])?;
-        // Store tags as JSON so commas inside a tag survive a round trip.
-        repair_legacy_tags_and_dedup_keys(&tx)?;
-        tx.pragma_update(None, "user_version", 2)?;
+        tx.pragma_update(None, "user_version", 3)?;
         tx.commit()?;
         Ok(())
     }
@@ -384,6 +419,372 @@ impl Storage {
             }
         }
         Ok(records)
+    }
+
+    pub fn get_memory_by_id_or_title(&self, term: &str) -> Result<Option<MemoryRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
+        let Some(id) = resolve_id_or_title(&conn, term)? else {
+            return Ok(None);
+        };
+        Ok(conn
+            .query_row(
+                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
+                [id],
+                row_to_memory,
+            )
+            .optional()?)
+    }
+
+    pub fn add_link(
+        &self,
+        source_term: &str,
+        target_term: &str,
+        relation: Option<&str>,
+        weight: Option<f32>,
+    ) -> Result<(String, String)> {
+        let conn = self.conn.lock().unwrap();
+        let src = resolve_id_or_title(&conn, source_term)?
+            .with_context(|| format!("Source memory '{}' not found", source_term))?;
+        let dst = resolve_id_or_title(&conn, target_term)?
+            .with_context(|| format!("Target memory '{}' not found", target_term))?;
+        anyhow::ensure!(src != dst, "Cannot link a memory to itself");
+
+        let rel = relation
+            .map(|r| r.trim())
+            .filter(|r| !r.is_empty())
+            .unwrap_or("relates_to");
+        let w = weight.unwrap_or(1.0).clamp(0.01, 10.0);
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, relation, weight, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(source_id, target_id, relation) DO UPDATE SET weight=?4",
+            params![src, dst, rel, w, now],
+        )?;
+
+        Ok((src, dst))
+    }
+
+    pub fn remove_link(
+        &self,
+        source_term: &str,
+        target_term: &str,
+        relation: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let src = resolve_id_or_title(&conn, source_term)?
+            .with_context(|| format!("Source memory '{}' not found", source_term))?;
+        let dst = resolve_id_or_title(&conn, target_term)?
+            .with_context(|| format!("Target memory '{}' not found", target_term))?;
+
+        let rows = if let Some(rel) = relation.map(|r| r.trim()).filter(|r| !r.is_empty()) {
+            conn.execute(
+                "DELETE FROM memory_links WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+                params![src, dst, rel],
+            )?
+        } else {
+            conn.execute(
+                "DELETE FROM memory_links WHERE (source_id = ?1 AND target_id = ?2) OR (source_id = ?2 AND target_id = ?1)",
+                params![src, dst],
+            )?
+        };
+
+        Ok(rows > 0)
+    }
+
+    pub fn get_links_for_memory(&self, memory_term: &str) -> Result<Vec<MemoryLink>> {
+        let conn = self.conn.lock().unwrap();
+        let id = resolve_id_or_title(&conn, memory_term)?
+            .with_context(|| format!("Memory '{}' not found", memory_term))?;
+        let mut stmt = conn.prepare(
+            "SELECT source_id, target_id, relation, weight, created_at
+             FROM memory_links
+             WHERE source_id = ?1 OR target_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([id], |r| {
+            let created_at_str: String = r.get(4)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            Ok(MemoryLink {
+                source_id: r.get(0)?,
+                target_id: r.get(1)?,
+                relation: r.get(2)?,
+                weight: r.get::<_, f64>(3)? as f32,
+                created_at,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn traverse_multi_hop(
+        &self,
+        start_term: &str,
+        max_hops: usize,
+    ) -> Result<Vec<RelatedMemory>> {
+        let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
+        let Some(start_id) = resolve_id_or_title(&conn, start_term)? else {
+            return Ok(Vec::new());
+        };
+
+        let max_hops = max_hops.clamp(1, 10);
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(start_id.clone());
+
+        // Queue: (node_id, current_hop, relation_path, cumulative_score)
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((start_id, 0usize, Vec::<String>::new(), 1.0f32));
+
+        let mut results = Vec::new();
+
+        while let Some((curr_id, curr_hop, path, score)) = queue.pop_front() {
+            if curr_hop >= max_hops {
+                continue;
+            }
+
+            let mut stmt = conn.prepare(
+                r#"
+                SELECT m.id, l.relation, l.weight
+                FROM memory_links l
+                JOIN memories m ON l.target_id = m.id
+                WHERE l.source_id = ?1 AND m.status = 'active'
+                UNION ALL
+                SELECT m.id, l.relation || ' (incoming)' as relation, l.weight
+                FROM memory_links l
+                JOIN memories m ON l.source_id = m.id
+                WHERE l.target_id = ?1 AND m.status = 'active'
+                "#,
+            )?;
+
+            let neighbors = stmt
+                .query_map([&curr_id], |r| {
+                    let neighbor_id: String = r.get(0)?;
+                    let relation: String = r.get(1)?;
+                    let weight: f64 = r.get(2)?;
+                    Ok((neighbor_id, relation, weight as f32))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            for (neighbor_id, relation, weight) in neighbors {
+                if visited.contains(&neighbor_id) {
+                    continue;
+                }
+                visited.insert(neighbor_id.clone());
+
+                let next_hop = curr_hop + 1;
+                let mut next_path = path.clone();
+                next_path.push(relation);
+                let next_score = (score * weight) / (next_hop as f32);
+
+                if let Some(mem) = conn
+                    .query_row(
+                        "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
+                        [&neighbor_id],
+                        row_to_memory,
+                    )
+                    .optional()?
+                {
+                    results.push(RelatedMemory {
+                        memory: mem,
+                        distance: next_hop,
+                        relation_path: next_path.clone(),
+                        score: next_score,
+                    });
+                }
+
+                if next_hop < max_hops {
+                    queue.push_back((neighbor_id, next_hop, next_path, next_score));
+                }
+            }
+        }
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(results)
+    }
+
+    pub fn get_graph_snapshot(
+        &self,
+        focus_term: Option<&str>,
+        max_hops: Option<usize>,
+    ) -> Result<GraphSnapshot> {
+        let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
+
+        let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(focus) = focus_term {
+            if let Some(start_id) = resolve_id_or_title(&conn, focus)? {
+                let hops = max_hops.unwrap_or(2).clamp(1, 10);
+                let mut set = std::collections::HashSet::new();
+                set.insert(start_id.clone());
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back((start_id, 0usize));
+                while let Some((curr, h)) = queue.pop_front() {
+                    if h >= hops {
+                        continue;
+                    }
+                    let mut stmt = conn.prepare(
+                        r#"
+                        SELECT target_id FROM memory_links WHERE source_id = ?1
+                        UNION
+                        SELECT source_id FROM memory_links WHERE target_id = ?1
+                        "#,
+                    )?;
+                    let nbrs = stmt
+                        .query_map([&curr], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    for nbr in nbrs {
+                        if set.insert(nbr.clone()) && h + 1 < hops {
+                            queue.push_back((nbr, h + 1));
+                        }
+                    }
+                }
+                Some(set)
+            } else {
+                return Ok(GraphSnapshot {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                });
+            }
+        } else {
+            None
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT id, title, category, tags, confidence, content FROM memories WHERE status = 'active'",
+        )?;
+        let mut nodes_map = std::collections::HashMap::new();
+        let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
+            let title: String = r.get(1)?;
+            let category: String = r.get(2)?;
+            let tags_str: String = r.get(3)?;
+            let confidence: f64 = r.get(4)?;
+            let content: String = r.get(5)?;
+            let tags = parse_tags_column(&tags_str);
+            let snippet = if content.chars().count() > 140 {
+                format!("{}...", content.chars().take(140).collect::<String>())
+            } else {
+                content.clone()
+            };
+            Ok((
+                id.clone(),
+                GraphNode {
+                    id,
+                    label: if title.trim().is_empty() {
+                        content.chars().take(30).collect()
+                    } else {
+                        title
+                    },
+                    category,
+                    tags,
+                    confidence: confidence as f32,
+                    degree: 0,
+                    snippet,
+                },
+            ))
+        })?;
+
+        for r in rows {
+            let (id, node) = r?;
+            if let Some(ref allowed) = allowed_ids {
+                if !allowed.contains(&id) {
+                    continue;
+                }
+            }
+            nodes_map.insert(id, node);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT source_id, target_id, relation, weight FROM memory_links",
+        )?;
+        let mut edges = Vec::new();
+        let edge_rows = stmt.query_map([], |r| {
+            Ok(GraphEdge {
+                source: r.get(0)?,
+                target: r.get(1)?,
+                relation: r.get(2)?,
+                weight: r.get::<_, f64>(3)? as f32,
+            })
+        })?;
+
+        for edge_res in edge_rows {
+            let edge = edge_res?;
+            if nodes_map.contains_key(&edge.source) && nodes_map.contains_key(&edge.target) {
+                if let Some(src_node) = nodes_map.get_mut(&edge.source) {
+                    src_node.degree += 1;
+                }
+                if let Some(dst_node) = nodes_map.get_mut(&edge.target) {
+                    dst_node.degree += 1;
+                }
+                edges.push(edge);
+            }
+        }
+
+        let nodes = nodes_map.into_values().collect();
+        Ok(GraphSnapshot { nodes, edges })
+    }
+
+    pub fn auto_link_memory(&self, memory_id: &str, text: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let Some(source_id) = resolve_id(&conn, memory_id)? else {
+            return Ok(0);
+        };
+
+        let mut linked = 0;
+        let wikilinks = extract_wikilinks(text);
+        let now = Utc::now().to_rfc3339();
+
+        for target in wikilinks {
+            if let Some(target_id) = resolve_id_or_title(&conn, &target)? {
+                if target_id != source_id {
+                    let rows = conn.execute(
+                        "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+                         VALUES (?1, ?2, 'references', 1.0, ?3)",
+                        params![source_id, target_id, now],
+                    )?;
+                    linked += rows;
+                }
+            }
+        }
+
+        // Also check if any existing active memories have wikilinks pointing to this memory's title or id
+        if let Some(title) = conn
+            .query_row(
+                "SELECT title FROM memories WHERE id = ?1",
+                [&source_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let clean_title = title.trim();
+            if !clean_title.is_empty() {
+                let pattern = format!("%[[{}]]%", clean_title);
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memories WHERE content LIKE ?1 AND status = 'active' AND id != ?2",
+                )?;
+                let backward_ids = stmt
+                    .query_map(params![pattern, source_id], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                for back_id in backward_ids {
+                    let rows = conn.execute(
+                        "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+                         VALUES (?1, ?2, 'references', 1.0, ?3)",
+                        params![back_id, source_id, now],
+                    )?;
+                    linked += rows;
+                }
+            }
+        }
+
+        Ok(linked)
     }
 
     pub fn forget_memory(&self, id: &str, hard_delete: bool) -> Result<bool> {
@@ -943,6 +1344,42 @@ fn resolve_id(conn: &Connection, id: &str) -> Result<Option<String>> {
     Ok(ids.into_iter().next())
 }
 
+fn resolve_id_or_title(conn: &Connection, term: &str) -> Result<Option<String>> {
+    let clean = term.trim();
+    if clean.is_empty() {
+        return Ok(None);
+    }
+    // 1. Try resolve_id (exact UUID or unique ID prefix)
+    if let Ok(Some(id)) = resolve_id(conn, clean) {
+        return Ok(Some(id));
+    }
+    // 2. Exact title match (case-insensitive)
+    let exact_title: Option<String> = conn
+        .query_row(
+            "SELECT id FROM memories WHERE LOWER(title) = LOWER(?1) AND status = 'active' LIMIT 1",
+            [clean],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if exact_title.is_some() {
+        return Ok(exact_title);
+    }
+    // 3. Title substring match if term is at least 3 chars
+    if clean.len() >= 3 {
+        let pattern = format!("%{}%", clean);
+        let mut stmt = conn.prepare(
+            "SELECT id FROM memories WHERE LOWER(title) LIKE LOWER(?1) AND status = 'active' LIMIT 2",
+        )?;
+        let ids = stmt
+            .query_map([&pattern], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if ids.len() == 1 {
+            return Ok(ids.into_iter().next());
+        }
+    }
+    Ok(None)
+}
+
 fn check_identity(conn: &Connection, identity: &str) -> Result<()> {
     let state: Option<String> = conn
         .query_row("SELECT identity FROM embedding_state", [], |r| r.get(0))
@@ -1198,4 +1635,92 @@ mod fts_tests {
             ]
         );
     }
+
+    #[test]
+    fn test_memory_linking_and_multihop() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_links.db");
+        let storage = Storage::open(&db_path).unwrap();
+
+        // 1. Create memories: A -> B -> C
+        let mem_a = MemoryRecord::new(
+            MemoryType::Decision,
+            "Service Gateway".to_string(),
+            "API Gateway routes to [[PostgreSQL DB]]".to_string(),
+            vec!["infra".to_string()],
+            0.9,
+            None,
+        );
+        let mem_b = MemoryRecord::new(
+            MemoryType::Artifact,
+            "PostgreSQL DB".to_string(),
+            "Postgres primary runs on port 5432 and stores data on [[NVMe Volume]]".to_string(),
+            vec!["db".to_string()],
+            0.95,
+            None,
+        );
+        let mem_c = MemoryRecord::new(
+            MemoryType::Fact,
+            "NVMe Volume".to_string(),
+            "NVMe mount located at /mnt/fast-storage".to_string(),
+            vec!["storage".to_string()],
+            0.85,
+            None,
+        );
+
+        storage.insert_memory(&mem_a, None).unwrap();
+        storage.insert_memory(&mem_b, None).unwrap();
+        storage.insert_memory(&mem_c, None).unwrap();
+
+        // Test auto_link_memory via wikilinks
+        let linked_a = storage.auto_link_memory(&mem_a.id, &mem_a.content).unwrap();
+        assert_eq!(linked_a, 1);
+        let linked_b = storage.auto_link_memory(&mem_b.id, &mem_b.content).unwrap();
+        assert_eq!(linked_b, 1);
+
+        // Verify direct links for mem_a
+        let links_a = storage.get_links_for_memory(&mem_a.id).unwrap();
+        assert_eq!(links_a.len(), 1);
+        assert_eq!(links_a[0].source_id, mem_a.id);
+        assert_eq!(links_a[0].target_id, mem_b.id);
+        assert_eq!(links_a[0].relation, "references");
+
+        // Verify multi-hop traversal from A with 2 hops
+        let related_2hops = storage.traverse_multi_hop(&mem_a.id, 2).unwrap();
+        assert_eq!(related_2hops.len(), 2);
+        // First hop is B (PostgreSQL DB), second hop is C (NVMe Volume)
+        assert_eq!(related_2hops[0].memory.id, mem_b.id);
+        assert_eq!(related_2hops[0].distance, 1);
+        assert_eq!(related_2hops[1].memory.id, mem_c.id);
+        assert_eq!(related_2hops[1].distance, 2);
+
+        // 1 hop only finds B
+        let related_1hop = storage.traverse_multi_hop(&mem_a.id, 1).unwrap();
+        assert_eq!(related_1hop.len(), 1);
+        assert_eq!(related_1hop[0].memory.id, mem_b.id);
+
+        // Test graph snapshot
+        let snapshot = storage.get_graph_snapshot(None, None).unwrap();
+        assert_eq!(snapshot.nodes.len(), 3);
+        assert_eq!(snapshot.edges.len(), 2);
+
+        // Test manual link and unlink
+        storage
+            .add_link(&mem_a.id, &mem_c.id, Some("depends_on"), Some(2.0))
+            .unwrap();
+        let links_after_manual = storage.get_links_for_memory(&mem_a.id).unwrap();
+        assert_eq!(links_after_manual.len(), 2);
+
+        storage
+            .remove_link(&mem_a.id, &mem_c.id, Some("depends_on"))
+            .unwrap();
+        let links_after_remove = storage.get_links_for_memory(&mem_a.id).unwrap();
+        assert_eq!(links_after_remove.len(), 1);
+
+        // Test foreign key cascading on hard delete
+        storage.forget_memory(&mem_b.id, true).unwrap();
+        let links_after_cascade = storage.get_links_for_memory(&mem_a.id).unwrap();
+        assert_eq!(links_after_cascade.len(), 0);
+    }
 }
+

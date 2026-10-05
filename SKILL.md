@@ -26,19 +26,29 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
 # 2. Hybrid Search (SQLite FTS5 BM25 + Vector Cosine RRF + Acronym Boost)
 lmem recall "postgres port" -l 5
 lmem recall "postgres port" -t fact --min-similarity 0.5 --json
+lmem recall "service gateway" --multi-hop          # Expands recall hits with 1-hop graph neighbors
 
-# 3. Extractive QA / LLM Grounded Answer (extracts the exact span from top candidates)
+# 3. Knowledge Graph, Linking & Multi-Hop Traversal
+lmem remember "API Gateway routes to [[PostgreSQL DB]]" # Auto-links via [[wikilinks]]
+lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0  # Explicit directional relation
+lmem unlink <SRC_ID> <DST_ID>                       # Remove link
+lmem related <MEMORY_ID> --hops 2                  # Multi-hop graph traversal with hop-decay scoring
+lmem graph --browser                               # Interactive Obsidian HTML Canvas graph in default browser
+lmem graph --terminal                              # ASCII/Unicode network tree in terminal
+lmem graph --focus <MEMORY_ID> --hops 2            # Neighborhood subgraph view
+
+# 4. Extractive QA / LLM Grounded Answer (extracts the exact span from top candidates)
 lmem answer "what port does postgresql use"
 lmem answer "what is my pan card no" --json
 lmem answer "who is kk" -r ollama:qwen2.5:3b
 
-# 4. Temporal & Single-Day Filtering (--as-of vs --date)
+# 5. Temporal & Single-Day Filtering (--as-of vs --date)
 lmem recall "deployment" --as-of 2026-10-01        # Cumulative state at that point in time
 lmem recall "deployment" --date 2026-10-05         # Memories created/updated on that exact UTC day
 lmem list --date 2026-10-05 -l 20                  # Chronological list for a single day
 lmem answer "what changed today" --date 2026-10-05
 
-# 5. Paginated Chronological Listing
+# 6. Paginated Chronological Listing
 lmem list --page 1 -l 20 -t decision --status active --json
 
 # 6. Nearest-Neighbor Conflict & Duplicate Resolution
@@ -110,17 +120,45 @@ If `--type` (`-t`) is omitted on `lmem remember`, LightMem automatically infers 
 
 ---
 
-## 4. Choosing Between `recall`, `answer`, and `conflicts`
+## 4. Knowledge Graph, Wikilinks & Interactive Graph View
+
+LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ indexing, foreign key cascading, and zero external dependencies:
+
+1. **Obsidian-Grade Wikilinks**:
+   - Wrap any memory title or ID in `[[...]]` inside content (e.g. `[[PostgreSQL DB]]` or `[[db-primary|Main Database]]`).
+   - LightMem automatically parses and binds bidirectional links on `lmem remember`.
+2. **Explicit Directional Linking**:
+   - `lmem link <src> <dst> -r <relation> [-w <weight>]`
+   - Common relations: `relates_to`, `depends_on`, `references`, `implements`, `causes`, `bypasses`.
+   - Weights scale hop-decay scores ($1.0 / \text{hop} \times \text{weight}$).
+   - Remove connections with `lmem unlink <src> <dst> [-r <relation>]`.
+3. **Multi-Hop Traversal (`lmem related`)**:
+   - Breadth-first graph search up to $N$ hops (`lmem related <id> --hops 2`).
+   - Cycle-safe with hop-distance attenuation scoring ($1.0 / \text{hop}$).
+   - `lmem recall "<query>" --multi-hop` expands semantic recall hits with 1-hop connected neighbors.
+4. **Interactive Force-Directed Visualizer (`lmem graph`)**:
+   - Standalone single-file HTML/Canvas application rendered with Obsidian dark glass aesthetic (`#0b0c10`).
+   - Real-time physics simulation (Coulomb repulsion, Hooke spring attraction, center gravity).
+   - Color-coded by the 14 memory categories.
+   - Hover glow, zoom/pan, search filter, category toggles, and click-to-open memory detail drawer.
+   - CLI flags: `lmem graph --browser` (auto-opens browser), `lmem graph --terminal` (Unicode tree), `lmem graph --focus <id> --hops 2` (subgraph neighborhood), `lmem graph --json`.
+
+---
+
+## 5. Choosing Between `recall`, `answer`, `related`, and `conflicts`
 
 | Command | Output | When to Use |
 | :--- | :--- | :--- |
 | `lmem recall "<query>"` | Top-$K$ full memory cards with RRF score (`BM25 + Vector + Acronym Boost`), ID, category, and tags | When gathering broad context before planning, coding, or debugging |
+| `lmem recall "<query>" --multi-hop` | Recall results expanded with 1-hop connected graph neighbors | When context requires knowing dependencies and adjacent architectural relationships |
+| `lmem related "<id>" --hops 2` | Breadth-first connected memories along relation paths with hop-decay scores | When investigating causal chains, dependencies, or downstream impacts of a specific memory |
+| `lmem graph --browser` | Interactive Obsidian-style HTML force-directed canvas graph | When exploring visual topology, clustering, or presenting knowledge architecture |
 | `lmem answer "<question>"` | Exact extracted span (via ONNX `minilm-squad2` / `tinyroberta-squad2` or `ollama:<model>`), confidence `%`, and source memory ID | When answering a specific factual question (`"what port..."`, `"what is my..."`, `"who is..."`) |
 | `lmem conflicts` | Pairs of semantically similar + lexically overlapping memories with `[OLDER · UTC]` and `[NEWER · UTC]` timestamps | When cleaning up duplicate memories or merging updated facts into a single canonical record |
 
 ---
 
-## 5. Best Practices for AI Agents
+## 6. Best Practices for AI Agents
 
 1. **Write Atomic, Declarative Facts**:
    - **Bad**: `"User asked me to fix the Windows installer and I found out stderr caused an error"`

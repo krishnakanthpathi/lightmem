@@ -1,5 +1,6 @@
 use crate::models::{
-    LightMemConfig, MemoryConflict, MemoryRecord, PaginatedMemories, ScoredMemory, StorageStats,
+    GraphSnapshot, LightMemConfig, MemoryConflict, MemoryRecord, PaginatedMemories, RelatedMemory,
+    ScoredMemory, StorageStats,
 };
 use crate::services::AnswerResult;
 use anyhow::Result;
@@ -208,7 +209,7 @@ impl CliView {
                 Self::crimson_bold("≡"),
                 "list",
                 Self::crimson_bold("◫"),
-                "stats",
+                "graph",
                 Self::crimson_bold("⇄"),
                 "import / export"
             ),
@@ -237,7 +238,7 @@ impl CliView {
             (
                 "│",
                 "lmem remember \"<fact>\" -t decision",
-                "Store a categorized memory",
+                "Store a categorized memory (auto-links [[...]])",
             ),
             (
                 "│",
@@ -248,6 +249,16 @@ impl CliView {
                 "│",
                 "lmem answer \"<question>\"",
                 "Extractive QA via ONNX or Ollama",
+            ),
+            (
+                "│",
+                "lmem graph --browser",
+                "Interactive Obsidian-style force graph",
+            ),
+            (
+                "│",
+                "lmem related \"<id>\" --hops 2",
+                "Multi-hop knowledge graph traversal",
             ),
             (
                 "│",
@@ -843,6 +854,205 @@ impl CliView {
                 );
             }
         }
+        Ok(())
+    }
+
+    pub fn render_link(
+        src: &str,
+        dst: &str,
+        relation: &str,
+        weight: f32,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "source": src,
+                "target": dst,
+                "relation": relation,
+                "weight": weight,
+                "status": "linked"
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        let short_src = if src.len() >= 8 { &src[..8] } else { src };
+        let short_dst = if dst.len() >= 8 { &dst[..8] } else { dst };
+
+        println!(
+            "{} {} ({}) ──{}──▶ ({}) {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold("Linked"),
+            Self::gold(short_src),
+            Self::violet_bold(relation),
+            Self::gold(short_dst),
+            Self::slate(&format!("[weight: {:.1}]", weight))
+        );
+        Ok(())
+    }
+
+    pub fn render_unlink(
+        src: &str,
+        dst: &str,
+        relation: Option<&str>,
+        removed: bool,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "source": src,
+                "target": dst,
+                "relation": relation,
+                "removed": removed
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        let short_src = if src.len() >= 8 { &src[..8] } else { src };
+        let short_dst = if dst.len() >= 8 { &dst[..8] } else { dst };
+
+        if removed {
+            println!(
+                "{} {} connection between ({}) and ({})",
+                Self::crimson_bold("◈"),
+                Self::rose("Removed"),
+                Self::gold(short_src),
+                Self::gold(short_dst)
+            );
+        } else {
+            println!(
+                "{} No matching link found between ({}) and ({})",
+                Self::crimson_bold("◈"),
+                Self::gold(short_src),
+                Self::gold(short_dst)
+            );
+        }
+        Ok(())
+    }
+
+    pub fn render_related(
+        start_term: &str,
+        results: &[RelatedMemory],
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(results)?);
+            return Ok(());
+        }
+
+        println!(
+            "\n  {} {} for '{}'",
+            Self::crimson_bold("❖"),
+            Self::white_bold("MULTI-HOP RELATED MEMORIES"),
+            Self::gold(start_term)
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
+        );
+
+        if results.is_empty() {
+            println!(
+                "  {}",
+                Self::slate("No connected memories found within specified hops.")
+            );
+            println!();
+            return Ok(());
+        }
+
+        println!(
+            "  {} {} connected memories found\n",
+            Self::crimson_bold("◈"),
+            results.len()
+        );
+
+        for r in results {
+            let short_id: String = r.memory.id.chars().take(8).collect();
+            let path_str = r.relation_path.join(" ──▶ ");
+            let snippet = if r.memory.content.chars().count() > 100 {
+                format!("{}...", r.memory.content.chars().take(100).collect::<String>())
+            } else {
+                r.memory.content.clone()
+            };
+
+            println!(
+                "  {} [{}] {} [{}] {} {}",
+                Self::crimson_bold("◈"),
+                Self::gold(&format!("Hop {}", r.distance)),
+                Self::violet_bold(r.memory.category.as_str()),
+                Self::white_bold(&r.memory.title),
+                Self::gold(&format!("({})", short_id)),
+                Self::slate(&format!("[score: {:.2}]", r.score))
+            );
+            println!(
+                "    {} Path: {}",
+                Self::slate("├─"),
+                Self::violet_bold(&path_str)
+            );
+            println!(
+                "    {} {}\n",
+                Self::slate("╰─"),
+                Self::slate(&snippet)
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn render_graph(
+        snapshot: &GraphSnapshot,
+        terminal: bool,
+        output_path: Option<&Path>,
+        browser: bool,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(snapshot)?);
+            return Ok(());
+        }
+
+        if terminal {
+            print!("{}", crate::services::render_terminal(snapshot));
+            return Ok(());
+        }
+
+        let saved_path = crate::services::export_and_open_html(snapshot, output_path)?;
+        println!(
+            "\n  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("INTERACTIVE KNOWLEDGE GRAPH GENERATED")
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
+        );
+        println!(
+            "  {} Visualized: {} memories · {} connections",
+            Self::crimson_bold("◈"),
+            Self::white_bold(&snapshot.nodes.len().to_string()),
+            Self::white_bold(&snapshot.edges.len().to_string())
+        );
+        println!(
+            "  {} HTML Canvas: {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold(&saved_path.display().to_string())
+        );
+        if browser {
+            println!(
+                "  {} {}",
+                Self::crimson_bold("✦"),
+                Self::gold("Opened interactive graph view in default browser.")
+            );
+        } else {
+            println!(
+                "  {} Run {} to automatically open in your default browser.",
+                Self::slate("Tip:"),
+                Self::gold("lmem graph --browser")
+            );
+        }
+        println!();
+
         Ok(())
     }
 }

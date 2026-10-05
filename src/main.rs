@@ -91,6 +91,10 @@ enum Commands {
         #[arg(long)]
         precision: bool,
 
+        /// Expand recall hits with their 1-hop connected neighbors in the knowledge graph
+        #[arg(long)]
+        multi_hop: bool,
+
         /// Output results as JSON for agent consumption
         #[arg(long)]
         json: bool,
@@ -288,6 +292,85 @@ enum Commands {
         json: bool,
     },
 
+    /// Create a directional relationship link between two memories
+    Link {
+        /// Source memory ID, title, or prefix
+        source: String,
+
+        /// Target memory ID, title, or prefix
+        target: String,
+
+        /// Relationship type (e.g. relates_to, depends_on, references, implements, causes)
+        #[arg(short = 'r', long, default_value = "relates_to")]
+        relation: String,
+
+        /// Connection weight / strength (0.1 to 10.0)
+        #[arg(short = 'w', long, default_value = "1.0")]
+        weight: f32,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a relationship link between two memories
+    Unlink {
+        /// Source memory ID, title, or prefix
+        source: String,
+
+        /// Target memory ID, title, or prefix
+        target: String,
+
+        /// Optional specific relation to remove (omitting removes all links between the two)
+        #[arg(short = 'r', long)]
+        relation: Option<String>,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Traverse and list multi-hop connected memories from a starting node
+    Related {
+        /// Starting memory ID, title, or prefix
+        id: String,
+
+        /// Maximum hop distance to traverse (1 to 5)
+        #[arg(short = 'n', long, default_value = "2")]
+        hops: usize,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Obsidian-style interactive force graph view or terminal network tree
+    Graph {
+        /// Automatically open the interactive HTML graph view in default browser
+        #[arg(short = 'b', long)]
+        browser: bool,
+
+        /// Focus the graph on a specific memory neighborhood (ID or title)
+        #[arg(short = 'f', long)]
+        focus: Option<String>,
+
+        /// Maximum hop radius when focused on a memory neighborhood
+        #[arg(short = 'n', long, default_value = "2")]
+        hops: usize,
+
+        /// Output path for the generated graph HTML file
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+
+        /// Render text network tree directly in the terminal
+        #[arg(short = 't', long)]
+        terminal: bool,
+
+        /// Output graph nodes and edges as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate shell completion scripts (zsh, bash, fish) with interactive tab/arrow navigation
     Completions {
         /// Target shell (zsh, bash, fish, elvish, powershell)
@@ -443,6 +526,7 @@ fn main() -> Result<()> {
             limit,
             min_similarity,
             precision,
+            multi_hop,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
@@ -457,8 +541,15 @@ fn main() -> Result<()> {
                     lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
                 CliView::render_answer(&result, json)?;
             } else {
-                let results =
-                    lm.recall_with_date(&query, cat, as_of_dt, date, limit, min_similarity)?;
+                let results = lm.recall_expanded(
+                    &query,
+                    cat,
+                    as_of_dt,
+                    date,
+                    limit,
+                    min_similarity,
+                    multi_hop,
+                )?;
                 CliView::render_recall(&query, &results, lm.db_path(), json)?;
             }
         }
@@ -785,6 +876,54 @@ fn main() -> Result<()> {
 
                 println!("✦ Conflict check complete: {} merged.", merged_count);
             }
+        }
+
+        Commands::Link {
+            source,
+            target,
+            relation,
+            weight,
+            json,
+        } => {
+            let lm = open_controller(effective_db, global)?;
+            let (src_id, dst_id) = lm.link(&source, &target, Some(&relation), Some(weight))?;
+            CliView::render_link(&src_id, &dst_id, &relation, weight, json)?;
+        }
+
+        Commands::Unlink {
+            source,
+            target,
+            relation,
+            json,
+        } => {
+            let lm = open_controller(effective_db, global)?;
+            let removed = lm.unlink(&source, &target, relation.as_deref())?;
+            CliView::render_unlink(&source, &target, relation.as_deref(), removed, json)?;
+        }
+
+        Commands::Related { id, hops, json } => {
+            let lm = open_controller(effective_db, global)?;
+            let related = lm.related(&id, hops)?;
+            CliView::render_related(&id, &related, json)?;
+        }
+
+        Commands::Graph {
+            browser,
+            focus,
+            hops,
+            output,
+            terminal,
+            json,
+        } => {
+            let lm = open_controller(effective_db, global)?;
+            let snapshot = lm.graph(focus.as_deref(), Some(hops))?;
+            CliView::render_graph(
+                &snapshot,
+                terminal,
+                output.as_deref(),
+                browser,
+                json,
+            )?;
         }
 
         Commands::Completions { shell } => {

@@ -1,6 +1,7 @@
 use crate::models::{
-    detect_memory_conflict_with_similarity, LightMemConfig, MemoryConflict, MemoryRecord,
-    MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory, StorageStats,
+    detect_memory_conflict_with_similarity, GraphSnapshot, LightMemConfig, MemoryConflict,
+    MemoryLink, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory,
+    ScoredMemory, StorageStats,
 };
 use crate::repositories::Storage;
 use crate::services::{
@@ -239,6 +240,12 @@ impl LightMem {
             conflicts.push(conflict);
         }
 
+        // Auto-link any wikilinks [[...]] in memory content and title
+        let _ = self.storage.auto_link_memory(
+            &stored.id,
+            &format!("{}\n{}", stored.title, stored.content),
+        );
+
         Ok((stored, conflicts))
     }
 
@@ -405,6 +412,49 @@ impl LightMem {
         Ok(results)
     }
 
+    /// Hybrid Recall with optional multi-hop expansion along knowledge graph links
+    pub fn recall_expanded(
+        &self,
+        query: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        limit: usize,
+        min_similarity: Option<f32>,
+        multi_hop: bool,
+    ) -> Result<Vec<ScoredMemory>> {
+        let base_results =
+            self.recall_with_date(query, category, as_of, on_date, limit, min_similarity)?;
+        if !multi_hop || base_results.is_empty() {
+            return Ok(base_results);
+        }
+
+        let mut seen_ids: HashSet<String> =
+            base_results.iter().map(|r| r.memory.id.clone()).collect();
+        let mut expanded = base_results;
+
+        let top_candidates: Vec<(String, f32)> = expanded[..expanded.len().min(3)]
+            .iter()
+            .map(|r| (r.memory.id.clone(), r.score))
+            .collect();
+
+        for (id, score) in top_candidates {
+            if let Ok(related) = self.storage.traverse_multi_hop(&id, 1) {
+                for rel in related {
+                    if seen_ids.insert(rel.memory.id.clone()) {
+                        expanded.push(ScoredMemory {
+                            memory: rel.memory,
+                            score: score * 0.8,
+                            bm25_rank: None,
+                            vector_rank: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(expanded)
+    }
+
     /// Count total memories matching optional filters
     pub fn count(
         &self,
@@ -528,6 +578,42 @@ impl LightMem {
         self.storage
             .deduplicate_indexed(self.embedder()?.as_ref(), &self.embedding_identity)
     }
+
+    /// Explicitly link two memories with an optional relation type (default: relates_to) and weight
+    pub fn link(
+        &self,
+        source: &str,
+        target: &str,
+        relation: Option<&str>,
+        weight: Option<f32>,
+    ) -> Result<(String, String)> {
+        self.storage.add_link(source, target, relation, weight)
+    }
+
+    /// Remove explicit connection between two memories
+    pub fn unlink(&self, source: &str, target: &str, relation: Option<&str>) -> Result<bool> {
+        self.storage.remove_link(source, target, relation)
+    }
+
+    /// Retrieve all direct outgoing and incoming links for a memory
+    pub fn get_links(&self, memory_id: &str) -> Result<Vec<MemoryLink>> {
+        self.storage.get_links_for_memory(memory_id)
+    }
+
+    /// Traverse knowledge graph up to N hops from a starting memory
+    pub fn related(&self, memory_id: &str, hops: usize) -> Result<Vec<RelatedMemory>> {
+        self.storage.traverse_multi_hop(memory_id, hops)
+    }
+
+    /// Get knowledge graph snapshot (all active nodes and edges, or focused neighborhood)
+    pub fn graph(
+        &self,
+        focus: Option<&str>,
+        hops: Option<usize>,
+    ) -> Result<GraphSnapshot> {
+        self.storage.get_graph_snapshot(focus, hops)
+    }
+
 
     /// Export memories to an OKF bundle
     pub fn export_okf(&self, target_path: Option<&Path>) -> Result<PathBuf> {
