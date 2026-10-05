@@ -196,8 +196,24 @@ impl LightMemConfig {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("Invalid configuration at {}", path.display()))
+        let mut cfg: Self = serde_json::from_str(&content)
+            .with_context(|| format!("Invalid configuration at {}", path.display()))?;
+        let r_lower = cfg.reranker.trim().to_lowercase();
+        if !matches!(
+            r_lower.as_str(),
+            "onnx"
+                | "qa"
+                | "precision"
+                | "ollama"
+                | "top1"
+                | "minilm-squad2"
+                | "tinyroberta-squad2"
+        ) && !r_lower.starts_with("ollama:")
+            && !r_lower.starts_with("onnx:")
+        {
+            cfg.reranker = "onnx".to_string();
+        }
+        Ok(cfg)
     }
 
     pub fn save(&self) -> Result<()> {

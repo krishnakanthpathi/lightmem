@@ -333,8 +333,16 @@ impl LightMem {
         conflict: &MemoryConflict,
         reranker_override: Option<&str>,
     ) -> Result<MemoryRecord> {
+        let older = self
+            .storage
+            .get_memory(&conflict.older_memory.id)?
+            .unwrap_or_else(|| conflict.older_memory.clone());
+        let newer = self
+            .storage
+            .get_memory(&conflict.newer_memory.id)?
+            .unwrap_or_else(|| conflict.newer_memory.clone());
         let reranker = self.build_reranker(reranker_override)?;
-        let merged = reranker.merge_conflict(&conflict.older_memory, &conflict.newer_memory)?;
+        let merged = reranker.merge_conflict(&older, &newer)?;
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
         let mut updated = self.storage.insert_indexed_batch(
@@ -343,9 +351,7 @@ impl LightMem {
             &self.embedding_identity,
             false,
         )?;
-        let _ = self
-            .storage
-            .forget_memory(&conflict.older_memory.id, false)?;
+        let _ = self.storage.forget_memory(&older.id, false)?;
         Ok(updated.remove(0))
     }
 
