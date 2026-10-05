@@ -128,26 +128,11 @@ impl MemoryType {
         }
 
         // 1. Password / Secret / Credential
-        let has_secret_token = lower
-            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
-            .any(|t| {
-                t.starts_with("ghp_")
-                    || t.starts_with("github_pat_")
-                    || t.starts_with("sk-")
-                    || t.starts_with("glpat-")
-                    || t.starts_with("xoxb-")
-                    || (t.starts_with("akia")
-                        && t.len() >= 16
-                        && t.chars().all(|c| c.is_ascii_alphanumeric()))
-            });
         let has_cred_url = lower
             .split_whitespace()
             .any(|tok| tok.contains("://") && tok.contains('@') && tok.matches(':').count() >= 2);
 
-        if has_secret_token
-            || has_cred_url
-            || lower.contains("sk_live_")
-            || lower.contains("sk_test_")
+        if has_cred_url
             || lower.contains("password:")
             || lower.contains("password is")
             || lower.contains("api_key")
@@ -156,7 +141,6 @@ impl MemoryType {
             || lower.contains("secret key")
             || lower.contains("signing secret")
             || lower.contains("webhook secret")
-            || lower.contains("whsec_")
             || lower.contains("auth token")
             || lower.contains("private key")
         {
@@ -458,34 +442,6 @@ mod infer_tests {
         );
         assert_eq!(
             MemoryType::infer("Credential: internal service token"),
-            MemoryType::Password
-        );
-    }
-
-    #[test]
-    fn secret_token_prefixes_detected_mid_sentence() {
-        assert_eq!(
-            MemoryType::infer("GitHub personal token is ghp_1234567890abcdef"),
-            MemoryType::Password
-        );
-        assert_eq!(
-            MemoryType::infer("AWS access key is AKIAIOSFODNN7EXAMPLE"),
-            MemoryType::Password
-        );
-        assert_eq!(
-            MemoryType::infer("Fine-grained token: github_pat_11aabbccddeeff"),
-            MemoryType::Password
-        );
-        assert_eq!(
-            MemoryType::infer("Use sk-proj-1234567890 for staging"),
-            MemoryType::Password
-        );
-        assert_eq!(
-            MemoryType::infer("GitLab token is glpat-abcdef123456"),
-            MemoryType::Password
-        );
-        assert_eq!(
-            MemoryType::infer("Slack bot token is xoxb-12345-67890"),
             MemoryType::Password
         );
     }

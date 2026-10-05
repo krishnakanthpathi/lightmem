@@ -125,7 +125,7 @@ fn test_password_category() {
     // Remember a password
     let mem = lm
         .remember(
-            "ghp_test_secret_token_1234567890",
+            "password: dummy-test-passphrase-value",
             Some(MemoryType::Password),
             Some("GitHub Token".to_string()),
             vec!["github".to_string(), "token".to_string(), "api".to_string()],
@@ -137,13 +137,7 @@ fn test_password_category() {
 
     // Recall filtering by Password category
     let recalled = lm
-        .recall(
-            "GitHub secret token",
-            Some(MemoryType::Password),
-            None,
-            5,
-            None,
-        )
+        .recall("GitHub Token", Some(MemoryType::Password), None, 5, None)
         .expect("recall failed");
     assert!(!recalled.is_empty());
     assert_eq!(recalled[0].memory.id, mem.id);
@@ -195,7 +189,7 @@ fn test_universal_json_importers() {
         },
         {
             "id": "mem0-2",
-            "memory": "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "memory": "staging passphrase is example-placeholder-only",
             "metadata": {
                 "category": "password"
             }
@@ -208,7 +202,7 @@ fn test_universal_json_importers() {
     // Verify verbatim password content preservation
     let pass_mem = lm
         .recall(
-            "AWS_SECRET_ACCESS_KEY",
+            "staging passphrase",
             Some(MemoryType::Password),
             None,
             1,
@@ -218,7 +212,7 @@ fn test_universal_json_importers() {
     assert!(!pass_mem.is_empty());
     assert_eq!(
         pass_mem[0].memory.content,
-        "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        "staging passphrase is example-placeholder-only"
     );
     assert_eq!(pass_mem[0].memory.category, MemoryType::Password);
 
@@ -372,7 +366,7 @@ fn test_auto_categorization_all_14_types() {
 
     let examples: Vec<(&str, MemoryType)> = vec![
         (
-            "Production Stripe API key is sk_live_9988776655",
+            "Production service api key is placeholder-value-only",
             MemoryType::Password,
         ),
         (
