@@ -33,10 +33,9 @@ jobs:
           python -m build
           python -m twine check dist/*
 
-      - name: Publish to PyPI via Trusted Publishing or Token
+      - name: Publish to PyPI via Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: python/dist/
-          password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
           print-hash: true
