@@ -10,12 +10,10 @@ pub struct LightMemConfig {
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
-    #[serde(default)]
-    pub qa_model: Option<String>,
 }
 
 fn default_reranker() -> String {
-    "onnx".to_string()
+    "minilm-squad2".to_string()
 }
 
 impl Default for LightMemConfig {
@@ -26,12 +24,59 @@ impl Default for LightMemConfig {
             ollama_url: "http://localhost:11434".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
-            qa_model: Some("minilm-squad2".to_string()),
         }
     }
 }
 
 impl LightMemConfig {
+    /// Normalize any reranker string ('onnx', 'minilm-squad2', 'tinyroberta-squad2', 'ollama', 'ollama:<model>', 'top1')
+    pub fn normalize_reranker(raw: &str, legacy_qa: Option<&str>) -> String {
+        let trimmed = raw.trim();
+        let lower = trimmed.to_lowercase();
+        if lower == "top1" {
+            return "top1".to_string();
+        }
+        if let Some(ollama_m) = trimmed
+            .strip_prefix("ollama:")
+            .or_else(|| trimmed.strip_prefix("OLLAMA:"))
+        {
+            return format!("ollama:{}", ollama_m.trim());
+        }
+        if let Some(onnx_m) = trimmed
+            .strip_prefix("onnx:")
+            .or_else(|| trimmed.strip_prefix("ONNX:"))
+        {
+            return Self::normalize_reranker(onnx_m, None);
+        }
+        match lower.as_str() {
+            "ollama" => {
+                if let Some(qm) = legacy_qa.map(str::trim).filter(|m| {
+                    !m.is_empty() && !matches!(*m, "minilm-squad2" | "tinyroberta-squad2")
+                }) {
+                    format!("ollama:{}", qm)
+                } else {
+                    "ollama".to_string()
+                }
+            }
+            "tinyroberta-squad2"
+            | "tinyroberta"
+            | "deepset/tinyroberta-squad2"
+            | "onnx-community/tinyroberta-squad2-onnx" => "tinyroberta-squad2".to_string(),
+            "minilm-squad2"
+            | "deepset/minilm-uncased-squad2"
+            | "lquint/minilm-uncased-squad2-onnx" => "minilm-squad2".to_string(),
+            "onnx" | "qa" | "precision" => {
+                if let Some(qm) = legacy_qa.map(str::trim).filter(|m| !m.is_empty()) {
+                    Self::normalize_reranker(qm, None)
+                } else {
+                    "minilm-squad2".to_string()
+                }
+            }
+            other if other.contains(':') => format!("ollama:{}", trimmed),
+            _ => "minilm-squad2".to_string(),
+        }
+    }
+
     /// Stable embedding-space identity, including card preprocessing and engine version.
     pub fn embedding_identity(&self) -> Result<String> {
         let model = match self.backend.as_str() {
@@ -128,43 +173,16 @@ impl LightMemConfig {
     }
 
     pub fn active_reranker_summary(&self) -> String {
-        let lower = self.reranker.to_lowercase();
-        if let Some(ollama_model) = lower.strip_prefix("ollama:") {
+        let norm = Self::normalize_reranker(&self.reranker, None);
+        if let Some(ollama_model) = norm.strip_prefix("ollama:") {
             return format!("ollama:{} (@ {})", ollama_model, self.ollama_url);
         }
-        match lower.as_str() {
-            "onnx" | "qa" | "precision" | "minilm-squad2" | "tinyroberta-squad2" => {
-                let model = if lower == "tinyroberta-squad2" {
-                    "tinyroberta-squad2"
-                } else {
-                    self.qa_model.as_deref().unwrap_or("minilm-squad2")
-                };
-                match model {
-                    "tinyroberta-squad2"
-                    | "tinyroberta"
-                    | "deepset/tinyroberta-squad2"
-                    | "onnx-community/tinyroberta-squad2-ONNX" => {
-                        "tinyroberta-squad2 (local ONNX Extractive QA)".to_string()
-                    }
-                    "minilm-squad2"
-                    | "minilm"
-                    | "deepset/minilm-uncased-squad2"
-                    | "lquint/minilm-uncased-squad2-onnx" => {
-                        "minilm-squad2 (local ONNX Extractive QA)".to_string()
-                    }
-                    custom => format!("{} (local ONNX Extractive QA)", custom),
-                }
-            }
-            "ollama" => {
-                let model = self
-                    .qa_model
-                    .as_deref()
-                    .filter(|m| !matches!(*m, "minilm-squad2" | "tinyroberta-squad2"))
-                    .unwrap_or("auto");
-                format!("ollama:{} (@ {})", model, self.ollama_url)
-            }
+        match norm.as_str() {
+            "tinyroberta-squad2" => "tinyroberta-squad2 (local ONNX Extractive QA)".to_string(),
+            "minilm-squad2" => "minilm-squad2 (local ONNX Extractive QA)".to_string(),
+            "ollama" => format!("ollama:auto (@ {})", self.ollama_url),
             "top1" => "top1 (0ms vector rank-1)".to_string(),
-            other => other.to_string(),
+            other => format!("{} (local ONNX Extractive QA)", other),
         }
     }
 
@@ -196,23 +214,12 @@ impl LightMemConfig {
             return Ok(Self::default());
         }
         let content = std::fs::read_to_string(&path)?;
-        let mut cfg: Self = serde_json::from_str(&content)
+        let raw_val: serde_json::Value = serde_json::from_str(&content)
             .with_context(|| format!("Invalid configuration at {}", path.display()))?;
-        let r_lower = cfg.reranker.trim().to_lowercase();
-        if !matches!(
-            r_lower.as_str(),
-            "onnx"
-                | "qa"
-                | "precision"
-                | "ollama"
-                | "top1"
-                | "minilm-squad2"
-                | "tinyroberta-squad2"
-        ) && !r_lower.starts_with("ollama:")
-            && !r_lower.starts_with("onnx:")
-        {
-            cfg.reranker = "onnx".to_string();
-        }
+        let legacy_qa = raw_val.get("qa_model").and_then(|v| v.as_str());
+        let mut cfg: Self = serde_json::from_value(raw_val.clone())
+            .with_context(|| format!("Invalid configuration at {}", path.display()))?;
+        cfg.reranker = Self::normalize_reranker(&cfg.reranker, legacy_qa);
         Ok(cfg)
     }
 

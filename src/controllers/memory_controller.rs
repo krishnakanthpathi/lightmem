@@ -636,9 +636,15 @@ impl LightMem {
         }
 
         if lower == "ollama" {
+            let cfg_ollama = self
+                .config
+                .reranker
+                .strip_prefix("ollama:")
+                .or_else(|| self.config.reranker.strip_prefix("OLLAMA:"))
+                .map(|s| s.to_string());
             return Ok(Box::new(OllamaReranker::new(
                 self.config.ollama_url.clone(),
-                self.config.qa_model.clone(),
+                cfg_ollama,
             )));
         }
 
@@ -661,13 +667,21 @@ impl LightMem {
 
         match lower.as_str() {
             "onnx" | "qa" | "precision" => {
-                Ok(Box::new(OnnxQaReranker::new(self.config.qa_model.clone())))
+                let default_onnx = if matches!(
+                    self.config.reranker.to_lowercase().as_str(),
+                    "tinyroberta-squad2" | "tinyroberta"
+                ) {
+                    "tinyroberta-squad2"
+                } else {
+                    "minilm-squad2"
+                };
+                Ok(Box::new(OnnxQaReranker::new(Some(default_onnx.to_string()))))
             }
             "minilm-squad2" | "minilm" | "tinyroberta-squad2" | "tinyroberta" => {
                 Ok(Box::new(OnnxQaReranker::new(Some(lower))))
             }
             other => anyhow::bail!(
-                "Unknown reranker: '{}'. Choose 'onnx' ('minilm-squad2', 'tinyroberta-squad2'), 'ollama' ('ollama:<model>'), or 'top1'.",
+                "Unknown reranker: '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), or 'top1'.",
                 other
             ),
         }

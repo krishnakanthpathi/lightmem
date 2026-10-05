@@ -130,36 +130,25 @@ impl CliView {
         };
 
         let embedder_label = match cfg.backend.as_str() {
-            "onnx" => format!(
-                "onnx ({})",
-                cfg.onnx_model.as_deref().unwrap_or("bge-small")
-            ),
+            "onnx" => {
+                let raw_em = cfg.onnx_model.as_deref().unwrap_or("bge-small");
+                let short_em = match raw_em {
+                    "Xenova/bge-small-en-v1.5" | "bge-small-en-v1.5" => "bge-small",
+                    "Xenova/all-MiniLM-L6-v2" | "all-minilm-l6-v2" => "minilm",
+                    "nomic-ai/nomic-embed-text-v1.5" | "nomic-embed-text" => "nomic",
+                    other => other,
+                };
+                format!("onnx ({})", short_em)
+            }
             "ollama" => format!("ollama ({})", cfg.embedding_model),
             other => other.to_string(),
         };
-        let reranker_lower = cfg.reranker.trim().to_lowercase();
-        let reranker_label = match reranker_lower.as_str() {
-            "onnx" | "qa" | "precision" | "minilm-squad2" | "tinyroberta-squad2" => {
-                let qm = if reranker_lower == "tinyroberta-squad2" {
-                    "tinyroberta-squad2"
-                } else {
-                    cfg.qa_model.as_deref().unwrap_or("minilm-squad2")
-                };
-                format!("qa ({})", qm)
-            }
-            "ollama" => {
-                let m = cfg
-                    .qa_model
-                    .as_deref()
-                    .filter(|m| !matches!(*m, "minilm-squad2" | "tinyroberta-squad2"))
-                    .unwrap_or("auto");
-                format!("ollama ({})", m)
-            }
+        let norm_reranker = LightMemConfig::normalize_reranker(&cfg.reranker, None);
+        let reranker_label = match norm_reranker.as_str() {
+            "minilm-squad2" | "tinyroberta-squad2" => format!("onnx ({})", norm_reranker),
+            "ollama" => "ollama (auto)".to_string(),
             other if other.starts_with("ollama:") => {
-                format!("ollama ({})", &cfg.reranker.trim()[7..])
-            }
-            other if other.starts_with("onnx:") => {
-                format!("qa ({})", &cfg.reranker.trim()[5..])
+                format!("ollama ({})", &other[7..])
             }
             other => other.to_string(),
         };
@@ -788,12 +777,6 @@ impl CliView {
                     .as_deref()
                     .unwrap_or("Xenova/bge-small-en-v1.5")
             )
-        );
-        println!(
-            "  {} {:<16} {}",
-            Self::slate("├─"),
-            Self::slate("QA Model"),
-            Self::white_bold(cfg.qa_model.as_deref().unwrap_or("minilm-squad2"))
         );
         println!(
             "  {} {:<16} {}",

@@ -242,13 +242,9 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
 
-        /// Default reranker: 'onnx' (local Extractive QA), 'ollama' ('ollama:<model>'), or 'top1' (0ms instant)
+        /// Reranker model/engine ('minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama', 'ollama:<model>', or 'top1')
         #[arg(long)]
         reranker: Option<String>,
-
-        /// QA / reranker model ('minilm-squad2', 'tinyroberta-squad2', or Ollama model like 'qwen2.5:3b')
-        #[arg(long)]
-        qa_model: Option<String>,
 
         /// Delete / reset the active memory database
         #[arg(long)]
@@ -585,7 +581,6 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
-            qa_model,
             reset_db,
             yes,
         } => {
@@ -602,7 +597,6 @@ fn main() -> Result<()> {
                     && url.is_none()
                     && model.is_none()
                     && reranker.is_none()
-                    && qa_model.is_none()
                 {
                     return Ok(());
                 }
@@ -638,7 +632,7 @@ fn main() -> Result<()> {
                         let _ = lightmem::OnnxEmbeddingProvider::new(Some("nomic"))?;
                     }
                     other => anyhow::bail!(
-                        "Unknown model '{}' for --download. Choose 'bge-small', 'minilm', 'nomic', 'minilm-squad2', 'tinyroberta-squad2', 'qa', or 'all'.",
+                        "Unknown model '{}' for --download. Choose 'bge-small', 'minilm', 'nomic', 'minilm-squad2', 'tinyroberta-squad2', or 'all'.",
                         other
                     ),
                 }
@@ -667,40 +661,28 @@ fn main() -> Result<()> {
             if let Some(r) = reranker {
                 let trimmed = r.trim();
                 let lower = trimmed.to_lowercase();
-                if let Some(ollama_m) = trimmed
-                    .strip_prefix("ollama:")
-                    .or_else(|| trimmed.strip_prefix("OLLAMA:"))
+                if lower.starts_with("ollama:")
+                    || lower.starts_with("onnx:")
+                    || matches!(
+                        lower.as_str(),
+                        "onnx"
+                            | "qa"
+                            | "precision"
+                            | "ollama"
+                            | "top1"
+                            | "minilm-squad2"
+                            | "tinyroberta-squad2"
+                    )
+                    || lower.contains(':')
                 {
-                    cfg.reranker = "ollama".to_string();
-                    cfg.qa_model = Some(ollama_m.to_string());
-                    changed = true;
-                } else if let Some(onnx_m) = trimmed
-                    .strip_prefix("onnx:")
-                    .or_else(|| trimmed.strip_prefix("ONNX:"))
-                {
-                    cfg.reranker = "onnx".to_string();
-                    cfg.qa_model = Some(onnx_m.to_string());
-                    changed = true;
-                } else if matches!(
-                    lower.as_str(),
-                    "onnx" | "qa" | "precision" | "ollama" | "top1"
-                ) {
-                    cfg.reranker = lower;
-                    changed = true;
-                } else if matches!(lower.as_str(), "minilm-squad2" | "tinyroberta-squad2") {
-                    cfg.reranker = "onnx".to_string();
-                    cfg.qa_model = Some(lower);
+                    cfg.reranker = LightMemConfig::normalize_reranker(trimmed, None);
                     changed = true;
                 } else {
                     anyhow::bail!(
-                        "Invalid reranker '{}'. Choose 'onnx', 'ollama' ('ollama:<model>'), 'minilm-squad2', 'tinyroberta-squad2', or 'top1'.",
+                        "Invalid reranker '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), or 'top1'.",
                         r
                     );
                 }
-            }
-            if let Some(qm) = qa_model {
-                cfg.qa_model = Some(qm);
-                changed = true;
             }
 
             if changed {
@@ -828,26 +810,19 @@ fn main() -> Result<()> {
                         "nomic",
                         "minilm-squad2",
                         "tinyroberta-squad2",
-                        "qa",
                         "all",
                     ]))
                 })
                 .mut_arg("reranker", |a| {
                     a.value_parser(PossibleValuesParser::new([
+                        "minilm-squad2",
+                        "tinyroberta-squad2",
                         "onnx",
                         "ollama",
+                        "ollama:qwen2.5:3b",
+                        "ollama:qwen2.5:1.5b",
+                        "ollama:llama3.2:1b",
                         "top1",
-                        "minilm-squad2",
-                        "tinyroberta-squad2",
-                    ]))
-                })
-                .mut_arg("qa_model", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "minilm-squad2",
-                        "tinyroberta-squad2",
-                        "qwen2.5:3b",
-                        "qwen2.5:1.5b",
-                        "llama3.2:1b",
                     ]))
                 })
             });
