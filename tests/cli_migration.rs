@@ -5,7 +5,7 @@ use tempfile::tempdir;
 fn cli(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lmem"))
         .env("LIGHTMEM_CONFIG_DIR", root.join("config"))
-        .env("LIGHTMEM_NEEDLE_DISABLE", "1")
+        .env("LIGHTMEM_QA_DISABLE", "1")
         .env_remove("LIGHTMEM_DB")
         .arg("--db")
         .arg(root.join("memory.db"))

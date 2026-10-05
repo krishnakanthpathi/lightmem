@@ -311,34 +311,82 @@ impl CliView {
 
         for c in conflicts {
             let old_short: String = c.older_memory.id.chars().take(8).collect();
+            let old_ts = c
+                .older_memory
+                .created_at
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string();
+            let sim_pct = (c.similarity * 100.0).round() as u32;
             if superseded {
                 println!(
-                    "  {} {} {} {} ({}={} -> {}={})",
+                    "  {} {} {} {} {} {}",
                     Self::crimson_bold("⇄"),
-                    Self::emerald_bold("Superseded"),
+                    Self::emerald_bold("Merged & superseded"),
                     Self::gold(&format!("({})", old_short)),
+                    Self::slate(&format!("[OLDER · {}]", old_ts)),
                     Self::slate(&c.older_memory.title),
-                    Self::slate(&c.slot),
-                    Self::rose(&c.old_value),
-                    Self::slate(&c.slot),
-                    Self::emerald_bold(&c.new_value)
+                    Self::rose(&format!("({}% match)", sim_pct))
                 );
             } else {
                 println!(
-                    "  {} {} {} {} ({}={} vs {}={}) {}",
+                    "  {} {} {} {} {} {} {}",
                     Self::crimson_bold("⇄"),
-                    Self::gold("Conflict detected with"),
+                    Self::gold("Overlap/conflict detected with"),
                     Self::gold(&format!("({})", old_short)),
+                    Self::slate(&format!("[OLDER · {}]", old_ts)),
                     Self::slate(&c.older_memory.title),
-                    Self::slate(&c.slot),
-                    Self::rose(&c.old_value),
-                    Self::slate(&c.slot),
-                    Self::emerald_bold(&c.new_value),
-                    Self::slate("— pass --supersede or run `lmem conflicts --resolve`")
+                    Self::rose(&format!("({}% match)", sim_pct)),
+                    Self::slate("— pass --supersede or run `lmem conflicts`")
                 );
             }
         }
         Ok(())
+    }
+
+    pub fn render_conflict_pair(idx: usize, total: usize, c: &MemoryConflict, resolved: bool) {
+        let old_short: String = c.older_memory.id.chars().take(8).collect();
+        let new_short: String = c.newer_memory.id.chars().take(8).collect();
+        let old_ts = c
+            .older_memory
+            .created_at
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+        let new_ts = c
+            .newer_memory
+            .created_at
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+        let sim_pct = (c.similarity * 100.0).round() as u32;
+        let ov_pct = (c.overlap_ratio * 100.0).round() as u32;
+
+        println!(
+            "  {} [{}] {} {} {}",
+            Self::crimson_bold(&format!("{:02}/{:02}.", idx + 1, total)),
+            Self::violet_bold(c.newer_memory.category.as_str()),
+            Self::white_bold(&c.newer_memory.title),
+            Self::confidence_bar(c.similarity),
+            Self::rose(&format!("{}% sim · {}% overlap", sim_pct, ov_pct))
+        );
+        println!(
+            "     {} {} {} {} {}",
+            Self::slate("├─"),
+            Self::rose(&format!("[OLDER · {}]", old_ts)),
+            Self::gold(&format!("({})", old_short)),
+            Self::slate(&c.older_memory.content),
+            if resolved {
+                Self::rose("[merged & retired]")
+            } else {
+                Self::gold("[active]")
+            }
+        );
+        println!(
+            "     {} {} {} {} {}",
+            Self::slate("╰─"),
+            Self::emerald_bold(&format!("[NEWER · {}]", new_ts)),
+            Self::gold(&format!("({})", new_short)),
+            Self::white_bold(&c.newer_memory.content),
+            Self::emerald_bold("[active]")
+        );
     }
 
     pub fn render_conflicts(
@@ -362,7 +410,7 @@ impl CliView {
             println!(
                 "{} {} {} {}",
                 Self::crimson_bold("⇄"),
-                Self::emerald_bold("Zero active contradictions found"),
+                Self::emerald_bold("Zero active conflicts or duplicates found"),
                 Self::slate("in"),
                 Self::slate(&db_str)
             );
@@ -370,9 +418,9 @@ impl CliView {
         }
 
         let header = if resolved {
-            "Resolved contradictions (older memories retired)"
+            "Merged & resolved conflicts"
         } else {
-            "Active contradictions detected"
+            "Active conflicts & overlapping memories detected"
         };
         println!(
             "{} {} ({}) {} {}",
@@ -383,35 +431,7 @@ impl CliView {
             Self::slate(&db_str)
         );
         for (idx, c) in conflicts.iter().enumerate() {
-            let old_short: String = c.older_memory.id.chars().take(8).collect();
-            let new_short: String = c.newer_memory.id.chars().take(8).collect();
-            println!(
-                "  {} [{}] {} ({}: {} -> {})",
-                Self::crimson_bold(&format!("{:02}.", idx + 1)),
-                Self::violet_bold(&c.slot),
-                Self::white_bold(&c.newer_memory.title),
-                Self::slate("update"),
-                Self::rose(&c.old_value),
-                Self::emerald_bold(&c.new_value)
-            );
-            println!(
-                "     {} {} {} {}",
-                Self::slate("├─ Older:"),
-                Self::gold(&format!("({})", old_short)),
-                Self::slate(&c.older_memory.content),
-                if resolved {
-                    Self::rose("[retired]")
-                } else {
-                    Self::gold("[active]")
-                }
-            );
-            println!(
-                "     {} {} {} {}",
-                Self::slate("╰─ Newer:"),
-                Self::gold(&format!("({})", new_short)),
-                Self::white_bold(&c.newer_memory.content),
-                Self::emerald_bold("[active]")
-            );
+            Self::render_conflict_pair(idx, conflicts.len(), c, resolved);
         }
         Ok(())
     }
@@ -634,38 +654,6 @@ impl CliView {
             Self::slate("from"),
             Self::slate(&db_str)
         );
-        Ok(())
-    }
-
-    pub fn render_dedup(merged_count: usize, db_path: &Path, json: bool) -> Result<()> {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "merged_duplicates": merged_count,
-                    "database": db_path.display().to_string(),
-                })
-            );
-            return Ok(());
-        }
-
-        let db_str = Self::format_path(db_path);
-        if merged_count > 0 {
-            println!(
-                "{} {} {} duplicate memories (tags unioned, max confidence & earliest created_at preserved) in {}",
-                Self::crimson_bold("◈"),
-                Self::emerald_bold("Smart-merged & removed"),
-                Self::crimson_bold(&merged_count.to_string()),
-                Self::slate(&db_str)
-            );
-        } else {
-            println!(
-                "{} {} in {}",
-                Self::crimson_bold("◈"),
-                Self::white_bold("No duplicate memories found"),
-                Self::slate(&db_str)
-            );
-        }
         Ok(())
     }
 

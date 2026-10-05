@@ -1,15 +1,17 @@
 use crate::models::{
-    detect_memory_conflict, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
-    PaginatedMemories, ScoredMemory, StorageStats,
+    detect_memory_conflict_with_similarity, LightMemConfig, MemoryConflict, MemoryRecord,
+    MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory, StorageStats,
 };
 use crate::repositories::Storage;
 use crate::services::{
-    AnswerResult, EmbeddingProvider, Exporter, HashEmbeddingProvider, HybridSearchEngine,
-    JsonMemoryImporter, MemoryImporter, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
-    OnnxEmbeddingProvider, OnnxQaReranker, Reranker, Top1Reranker,
+    cosine_similarity, AnswerResult, EmbeddingProvider, Exporter, HashEmbeddingProvider,
+    HybridSearchEngine, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter,
+    OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, Reranker,
+    Top1Reranker,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -186,7 +188,7 @@ impl LightMem {
             &self.embedding_identity,
             true,
         )?;
-        let stored = stored_batch.remove(0);
+        let mut stored = stored_batch.remove(0);
 
         let active_peers = self.storage.list_memories(
             Some(stored.category),
@@ -194,55 +196,157 @@ impl LightMem {
             None,
             0,
         )?;
-        let mut conflicts = Vec::new();
+        let vec_map: HashMap<String, Vec<f32>> = self
+            .storage
+            .get_candidate_vectors_checked(
+                Some(stored.category),
+                Some(MemoryStatus::Active),
+                None,
+                Some(&self.embedding_identity),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let stored_vec = vec_map.get(&stored.id);
+        let mut best_conflict: Option<MemoryConflict> = None;
+
         for peer in &active_peers {
             if peer.id == stored.id {
                 continue;
             }
-            if let Some(conflict) = detect_memory_conflict(&stored, peer) {
-                if conflict.older_memory.id == peer.id {
-                    conflicts.push(conflict);
+            let vec_sim =
+                stored_vec.and_then(|sv| vec_map.get(&peer.id).map(|pv| cosine_similarity(sv, pv)));
+            if let Some(conflict) =
+                detect_memory_conflict_with_similarity(&stored, peer, vec_sim, 0.72)
+            {
+                if conflict.older_memory.id == peer.id
+                    && best_conflict
+                        .as_ref()
+                        .map(|prev| conflict.similarity > prev.similarity)
+                        .unwrap_or(true)
+                {
+                    best_conflict = Some(conflict);
                 }
             }
         }
 
-        if supersede {
-            for conflict in &conflicts {
-                let _ = self
-                    .storage
-                    .forget_memory(&conflict.older_memory.id, false)?;
+        let mut conflicts = Vec::new();
+        if let Some(conflict) = best_conflict {
+            if supersede {
+                stored = self.merge_conflict_pair(&conflict, None)?;
             }
+            conflicts.push(conflict);
         }
 
         Ok((stored, conflicts))
     }
 
-    /// Scan all active memories for contradictions on the same subject entity and slot.
-    /// When `resolve` is true, automatically soft-retires the older conflicting memories.
+    /// Scan active memories by finding each memory's closest vector neighbor and checking overlap.
     pub fn find_conflicts(&self, resolve: bool) -> Result<Vec<MemoryConflict>> {
+        self.find_conflicts_with_options(resolve, 0.78, None)
+    }
+
+    /// Nearest-neighbor conflict & overlap detector with configurable similarity threshold and reranker merge
+    pub fn find_conflicts_with_options(
+        &self,
+        resolve: bool,
+        min_similarity: f32,
+        reranker_override: Option<&str>,
+    ) -> Result<Vec<MemoryConflict>> {
         let active = self
             .storage
             .list_memories(None, Some(MemoryStatus::Active), None, 0)?;
+        let vec_map: HashMap<String, Vec<f32>> = self
+            .storage
+            .get_candidate_vectors_checked(None, Some(MemoryStatus::Active), None, None)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let mut seen_pairs = HashSet::new();
         let mut conflicts = Vec::new();
-        let mut retired_ids = std::collections::HashSet::new();
 
         for i in 0..active.len() {
-            for j in (i + 1)..active.len() {
-                if let Some(conflict) = detect_memory_conflict(&active[i], &active[j]) {
-                    if retired_ids.contains(&conflict.older_memory.id) {
-                        continue;
+            let mem_i = &active[i];
+            let vec_i = vec_map.get(&mem_i.id);
+            let mut closest_conflict: Option<MemoryConflict> = None;
+
+            for (j, mem_j) in active.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let vec_sim =
+                    vec_i.and_then(|vi| vec_map.get(&mem_j.id).map(|vj| cosine_similarity(vi, vj)));
+                if let Some(c) =
+                    detect_memory_conflict_with_similarity(mem_i, mem_j, vec_sim, min_similarity)
+                {
+                    if closest_conflict
+                        .as_ref()
+                        .map(|prev| c.similarity > prev.similarity)
+                        .unwrap_or(true)
+                    {
+                        closest_conflict = Some(c);
                     }
-                    if resolve {
-                        let _ = self
-                            .storage
-                            .forget_memory(&conflict.older_memory.id, false)?;
-                    }
-                    retired_ids.insert(conflict.older_memory.id.clone());
+                }
+            }
+
+            if let Some(conflict) = closest_conflict {
+                let pair_key = (
+                    conflict.older_memory.id.clone(),
+                    conflict.newer_memory.id.clone(),
+                );
+                if seen_pairs.insert(pair_key) {
                     conflicts.push(conflict);
                 }
             }
         }
+
+        conflicts.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if resolve {
+            let mut retired_ids = HashSet::new();
+            let mut resolved = Vec::new();
+            for conflict in conflicts {
+                if retired_ids.contains(&conflict.older_memory.id)
+                    || retired_ids.contains(&conflict.newer_memory.id)
+                {
+                    continue;
+                }
+                let _ = self.merge_conflict_pair(&conflict, reranker_override)?;
+                retired_ids.insert(conflict.older_memory.id.clone());
+                resolved.push(conflict);
+            }
+            return Ok(resolved);
+        }
+
         Ok(conflicts)
+    }
+
+    /// Merge a single conflict pair using the active (or overridden) Reranker, re-indexing the survivor and soft-retiring the older record.
+    pub fn merge_conflict_pair(
+        &self,
+        conflict: &MemoryConflict,
+        reranker_override: Option<&str>,
+    ) -> Result<MemoryRecord> {
+        let reranker = self.build_reranker(reranker_override)?;
+        let merged = reranker.merge_conflict(&conflict.older_memory, &conflict.newer_memory)?;
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let mut updated = self.storage.insert_indexed_batch(
+            &[merged],
+            self.embedder()?.as_ref(),
+            &self.embedding_identity,
+            false,
+        )?;
+        let _ = self
+            .storage
+            .forget_memory(&conflict.older_memory.id, false)?;
+        Ok(updated.remove(0))
     }
 
     /// Semantic + BM25 Hybrid Recall
@@ -254,19 +358,45 @@ impl LightMem {
         limit: usize,
         min_similarity: Option<f32>,
     ) -> Result<Vec<ScoredMemory>> {
+        self.recall_with_date(query, category, as_of, None, limit, min_similarity)
+    }
+
+    /// Semantic + BM25 Hybrid Recall with optional exact calendar day filter (`--date YYYY-MM-DD`)
+    pub fn recall_with_date(
+        &self,
+        query: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        limit: usize,
+        min_similarity: Option<f32>,
+    ) -> Result<Vec<ScoredMemory>> {
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        HybridSearchEngine::search_with_identity(
+        let fetch_limit = if on_date.is_some() {
+            limit.max(250)
+        } else {
+            limit
+        };
+        let mut results = HybridSearchEngine::search_with_identity(
             &self.storage,
             self.embedder()?.as_ref(),
             query,
             category,
             Some(MemoryStatus::Active),
             as_of,
-            limit,
+            fetch_limit,
             min_similarity,
             Some(&self.embedding_identity),
-        )
+        )?;
+        if let Some(target_day) = on_date {
+            results.retain(|r| {
+                r.memory.created_at.date_naive() == target_day
+                    || r.memory.updated_at.date_naive() == target_day
+            });
+            results.truncate(limit);
+        }
+        Ok(results)
     }
 
     /// Count total memories matching optional filters
@@ -288,8 +418,44 @@ impl LightMem {
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedMemories> {
-        self.storage
-            .list_memories_paginated(category, status, as_of, limit, offset)
+        self.list_paginated_with_date(category, status, as_of, None, limit, offset)
+    }
+
+    pub fn list_paginated_with_date(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
+        let Some(target_day) = on_date else {
+            return self
+                .storage
+                .list_memories_paginated(category, status, as_of, limit, offset);
+        };
+        let all = self.storage.list_memories(category, status, as_of, 0)?;
+        let filtered: Vec<MemoryRecord> = all
+            .into_iter()
+            .filter(|m| {
+                m.created_at.date_naive() == target_day || m.updated_at.date_naive() == target_day
+            })
+            .collect();
+        let total = filtered.len();
+        let items: Vec<MemoryRecord> = filtered.into_iter().skip(offset).take(limit).collect();
+        let page = offset.checked_div(limit).unwrap_or(0) + 1;
+        let total_pages = if limit > 0 { total.div_ceil(limit) } else { 1 };
+        let has_more = offset.saturating_add(items.len()) < total;
+        Ok(PaginatedMemories {
+            items,
+            total,
+            limit,
+            offset,
+            page,
+            total_pages,
+            has_more,
+        })
     }
 
     /// List memories by 1-indexed page number and page size
@@ -301,16 +467,26 @@ impl LightMem {
         page: usize,
         per_page: usize,
     ) -> Result<PaginatedMemories> {
+        self.list_page_with_date(category, status, as_of, None, page, per_page)
+    }
+
+    pub fn list_page_with_date(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        page: usize,
+        per_page: usize,
+    ) -> Result<PaginatedMemories> {
         anyhow::ensure!(
             page > 0 && per_page > 0,
             "Page and page size must be positive"
         );
-        let per_page_clean = per_page;
         let offset = (page - 1)
-            .checked_mul(per_page_clean)
+            .checked_mul(per_page)
             .context("Pagination offset is too large")?;
-        self.storage
-            .list_memories_paginated(category, status, as_of, per_page_clean, offset)
+        self.list_paginated_with_date(category, status, as_of, on_date, per_page, offset)
     }
 
     /// List memories with optional filtering
@@ -445,6 +621,52 @@ impl LightMem {
         self.storage.stats()
     }
 
+    pub fn build_reranker(&self, reranker_override: Option<&str>) -> Result<Box<dyn Reranker>> {
+        let active_reranker = reranker_override.unwrap_or(&self.config.reranker).trim();
+        let lower = active_reranker.to_lowercase();
+
+        if lower == "top1" {
+            return Ok(Box::new(Top1Reranker));
+        }
+
+        if lower == "ollama" {
+            return Ok(Box::new(OllamaReranker::new(
+                self.config.ollama_url.clone(),
+                self.config.qa_model.clone(),
+            )));
+        }
+
+        if let Some(ollama_model) = active_reranker
+            .strip_prefix("ollama:")
+            .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
+        {
+            return Ok(Box::new(OllamaReranker::new(
+                self.config.ollama_url.clone(),
+                Some(ollama_model.to_string()),
+            )));
+        }
+
+        if let Some(onnx_model) = active_reranker
+            .strip_prefix("onnx:")
+            .or_else(|| active_reranker.strip_prefix("ONNX:"))
+        {
+            return Ok(Box::new(OnnxQaReranker::new(Some(onnx_model.to_string()))));
+        }
+
+        match lower.as_str() {
+            "onnx" | "qa" | "precision" => {
+                Ok(Box::new(OnnxQaReranker::new(self.config.qa_model.clone())))
+            }
+            "minilm-squad2" | "minilm" | "tinyroberta-squad2" | "tinyroberta" => {
+                Ok(Box::new(OnnxQaReranker::new(Some(lower))))
+            }
+            other => anyhow::bail!(
+                "Unknown reranker: '{}'. Choose 'onnx' ('minilm-squad2', 'tinyroberta-squad2'), 'ollama' ('ollama:<model>'), or 'top1'.",
+                other
+            ),
+        }
+    }
+
     /// Answer a natural language question using retrieved memory candidates
     /// and either Top-1 direct selection (0ms) or Extractive QA / Ollama reranking.
     pub fn answer(
@@ -464,7 +686,7 @@ impl LightMem {
         } else {
             None
         };
-        self.answer_with_reranker(question, category, as_of, limit, override_reranker)
+        self.answer_with_options(question, category, as_of, None, limit, override_reranker)
     }
 
     /// Answer with an explicit per-query reranker override ("top1", "onnx", "onnx:<model>", "ollama", "ollama:<model>")
@@ -476,53 +698,20 @@ impl LightMem {
         limit: usize,
         reranker_override: Option<&str>,
     ) -> Result<AnswerResult> {
-        let candidates = self.recall(question, category, as_of, limit, None)?;
+        self.answer_with_options(question, category, as_of, None, limit, reranker_override)
+    }
 
-        let active_reranker = reranker_override.unwrap_or(&self.config.reranker).trim();
-        let lower = active_reranker.to_lowercase();
-
-        if lower == "top1" {
-            return Top1Reranker.answer(question, &candidates);
-        }
-
-        if lower == "ollama" {
-            let reranker =
-                OllamaReranker::new(self.config.ollama_url.clone(), self.config.qa_model.clone());
-            return reranker.answer(question, &candidates);
-        }
-
-        if let Some(ollama_model) = active_reranker
-            .strip_prefix("ollama:")
-            .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
-        {
-            let reranker = OllamaReranker::new(
-                self.config.ollama_url.clone(),
-                Some(ollama_model.to_string()),
-            );
-            return reranker.answer(question, &candidates);
-        }
-
-        if let Some(onnx_model) = active_reranker
-            .strip_prefix("onnx:")
-            .or_else(|| active_reranker.strip_prefix("ONNX:"))
-        {
-            let reranker = OnnxQaReranker::new(Some(onnx_model.to_string()));
-            return reranker.answer(question, &candidates);
-        }
-
-        match lower.as_str() {
-            "onnx" | "qa" | "needle" | "precision" => {
-                let reranker = OnnxQaReranker::new(self.config.qa_model.clone());
-                reranker.answer(question, &candidates)
-            }
-            "minilm-squad2" | "minilm" | "tinyroberta-squad2" | "tinyroberta" => {
-                let reranker = OnnxQaReranker::new(Some(lower));
-                reranker.answer(question, &candidates)
-            }
-            other => anyhow::bail!(
-                "Unknown reranker: '{}'. Choose 'onnx' ('minilm-squad2', 'tinyroberta-squad2'), 'ollama' ('ollama:<model>'), or 'top1'.",
-                other
-            ),
-        }
+    pub fn answer_with_options(
+        &self,
+        question: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        limit: usize,
+        reranker_override: Option<&str>,
+    ) -> Result<AnswerResult> {
+        let candidates = self.recall_with_date(question, category, as_of, on_date, limit, None)?;
+        let reranker = self.build_reranker(reranker_override)?;
+        reranker.answer(question, &candidates)
     }
 }

@@ -178,15 +178,13 @@ fn parse_category_lenient(cat_opt: Option<&str>, content: &str) -> MemoryType {
         .unwrap_or_else(|| MemoryType::infer(content))
 }
 
-/// Parse a single JSON value into an ImportCandidate using the Fallback Ladder + Native Needle 3 C-FFI + Pure-Rust Heuristic
+/// Parse a single JSON value into an ImportCandidate using Pure-Rust Heuristic
 pub fn parse_single_json_value(val: &serde_json::Value) -> Option<ImportCandidate> {
     parse_json_candidate(val, false)
 }
 
-fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportCandidate> {
+fn parse_json_candidate(val: &serde_json::Value, _enrich: bool) -> Option<ImportCandidate> {
     let mut heuristic_tags = Vec::new();
-    let mut needle_title: Option<String> = None;
-    let mut needle_cat: Option<String> = None;
     let mut mcp_relation_title: Option<String> = None;
     let mut mcp_relation_default_cat: Option<MemoryType> = None;
 
@@ -295,26 +293,6 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
     );
     let explicit_cat = cat_str.as_deref().and_then(try_parse_category_lenient);
 
-    // Consult Native Needle 3 C-FFI when category or title is omitted on the imported JSON record
-    if enrich
-        && ((explicit_cat.is_none() && mcp_relation_default_cat.is_none())
-            || explicit_title.is_none())
-    {
-        if let Some((_, n_title, n_cat, n_tags)) =
-            crate::reranker::NeedleReranker::extract_import_record_via_needle(&content)
-        {
-            needle_title = n_title;
-            needle_cat = n_cat;
-            for t in n_tags {
-                if !heuristic_tags.contains(&t) {
-                    heuristic_tags.push(t);
-                }
-            }
-        }
-    }
-
-    // Rule inference (MemoryType::infer) takes priority for unambiguous signals (password, panic, we decided, always...),
-    // and falls back to Needle 3's extracted category when rule inference defaults to Fact.
     let inferred_rule_cat = MemoryType::infer(&content);
     let category = if let Some(explicit_c) = explicit_cat {
         Some(explicit_c)
@@ -322,13 +300,11 @@ fn parse_json_candidate(val: &serde_json::Value, enrich: bool) -> Option<ImportC
         Some(rel_cat)
     } else if inferred_rule_cat != MemoryType::Fact {
         Some(inferred_rule_cat)
-    } else if let Some(nc) = needle_cat.as_deref() {
-        Some(parse_category_lenient(Some(nc), &content))
     } else {
         Some(MemoryType::Fact)
     };
 
-    let title = explicit_title.or(needle_title).unwrap_or_else(|| {
+    let title = explicit_title.unwrap_or_else(|| {
         content
             .lines()
             .next()

@@ -25,6 +25,9 @@ pub struct AnswerResult {
 pub trait Reranker: Send + Sync {
     fn name(&self) -> &str;
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult>;
+    fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
+        Ok(default_merge_conflict(older, newer))
+    }
 }
 
 /// Mode 1: Fast / Instant Top-1 Reranker
@@ -77,7 +80,6 @@ fn resolve_qa_preset(spec: &str) -> Option<QaModelPreset> {
         ""
         | "onnx"
         | "qa"
-        | "needle"
         | "precision"
         | "minilm"
         | "minilm-squad2"
@@ -404,9 +406,7 @@ impl Reranker for OnnxQaReranker {
     }
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
-        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some()
-            || std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
-        {
+        if std::env::var_os("LIGHTMEM_QA_DISABLE").is_some() {
             return Ok(no_evidence("none"));
         }
 
@@ -468,6 +468,49 @@ impl Reranker for OnnxQaReranker {
         }
 
         Ok(no_evidence("none"))
+    }
+
+    fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
+        if std::env::var_os("LIGHTMEM_QA_DISABLE").is_none() {
+            if let Ok(engine) = self.get_or_load_engine() {
+                let old_toks = content_tokens(&older.content);
+                let new_toks = content_tokens(&newer.content);
+                let shared: Vec<&String> = old_toks.intersection(&new_toks).take(4).collect();
+                if !shared.is_empty() {
+                    let probe_q = format!(
+                        "What is {}?",
+                        shared
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                    let old_margin = Self::extract_span(&engine, &probe_q, &older.content)
+                        .ok()
+                        .flatten()
+                        .map(|(_, m)| m)
+                        .unwrap_or(f32::NEG_INFINITY);
+                    let new_margin = Self::extract_span(&engine, &probe_q, &newer.content)
+                        .ok()
+                        .flatten()
+                        .map(|(_, m)| m)
+                        .unwrap_or(f32::NEG_INFINITY);
+                    // If older is strictly richer (newer's tokens are a subset of older's) AND older has higher QA confidence, keep older's content
+                    if new_toks.is_subset(&old_toks)
+                        && old_toks.len() > new_toks.len()
+                        && old_margin >= new_margin
+                    {
+                        return Ok(build_merged_record(
+                            older,
+                            newer,
+                            older.content.clone(),
+                            older.title.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(default_merge_conflict(older, newer))
     }
 }
 
@@ -630,6 +673,110 @@ impl Reranker for OllamaReranker {
 
         Ok(no_evidence("none"))
     }
+
+    fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
+        let model_name = self.resolve_model();
+        let prompt = format!(
+            "You are a memory consolidation and conflict resolution engine.\n\
+             Merge the following two overlapping memories into a single accurate memory.\n\
+             Rules:\n\
+             1. Always prefer factual values (numbers, ports, statuses, URLs, IDs) from the [NEWER] memory when they differ from [OLDER].\n\
+             2. Preserve any additional non-contradictory details from [OLDER] so no context is lost.\n\
+             3. Do NOT invent any facts not present in the two memories.\n\
+             4. Respond with valid JSON: {{\"title\": string, \"content\": string}}\n\n\
+             [OLDER · {}] Title: {}\nContent: {}\n\n\
+             [NEWER · {}] Title: {}\nContent: {}\n",
+            older.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            older.title,
+            older.content,
+            newer.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            newer.title,
+            newer.content,
+        );
+
+        let url = format!("{}/api/generate", self.ollama_url);
+        let payload = serde_json::json!({
+            "model": model_name,
+            "prompt": prompt,
+            "stream": false,
+            "format": "json",
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 256
+            }
+        });
+
+        if let Ok(resp) = ureq::post(&url)
+            .timeout(Duration::from_secs(30))
+            .send_json(payload)
+        {
+            if let Ok(body) = resp.into_json::<serde_json::Value>() {
+                let raw = body
+                    .get("response")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+                if let Some(json_slice) = extract_json_slice(raw) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
+                        if let Some(merged_c) = parsed
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            let merged_t = parsed
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(&newer.title);
+                            return Ok(build_merged_record(
+                                older,
+                                newer,
+                                merged_c.to_string(),
+                                merged_t.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(default_merge_conflict(older, newer))
+    }
+}
+
+pub fn build_merged_record(
+    older: &MemoryRecord,
+    newer: &MemoryRecord,
+    content: String,
+    title: String,
+) -> MemoryRecord {
+    let mut merged = newer.clone();
+    merged.content = content;
+    merged.title = title;
+    merged.confidence = older.confidence.max(newer.confidence);
+    merged.updated_at = chrono::Utc::now();
+
+    let mut seen: HashSet<String> = merged.tags.iter().map(|t| t.to_lowercase()).collect();
+    for tag in &older.tags {
+        if seen.insert(tag.to_lowercase()) {
+            merged.tags.push(tag.clone());
+        }
+    }
+    merged
+}
+
+pub fn default_merge_conflict(older: &MemoryRecord, newer: &MemoryRecord) -> MemoryRecord {
+    let old_toks = content_tokens(&older.content);
+    let new_toks = content_tokens(&newer.content);
+    // If newer is a pure subset of older (older has strictly more detail and no new tokens in newer), keep older's text
+    let (chosen_content, chosen_title) =
+        if new_toks.is_subset(&old_toks) && old_toks.len() > new_toks.len() {
+            (older.content.clone(), older.title.clone())
+        } else {
+            (newer.content.clone(), newer.title.clone())
+        };
+    build_merged_record(older, newer, chosen_content, chosen_title)
 }
 
 fn extract_json_slice(raw: &str) -> Option<&str> {
@@ -712,32 +859,7 @@ fn parse_and_ground_ollama_answer(
     None
 }
 
-/// Backward-compatible alias struct that delegates to `OnnxQaReranker`
-#[derive(Default)]
-pub struct NeedleReranker;
-
 pub type PrecisionReranker = OnnxQaReranker;
-pub type ExtractedImportRecord = (String, Option<String>, Option<String>, Vec<String>);
-
-impl NeedleReranker {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn extract_import_record_via_needle(_raw_input: &str) -> Option<ExtractedImportRecord> {
-        None
-    }
-}
-
-impl Reranker for NeedleReranker {
-    fn name(&self) -> &str {
-        "minilm-squad2"
-    }
-
-    fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
-        OnnxQaReranker::new(None).answer(question, candidates)
-    }
-}
 
 fn no_evidence(provider: &str) -> AnswerResult {
     AnswerResult {
@@ -955,9 +1077,7 @@ mod tests {
 
     #[test]
     fn test_onnx_qa_reranker_end_to_end_when_enabled() {
-        if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some()
-            || std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
-        {
+        if std::env::var_os("LIGHTMEM_QA_DISABLE").is_some() {
             return;
         }
 

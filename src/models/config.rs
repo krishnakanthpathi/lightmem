@@ -133,7 +133,7 @@ impl LightMemConfig {
             return format!("ollama:{} (@ {})", ollama_model, self.ollama_url);
         }
         match lower.as_str() {
-            "onnx" | "qa" | "needle" | "precision" | "minilm-squad2" | "tinyroberta-squad2" => {
+            "onnx" | "qa" | "precision" | "minilm-squad2" | "tinyroberta-squad2" => {
                 let model = if lower == "tinyroberta-squad2" {
                     "tinyroberta-squad2"
                 } else {

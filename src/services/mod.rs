@@ -11,7 +11,6 @@ pub use embeddings::{
 pub use exporter::Exporter;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
 pub use reranker::{
-    AnswerResult, NeedleReranker, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker,
-    Top1Reranker,
+    AnswerResult, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker, Top1Reranker,
 };
 pub use search::HybridSearchEngine;

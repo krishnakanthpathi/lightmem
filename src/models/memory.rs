@@ -651,9 +651,8 @@ pub struct PaginatedMemories {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConflict {
-    pub slot: String,
-    pub old_value: String,
-    pub new_value: String,
+    pub similarity: f32,
+    pub overlap_ratio: f32,
     pub older_memory: MemoryRecord,
     pub newer_memory: MemoryRecord,
 }
@@ -701,184 +700,97 @@ pub fn parse_ttl_duration(raw: &str) -> Result<chrono::Duration, String> {
     }
 }
 
-fn extract_subject_and_slots(
+pub fn extract_meaningful_tokens(
     content: &str,
 ) -> (
     std::collections::HashSet<String>,
-    std::collections::BTreeMap<String, String>,
+    std::collections::HashSet<String>,
 ) {
-    use regex::Regex;
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::HashSet;
 
-    let mut slots = BTreeMap::new();
-    let mut slot_tokens = HashSet::new();
-    let mut prose_content = content.to_string();
+    const STOP_WORDS: &[&str] = &[
+        "the", "a", "an", "on", "in", "at", "to", "for", "of", "with", "by", "is", "are", "was",
+        "were", "be", "been", "has", "have", "had", "and", "or", "as", "from", "that", "this",
+    ];
 
-    if let Ok(re_port) = Regex::new(r"(?i)\bport\s*[:=]?\s*(\d{1,5})\b") {
-        let ports: Vec<String> = re_port
-            .captures_iter(content)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .collect();
-        if ports.len() == 1 {
-            slot_tokens.insert(ports[0].to_lowercase());
-            slots.insert("port".to_string(), ports[0].clone());
-        }
-    }
-
-    if let Ok(re_url) = Regex::new(r"(https?://[^\s,]+)") {
-        let urls: Vec<String> = re_url
-            .captures_iter(content)
-            .filter_map(|c| {
-                c.get(1)
-                    .map(|m| m.as_str().trim_end_matches('.').to_string())
-            })
-            .collect();
-        if urls.len() == 1 {
-            prose_content = prose_content.replace(&urls[0], " ");
-            slots.insert("url".to_string(), urls[0].clone());
-        }
-    }
-
-    if let Ok(re_os) = Regex::new(
-        r"(?i)\b(linux|macos|windows|ubuntu|debian|alpine|freebsd|fedora|arch|rhel|centos|rocky|alma|suse|opensuse|nixos|gentoo|solaris|openbsd|netbsd|dragonfly|ios|android)\b",
-    ) {
-        let mut os_list: Vec<String> = re_os
-            .captures_iter(content)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_lowercase()))
-            .collect();
-        os_list.sort();
-        os_list.dedup();
-        if os_list.len() == 1 {
-            slot_tokens.insert(os_list[0].clone());
-            slots.insert("os".to_string(), os_list[0].clone());
-        }
-    }
-
-    if slots.is_empty() {
-        if let Ok(re_kv) = Regex::new(r"(?i)^\s*([a-z0-9_.\-/\s]{2,40}?)\s+(?:is|=)\s+([^\s.,;]+)")
-        {
-            if let Some(cap) = re_kv.captures(content.trim()) {
-                if let (Some(lhs), Some(rhs)) = (cap.get(1), cap.get(2)) {
-                    let val = rhs.as_str().trim().to_string();
-                    let key_name = lhs.as_str().trim().to_lowercase();
-                    slot_tokens.insert(val.to_lowercase());
-                    slots.insert(format!("value({})", key_name), val);
-                }
-            }
-        }
-    }
-
-    let stop_words: HashSet<&str> = [
-        "the",
-        "a",
-        "an",
-        "on",
-        "in",
-        "at",
-        "to",
-        "for",
-        "of",
-        "with",
-        "by",
-        "is",
-        "are",
-        "was",
-        "were",
-        "run",
-        "runs",
-        "running",
-        "use",
-        "uses",
-        "used",
-        "port",
-        "url",
-        "endpoint",
-        "uri",
-        "os",
-        "operating",
-        "system",
-        "node",
-        "host",
-        "server",
-        "service",
-        "cluster",
-        "engine",
-        "app",
-        "application",
-    ]
-    .into_iter()
-    .collect();
-
-    let mut subjects: HashSet<String> = prose_content
-        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .map(|w| w.to_lowercase())
-        .filter(|w| w.len() > 1 && !stop_words.contains(w.as_str()) && !slot_tokens.contains(w))
+    let all_tokens: HashSet<String> = content
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.')
+        .map(|w| {
+            w.trim_matches(|c: char| c == '.' || c == '-' || c == '_')
+                .to_lowercase()
+        })
+        .filter(|w| w.len() > 1 && !STOP_WORDS.contains(&w.as_str()))
         .collect();
 
-    if subjects.is_empty() {
-        let infra_nouns: HashSet<&str> = [
-            "server",
-            "node",
-            "host",
-            "service",
-            "cluster",
-            "engine",
-            "app",
-            "application",
-        ]
-        .into_iter()
+    let word_tokens: HashSet<String> = all_tokens
+        .iter()
+        .filter(|w| w.chars().any(|c| c.is_alphabetic()))
+        .cloned()
         .collect();
-        subjects = prose_content
-            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-            .map(|w| w.to_lowercase())
-            .filter(|w| infra_nouns.contains(w.as_str()) && !slot_tokens.contains(w))
-            .collect();
-    }
 
-    (subjects, slots)
+    (word_tokens, all_tokens)
 }
 
-/// Check if two active memories represent a factual contradiction on the same subject entity
-pub fn detect_memory_conflict(a: &MemoryRecord, b: &MemoryRecord) -> Option<MemoryConflict> {
-    if a.id == b.id || a.category != b.category || a.content.trim() == b.content.trim() {
+/// Evaluate whether two memories conflict or overlap based on vector cosine similarity and token overlap.
+/// No hardcoded slot regexes — works for any near-duplicate or updated fact.
+pub fn detect_memory_conflict_with_similarity(
+    a: &MemoryRecord,
+    b: &MemoryRecord,
+    vec_similarity: Option<f32>,
+    min_similarity: f32,
+) -> Option<MemoryConflict> {
+    if a.id == b.id {
         return None;
     }
 
-    let (subj_a, slots_a) = extract_subject_and_slots(&a.content);
-    let (subj_b, slots_b) = extract_subject_and_slots(&b.content);
+    let (words_a, all_a) = extract_meaningful_tokens(&a.content);
+    let (words_b, all_b) = extract_meaningful_tokens(&b.content);
 
-    if subj_a.is_empty() || subj_b.is_empty() || slots_a.is_empty() || slots_b.is_empty() {
+    if words_a.is_empty() || words_b.is_empty() {
         return None;
     }
 
-    let overlap = subj_a.intersection(&subj_b).count();
-    let min_len = subj_a.len().min(subj_b.len());
-    if overlap == 0 || overlap * 2 < min_len {
+    let word_inter = words_a.intersection(&words_b).count();
+    if word_inter == 0 {
         return None;
     }
 
-    let (older, newer, older_slots, newer_slots) = if (a.created_at, &a.id) <= (b.created_at, &b.id)
-    {
-        (a, b, &slots_a, &slots_b)
+    let word_min = words_a.len().min(words_b.len()).max(1);
+    let word_overlap = word_inter as f32 / word_min as f32;
+
+    let all_inter = all_a.intersection(&all_b).count();
+    let all_min = all_a.len().min(all_b.len()).max(1);
+    let overlap_ratio = all_inter as f32 / all_min as f32;
+
+    // Combine semantic vector cosine similarity with lexical word overlap
+    let raw_vec_sim = vec_similarity.unwrap_or(0.0);
+    let effective_sim = if a.content.trim().eq_ignore_ascii_case(b.content.trim()) {
+        1.0
     } else {
-        (b, a, &slots_b, &slots_a)
+        raw_vec_sim.max(word_overlap * 0.92)
     };
 
-    for (slot, old_val) in older_slots {
-        if let Some(new_val) = newer_slots.get(slot) {
-            if !old_val.eq_ignore_ascii_case(new_val) {
-                return Some(MemoryConflict {
-                    slot: slot.clone(),
-                    old_value: old_val.clone(),
-                    new_value: new_val.clone(),
-                    older_memory: older.clone(),
-                    newer_memory: newer.clone(),
-                });
-            }
-        }
+    if effective_sim < min_similarity || word_overlap < 0.50 {
+        return None;
     }
 
-    None
+    let (older, newer) = if (a.created_at, &a.id) <= (b.created_at, &b.id) {
+        (a.clone(), b.clone())
+    } else {
+        (b.clone(), a.clone())
+    };
+
+    Some(MemoryConflict {
+        similarity: effective_sim.clamp(0.0, 1.0),
+        overlap_ratio: overlap_ratio.clamp(0.0, 1.0),
+        older_memory: older,
+        newer_memory: newer,
+    })
+}
+
+/// Convenience wrapper when comparing two memories directly (uses lexical + optional vector similarity)
+pub fn detect_memory_conflict(a: &MemoryRecord, b: &MemoryRecord) -> Option<MemoryConflict> {
+    detect_memory_conflict_with_similarity(a, b, None, 0.72)
 }
 
 #[cfg(test)]
@@ -897,49 +809,21 @@ mod conflict_tests {
     }
 
     #[test]
-    fn test_url_subject_cannibalization() {
-        let m1 = make_fact("Atlas API endpoint is https://api.v1.atlas.io");
-        let m2 = make_fact("Atlas API endpoint is https://api.v2.atlas.io");
-        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect URL conflict");
-        assert_eq!(conflict.slot, "url");
-    }
+    fn test_detects_overlapping_and_updated_memories_without_hardcoded_slots() {
+        let m1 = make_fact("PostgreSQL primary database runs on port 5432");
+        let m2 = make_fact("PostgreSQL primary database runs on port 5433");
+        let conflict = detect_memory_conflict(&m1, &m2).expect("Should detect overlapping update");
+        assert!(conflict.similarity >= 0.75);
+        assert!(conflict.overlap_ratio >= 0.60);
 
-    #[test]
-    fn test_expanded_os_regex() {
-        let m1 = make_fact("Worker node runs on Fedora");
-        let m2 = make_fact("Worker node runs on Arch");
-        let conflict =
-            detect_memory_conflict(&m1, &m2).expect("Should detect Fedora vs Arch OS conflict");
-        assert_eq!(conflict.slot, "os");
+        let d1 = make_fact("The vault stores sensitive personal documents including Aadhaar cards, PAN cards, educational certificates");
+        let d2 = make_fact("The vault stores various personal documents including Aadhaar cards, PAN cards, educational certificates");
+        let dup_conflict =
+            detect_memory_conflict(&d1, &d2).expect("Should detect near-duplicate memories");
+        assert!(dup_conflict.similarity >= 0.80);
 
-        let m3 = make_fact("Worker node OS is Ubuntu");
-        let m4 = make_fact("Worker node OS is Fedora");
-        let conflict2 =
-            detect_memory_conflict(&m3, &m4).expect("Should detect Ubuntu vs Fedora OS conflict");
-        assert_eq!(conflict2.slot, "os");
-    }
-
-    #[test]
-    fn test_dotted_and_slashed_keys_in_re_kv() {
-        let m1 = make_fact("db.max_connections = 100");
-        let m2 = make_fact("db.max_connections = 500");
-        let conflict =
-            detect_memory_conflict(&m1, &m2).expect("Should detect dotted key KV conflict");
-        assert_eq!(conflict.slot, "value(db.max_connections)");
-
-        let m3 = make_fact("service/timeout_ms = 250");
-        let m4 = make_fact("service/timeout_ms = 1000");
-        let conflict2 =
-            detect_memory_conflict(&m3, &m4).expect("Should detect slashed key KV conflict");
-        assert_eq!(conflict2.slot, "value(service/timeout_ms)");
-    }
-
-    #[test]
-    fn test_stopword_only_subject_fallback() {
-        let m1 = make_fact("Server node runs on Ubuntu");
-        let m2 = make_fact("Server node runs on Alpine");
-        let conflict = detect_memory_conflict(&m1, &m2)
-            .expect("Should detect conflict using infrastructure noun fallback");
-        assert_eq!(conflict.slot, "os");
+        let unrelated1 = make_fact("PostgreSQL primary database runs on port 5432");
+        let unrelated2 = make_fact("Mistri Venkata Annapurna Devi is my mother name");
+        assert!(detect_memory_conflict(&unrelated1, &unrelated2).is_none());
     }
 }

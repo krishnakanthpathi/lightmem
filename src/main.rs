@@ -53,7 +53,7 @@ enum Commands {
         #[arg(long, value_parser = parse_ttl_duration)]
         ttl: Option<chrono::Duration>,
 
-        /// Automatically supersede (soft-retire) older conflicting memories on the same subject & slot
+        /// Automatically supersede and merge older conflicting/overlapping memories
         #[arg(short = 's', long)]
         supersede: bool,
 
@@ -75,6 +75,10 @@ enum Commands {
         #[arg(long, value_parser = parse_as_of_date)]
         as_of: Option<DateTime<Utc>>,
 
+        /// Filter to memories from a specific calendar day (YYYY-MM-DD)
+        #[arg(long, value_parser = parse_exact_date)]
+        date: Option<NaiveDate>,
+
         /// Max results to return
         #[arg(short = 'l', long, default_value = "10")]
         limit: usize,
@@ -83,8 +87,8 @@ enum Commands {
         #[arg(long)]
         min_similarity: Option<f32>,
 
-        /// Toggle: Run Needle 3 precision reranker & factual slot extraction on recalled memories
-        #[arg(long, alias = "needle")]
+        /// Toggle: Run precision QA reranker on recalled memories
+        #[arg(long)]
         precision: bool,
 
         /// Output results as JSON for agent consumption
@@ -105,6 +109,10 @@ enum Commands {
         /// Point-in-time view (YYYY-MM-DD)
         #[arg(long, value_parser = parse_as_of_date)]
         as_of: Option<DateTime<Utc>>,
+
+        /// Filter to memories from a specific calendar day (YYYY-MM-DD)
+        #[arg(long, value_parser = parse_exact_date)]
+        date: Option<NaiveDate>,
 
         /// Max results per page
         #[arg(short = 'l', long, default_value = "20")]
@@ -173,7 +181,7 @@ enum Commands {
         /// Path to import file or OKF directory
         file: PathBuf,
 
-        /// Opt in to native Needle title/category enrichment
+        /// Opt in to heuristic title/category enrichment
         #[arg(long)]
         enrich: bool,
     },
@@ -184,7 +192,7 @@ enum Commands {
         question: String,
 
         /// Toggle: Force use of precision extractive QA reranker
-        #[arg(long, alias = "needle")]
+        #[arg(long)]
         precision: bool,
 
         /// Override reranker mode for this query ("onnx", "ollama", "ollama:<model>", or "top1")
@@ -198,6 +206,10 @@ enum Commands {
         /// Point-in-time view (YYYY-MM-DD or RFC3339)
         #[arg(long, value_parser = parse_as_of_date)]
         as_of: Option<DateTime<Utc>>,
+
+        /// Filter candidate memories to a specific calendar day (YYYY-MM-DD)
+        #[arg(long, value_parser = parse_exact_date)]
+        date: Option<NaiveDate>,
 
         /// Max candidate memories to retrieve for reranking
         #[arg(short = 'l', long, default_value = "10")]
@@ -261,18 +273,19 @@ enum Commands {
         json: bool,
     },
 
-    /// Smart-merge duplicate memories (union tags, keep max confidence & earliest created_at) and remove redundant copies
-    Dedup {
-        /// Output deduplication result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Detect contradictory active memories on the same subject & slot (and optionally retire older ones)
+    /// Find overlapping or conflicting memories via vector similarity + token overlap, and interactively (or with --yes) merge them
     Conflicts {
-        /// Automatically soft-retire older conflicting memories so only the latest truth remains active
-        #[arg(long)]
-        resolve: bool,
+        /// Force-merge all detected conflict/overlap pairs without prompting
+        #[arg(short = 'y', long, visible_alias = "resolve")]
+        yes: bool,
+
+        /// Override reranker used for merging ("onnx", "ollama", "ollama:<model>", or "top1")
+        #[arg(short = 'r', long)]
+        reranker: Option<String>,
+
+        /// Minimum similarity threshold to flag as overlapping/conflicting (0.0 - 1.0)
+        #[arg(long, default_value = "0.78")]
+        min_similarity: f32,
 
         /// Output conflict report as JSON
         #[arg(long)]
@@ -293,6 +306,19 @@ fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
     let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")?;
     let naive_dt = date.and_hms_opt(23, 59, 59).unwrap();
     Ok(Utc.from_utc_datetime(&naive_dt))
+}
+
+fn parse_exact_date(s: &str) -> Result<NaiveDate> {
+    if let Ok(date) = NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
+        return Ok(date);
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s.trim()) {
+        return Ok(dt.with_timezone(&Utc).date_naive());
+    }
+    anyhow::bail!(
+        "Invalid --date '{}'. Expected YYYY-MM-DD (e.g. 2026-09-20)",
+        s
+    )
 }
 
 fn open_controller(db_path: Option<&Path>, global: bool) -> Result<LightMem> {
@@ -413,6 +439,7 @@ fn main() -> Result<()> {
             query,
             category,
             as_of,
+            date,
             limit,
             min_similarity,
             precision,
@@ -426,10 +453,12 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             if precision {
-                let result = lm.answer(&query, cat, as_of_dt, limit, true)?;
+                let result =
+                    lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
                 CliView::render_answer(&result, json)?;
             } else {
-                let results = lm.recall(&query, cat, as_of_dt, limit, min_similarity)?;
+                let results =
+                    lm.recall_with_date(&query, cat, as_of_dt, date, limit, min_similarity)?;
                 CliView::render_recall(&query, &results, lm.db_path(), json)?;
             }
         }
@@ -438,6 +467,7 @@ fn main() -> Result<()> {
             category,
             status,
             as_of,
+            date,
             limit,
             offset,
             page,
@@ -449,9 +479,9 @@ fn main() -> Result<()> {
             let as_of_dt = as_of;
 
             let paginated = if let Some(p) = page {
-                lm.list_page(cat, st, as_of_dt, p, limit)?
+                lm.list_page_with_date(cat, st, as_of_dt, date, p, limit)?
             } else {
-                lm.list_paginated(cat, st, as_of_dt, limit, offset)?
+                lm.list_paginated_with_date(cat, st, as_of_dt, date, limit, offset)?
             };
             CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
         }
@@ -521,6 +551,7 @@ fn main() -> Result<()> {
             reranker,
             category,
             as_of,
+            date,
             limit,
             json,
         } => {
@@ -531,11 +562,15 @@ fn main() -> Result<()> {
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
-            let result = if let Some(ref explicit_r) = reranker {
-                lm.answer_with_reranker(&question, cat, as_of_dt, limit, Some(explicit_r))?
+            let effective_reranker = if let Some(ref explicit_r) = reranker {
+                Some(explicit_r.as_str())
+            } else if precision {
+                Some("onnx")
             } else {
-                lm.answer(&question, cat, as_of_dt, limit, precision)?
+                None
             };
+            let result =
+                lm.answer_with_options(&question, cat, as_of_dt, date, limit, effective_reranker)?;
             CliView::render_answer(&result, json)?;
         }
 
@@ -644,7 +679,7 @@ fn main() -> Result<()> {
                     changed = true;
                 } else if matches!(
                     lower.as_str(),
-                    "onnx" | "qa" | "needle" | "precision" | "ollama" | "top1"
+                    "onnx" | "qa" | "precision" | "ollama" | "top1"
                 ) {
                     cfg.reranker = lower;
                     changed = true;
@@ -690,19 +725,80 @@ fn main() -> Result<()> {
             CliView::render_stats(&stats, lm.db_path(), json)?;
         }
 
-        Commands::Dedup { json } => {
+        Commands::Conflicts {
+            yes,
+            reranker,
+            min_similarity,
+            json,
+        } => {
             let lm = open_controller(effective_db, global)?;
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
-            let merged = lm.deduplicate()?;
-            CliView::render_dedup(merged, lm.db_path(), json)?;
-        }
 
-        Commands::Conflicts { resolve, json } => {
-            let lm = open_controller(effective_db, global)?;
-            let conflicts = lm.find_conflicts(resolve)?;
-            CliView::render_conflicts(&conflicts, resolve, lm.db_path(), json)?;
+            if yes || json || !io::stdin().is_terminal() {
+                let conflicts =
+                    lm.find_conflicts_with_options(yes, min_similarity, reranker.as_deref())?;
+                CliView::render_conflicts(&conflicts, yes, lm.db_path(), json)?;
+            } else {
+                let conflicts =
+                    lm.find_conflicts_with_options(false, min_similarity, reranker.as_deref())?;
+                if conflicts.is_empty() {
+                    CliView::render_conflicts(&conflicts, false, lm.db_path(), false)?;
+                    return Ok(());
+                }
+
+                let mut retired_ids = std::collections::HashSet::new();
+                let mut force_all = false;
+                let mut merged_count = 0usize;
+
+                for (i, c) in conflicts.iter().enumerate() {
+                    if retired_ids.contains(&c.older_memory.id)
+                        || retired_ids.contains(&c.newer_memory.id)
+                    {
+                        continue;
+                    }
+
+                    CliView::render_conflict_pair(i + 1, conflicts.len(), c, false);
+
+                    let should_merge = if force_all {
+                        true
+                    } else {
+                        print!("  Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit: ");
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        match input.trim().to_lowercase().as_str() {
+                            "y" | "yes" => true,
+                            "a" | "all" => {
+                                force_all = true;
+                                true
+                            }
+                            "q" | "quit" => {
+                                println!("  Stopped conflict review ({} merged).", merged_count);
+                                break;
+                            }
+                            _ => false,
+                        }
+                    };
+
+                    if should_merge {
+                        let merged = lm.merge_conflict_pair(c, reranker.as_deref())?;
+                        retired_ids.insert(c.older_memory.id.clone());
+                        merged_count += 1;
+                        println!(
+                            "  ✓ Merged into {} (retired older {}): {}\n",
+                            &merged.id.to_string()[..8],
+                            &c.older_memory.id.to_string()[..8],
+                            merged.content
+                        );
+                    } else {
+                        println!("  ↷ Skipped (moving to next).\n");
+                    }
+                }
+
+                println!("✦ Conflict check complete: {} merged.", merged_count);
+            }
         }
 
         Commands::Completions { shell } => {
@@ -752,6 +848,17 @@ fn main() -> Result<()> {
                 })
             });
             cmd = cmd.mut_subcommand("answer", |sub| {
+                sub.mut_arg("reranker", |a| {
+                    a.value_parser(PossibleValuesParser::new([
+                        "onnx",
+                        "ollama",
+                        "top1",
+                        "minilm-squad2",
+                        "tinyroberta-squad2",
+                    ]))
+                })
+            });
+            cmd = cmd.mut_subcommand("conflicts", |sub| {
                 sub.mut_arg("reranker", |a| {
                     a.value_parser(PossibleValuesParser::new([
                         "onnx",

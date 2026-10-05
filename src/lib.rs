@@ -12,13 +12,14 @@ pub use services::{embeddings, exporter, importer, reranker, search};
 // Primary SDK Re-exports
 pub use controllers::{LightMem, MemoryController};
 pub use models::{
-    detect_memory_conflict, parse_ttl_duration, LightMemConfig, MemoryConflict, MemoryRecord,
-    MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory, StorageStats,
+    detect_memory_conflict, detect_memory_conflict_with_similarity, extract_meaningful_tokens,
+    parse_ttl_duration, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
+    PaginatedMemories, ScoredMemory, StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
 pub use services::{
     AnswerResult, EmbeddingProvider, Exporter, HashEmbeddingProvider, HybridSearchEngine,
-    ImportCandidate, JsonMemoryImporter, MemoryImporter, NeedleReranker, OkfMemoryImporter,
+    ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter,
     OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker,
     PrecisionReranker, Reranker, Top1Reranker,
 };

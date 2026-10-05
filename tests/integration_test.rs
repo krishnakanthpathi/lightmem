@@ -59,9 +59,7 @@ fn test_core_lifecycle() {
     let ans_prec = lm
         .answer("what port does redis use?", None, None, 5, false)
         .expect("precision answer failed");
-    if std::env::var_os("LIGHTMEM_NEEDLE_DISABLE").is_some()
-        || std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
-    {
+    if std::env::var_os("LIGHTMEM_QA_DISABLE").is_some() {
         assert_eq!(ans_prec.reranker_used, "none");
     } else {
         assert_eq!(ans_prec.reranker_used, "minilm-squad2");
@@ -611,9 +609,8 @@ fn test_contradiction_detection_and_supersede() {
         )
         .unwrap();
     assert_eq!(conflicts_1.len(), 1);
-    assert_eq!(conflicts_1[0].slot, "port");
-    assert_eq!(conflicts_1[0].old_value, "5432");
-    assert_eq!(conflicts_1[0].new_value, "6432");
+    assert!(conflicts_1[0].similarity > 0.5);
+    assert!(conflicts_1[0].overlap_ratio >= 0.45);
     assert_eq!(conflicts_1[0].older_memory.id, old_pg.id);
     assert_eq!(conflicts_1[0].newer_memory.id, new_pg.id);
 
@@ -661,4 +658,56 @@ fn test_contradiction_detection_and_supersede() {
         lm.get(&new_redis.id).unwrap().unwrap().status,
         MemoryStatus::Active
     );
+}
+
+#[test]
+fn test_date_filtering_in_list_and_recall() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(tmp.path(), config).unwrap();
+
+    let (mem, _) = lm
+        .remember_with_options(
+            "Kafka broker runs on port 9092.",
+            Some(MemoryType::Fact),
+            None,
+            vec!["kafka".to_string()],
+            Some(0.9),
+            None,
+            false,
+        )
+        .unwrap();
+
+    let today = mem.created_at.date_naive();
+    let other_day = today - Duration::days(5);
+
+    let today_list = lm
+        .list_paginated_with_date(None, Some(MemoryStatus::Active), None, Some(today), 10, 0)
+        .unwrap();
+    assert_eq!(today_list.total, 1);
+
+    let other_list = lm
+        .list_paginated_with_date(
+            None,
+            Some(MemoryStatus::Active),
+            None,
+            Some(other_day),
+            10,
+            0,
+        )
+        .unwrap();
+    assert_eq!(other_list.total, 0);
+
+    let today_recall = lm
+        .recall_with_date("Kafka broker", None, None, Some(today), 5, None)
+        .unwrap();
+    assert_eq!(today_recall.len(), 1);
+
+    let other_recall = lm
+        .recall_with_date("Kafka broker", None, None, Some(other_day), 5, None)
+        .unwrap();
+    assert!(other_recall.is_empty());
 }
