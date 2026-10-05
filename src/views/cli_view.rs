@@ -129,6 +129,41 @@ impl CliView {
             "hybrid SQLite FTS5 + vector store".to_string()
         };
 
+        let embedder_label = match cfg.backend.as_str() {
+            "onnx" => format!(
+                "onnx ({})",
+                cfg.onnx_model.as_deref().unwrap_or("bge-small")
+            ),
+            "ollama" => format!("ollama ({})", cfg.embedding_model),
+            other => other.to_string(),
+        };
+        let reranker_lower = cfg.reranker.trim().to_lowercase();
+        let reranker_label = match reranker_lower.as_str() {
+            "onnx" | "qa" | "precision" | "minilm-squad2" | "tinyroberta-squad2" => {
+                let qm = if reranker_lower == "tinyroberta-squad2" {
+                    "tinyroberta-squad2"
+                } else {
+                    cfg.qa_model.as_deref().unwrap_or("minilm-squad2")
+                };
+                format!("qa ({})", qm)
+            }
+            "ollama" => {
+                let m = cfg
+                    .qa_model
+                    .as_deref()
+                    .filter(|m| !matches!(*m, "minilm-squad2" | "tinyroberta-squad2"))
+                    .unwrap_or("auto");
+                format!("ollama ({})", m)
+            }
+            other if other.starts_with("ollama:") => {
+                format!("ollama ({})", &cfg.reranker.trim()[7..])
+            }
+            other if other.starts_with("onnx:") => {
+                format!("qa ({})", &cfg.reranker.trim()[5..])
+            }
+            other => other.to_string(),
+        };
+
         let right_lines: [String; 11] = [
             String::new(),
             format!(
@@ -162,9 +197,9 @@ impl CliView {
                 "  {} {:<10} {} {} {}",
                 Self::slate("✦"),
                 Self::slate("Engines"),
-                Self::violet_bold(&cfg.backend),
+                Self::violet_bold(&embedder_label),
                 Self::slate("+"),
-                Self::crimson_bold(&cfg.reranker)
+                Self::crimson_bold(&reranker_label)
             ),
             format!(
                 "{}",
@@ -248,10 +283,9 @@ impl CliView {
     }
 
     pub fn format_path(p: &Path) -> String {
-        if let Ok(home) = std::env::var("HOME") {
-            let home_path = Path::new(&home);
-            if let Ok(rel) = p.strip_prefix(home_path) {
-                return format!("~/{}", rel.display());
+        if let Some(home_path) = dirs::home_dir() {
+            if let Ok(rel) = p.strip_prefix(&home_path) {
+                return format!("~/{}", rel.display().to_string().replace('\\', "/"));
             }
         }
         p.display().to_string()

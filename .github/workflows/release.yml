@@ -19,8 +19,13 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
+            archive: lmem-aarch64-apple-darwin.tar.gz
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            archive: lmem-x86_64-unknown-linux-gnu.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: lmem-x86_64-pc-windows-msvc.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -33,18 +38,27 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --target ${{ matrix.target }} --bin lmem
 
-      - name: Package Tarball
+      - name: Package Tarball (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/lmem dist/lmem
           chmod +x dist/lmem
-          tar -czf lmem-${{ matrix.target }}.tar.gz -C dist lmem
+          tar -czf ${{ matrix.archive }} -C dist lmem
+
+      - name: Package Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/lmem.exe" "dist/lmem.exe"
+          Compress-Archive -Path "dist/lmem.exe" -DestinationPath "${{ matrix.archive }}" -Force
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: lmem-${{ matrix.target }}
-          path: lmem-${{ matrix.target }}.tar.gz
+          path: ${{ matrix.archive }}
 
   release:
     name: Publish GitHub Release
@@ -61,5 +75,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
           generate_release_notes: true

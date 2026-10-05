@@ -380,6 +380,10 @@ fn migrate_embeddings(lm: &LightMem, yes: bool, machine_output: bool, force: boo
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = colored::control::set_virtual_terminal(true);
+    }
     let cli = Cli::parse();
     let env_db = std::env::var("LIGHTMEM_DB").ok().map(PathBuf::from);
     let effective_db = cli.db.as_deref().or(env_db.as_deref());

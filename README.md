@@ -6,12 +6,18 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 
 ---
 
-## ◈ One-Line Install (macOS & Linux)
+## ◈ One-Line Install (macOS, Linux & Windows)
 
 Install the prebuilt `lmem` `v0.2.0` binary and pre-cache the local ONNX embedding (`bge-small`) and Extractive QA (`minilm-squad2`) models with a single command:
 
+### macOS & Linux
 ```bash
 curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.sh | sh
+```
+
+### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/feat/extractive-qa-ollama/install.ps1 | iex
 ```
 
 ### Build from Source (Rust / Cargo)
