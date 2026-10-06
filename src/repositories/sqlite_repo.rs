@@ -618,7 +618,8 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let _ = expire_due_conn(&conn);
 
-        let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(focus) = focus_term {
+        let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(focus) = focus_term
+        {
             if let Some(start_id) = resolve_id_or_title(&conn, focus)? {
                 let hops = max_hops.unwrap_or(2).clamp(1, 10);
                 let mut set = std::collections::HashSet::new();
@@ -701,9 +702,8 @@ impl Storage {
             nodes_map.insert(id, node);
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT source_id, target_id, relation, weight FROM memory_links",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT source_id, target_id, relation, weight FROM memory_links")?;
         let mut edges = Vec::new();
         let edge_rows = stmt.query_map([], |r| {
             Ok(GraphEdge {
@@ -799,9 +799,8 @@ impl Storage {
             tags: Vec<String>,
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT id, title, content, tags FROM memories WHERE status = 'active'",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, title, content, tags FROM memories WHERE status = 'active'")?;
         let rows = stmt.query_map([], |r| {
             let id: String = r.get(0)?;
             let title: String = r.get(1)?;
@@ -819,7 +818,8 @@ impl Storage {
         let mut vec_stmt = conn.prepare(
             "SELECT v.id, v.embedding FROM memory_vectors v JOIN memories m ON v.id = m.id WHERE m.status = 'active'",
         )?;
-        let mut vectors: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+        let mut vectors: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::new();
         let vec_rows = vec_stmt.query_map([], |r| {
             let id: String = r.get(0)?;
             let blob: Vec<u8> = r.get(1)?;
@@ -870,13 +870,8 @@ impl Storage {
                                     !next.is_alphanumeric()
                                 };
                                 if before_ok && after_ok {
-                                    total_created += insert_stmt.execute(params![
-                                        &a.id,
-                                        &b.id,
-                                        "mentions",
-                                        1.0f32,
-                                        &now
-                                    ])?;
+                                    total_created += insert_stmt
+                                        .execute(params![&a.id, &b.id, "mentions", 1.0f32, &now])?;
                                 }
                             }
                         }
@@ -908,20 +903,10 @@ impl Storage {
                     .count();
 
                 if shared_count >= 2 {
-                    total_created += insert_stmt.execute(params![
-                        &a.id,
-                        &b.id,
-                        "shared_topic",
-                        0.8f32,
-                        &now
-                    ])?;
-                    total_created += insert_stmt.execute(params![
-                        &b.id,
-                        &a.id,
-                        "shared_topic",
-                        0.8f32,
-                        &now
-                    ])?;
+                    total_created +=
+                        insert_stmt.execute(params![&a.id, &b.id, "shared_topic", 0.8f32, &now])?;
+                    total_created +=
+                        insert_stmt.execute(params![&b.id, &a.id, "shared_topic", 0.8f32, &now])?;
                 }
             }
         }
@@ -942,20 +927,10 @@ impl Storage {
                 let sim = cosine_similarity(a_vec, b_vec);
                 if sim >= min_similarity {
                     let weight = ((sim * 100.0).round() / 100.0).clamp(0.1, 1.0);
-                    total_created += insert_stmt.execute(params![
-                        a_id,
-                        b_id,
-                        "relates_to",
-                        weight,
-                        &now
-                    ])?;
-                    total_created += insert_stmt.execute(params![
-                        b_id,
-                        a_id,
-                        "relates_to",
-                        weight,
-                        &now
-                    ])?;
+                    total_created +=
+                        insert_stmt.execute(params![a_id, b_id, "relates_to", weight, &now])?;
+                    total_created +=
+                        insert_stmt.execute(params![b_id, a_id, "relates_to", weight, &now])?;
                 }
             }
         }
@@ -1935,7 +1910,11 @@ mod fts_tests {
             MemoryType::Decision,
             "Database Replication".to_string(),
             "Postgres primary replicates WAL to two standby read replicas".to_string(),
-            vec!["database".to_string(), "cluster".to_string(), "postgres".to_string()],
+            vec![
+                "database".to_string(),
+                "cluster".to_string(),
+                "postgres".to_string(),
+            ],
             0.9,
             None,
         );
@@ -1946,7 +1925,11 @@ mod fts_tests {
             MemoryType::Fact,
             "Failover Mechanism".to_string(),
             "Patroni triggers leader election if primary heartbeat misses 3 pings".to_string(),
-            vec!["database".to_string(), "cluster".to_string(), "patroni".to_string()],
+            vec![
+                "database".to_string(),
+                "cluster".to_string(),
+                "patroni".to_string(),
+            ],
             0.9,
             None,
         );
@@ -1956,19 +1939,25 @@ mod fts_tests {
 
         // Run autolink
         let new_links = storage.autolink_vault(0.75).unwrap();
-        assert!(new_links >= 3, "Expected at least 3 links created, got {}", new_links);
+        assert!(
+            new_links >= 3,
+            "Expected at least 3 links created, got {}",
+            new_links
+        );
 
         // Verify mem_a mentions mem_b
         let links_a = storage.get_links_for_memory(&mem_a.id).unwrap();
-        assert!(links_a.iter().any(|l| l.target_id == mem_b.id && l.relation == "mentions"));
+        assert!(links_a
+            .iter()
+            .any(|l| l.target_id == mem_b.id && l.relation == "mentions"));
 
         // Verify mem_c and mem_d are linked via shared_topic and relates_to
         let links_c = storage.get_links_for_memory(&mem_c.id).unwrap();
-        assert!(links_c.iter().any(|l| l.target_id == mem_d.id && (l.relation == "shared_topic" || l.relation == "relates_to")));
+        assert!(links_c.iter().any(|l| l.target_id == mem_d.id
+            && (l.relation == "shared_topic" || l.relation == "relates_to")));
 
         // Idempotency: second run should add 0 new links
         let second_run = storage.autolink_vault(0.75).unwrap();
         assert_eq!(second_run, 0);
     }
 }
-

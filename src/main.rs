@@ -980,11 +980,7 @@ fn main() -> Result<()> {
             CliView::render_related(&id, &related, json)?;
         }
 
-        Commands::Graph {
-            focus,
-            hops,
-            json,
-        } => {
+        Commands::Graph { focus, hops, json } => {
             let lm = open_controller(effective_db, global)?;
             let snapshot = lm.graph(focus.as_deref(), Some(hops))?;
             CliView::render_graph(&snapshot, json)?;
@@ -997,12 +993,7 @@ fn main() -> Result<()> {
             let lm = open_controller(effective_db, global)?;
             let new_links = lm.autolink(Some(min_similarity))?;
             let snapshot = lm.graph(None, None)?;
-            CliView::render_autolink(
-                new_links,
-                snapshot.nodes.len(),
-                snapshot.edges.len(),
-                json,
-            )?;
+            CliView::render_autolink(new_links, snapshot.nodes.len(), snapshot.edges.len(), json)?;
         }
 
         Commands::Connect {
@@ -1174,14 +1165,14 @@ fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
         &["python", "-m", "pip", "uninstall", "-y", "lmem"],
     ];
     for cmd in pip_cmds {
-        if let Ok(output) = std::process::Command::new(cmd[0])
-            .args(&cmd[1..])
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new(cmd[0]).args(&cmd[1..]).output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if stdout.contains("Successfully uninstalled") {
-                    println!("  \x1b[1;32m◈\x1b[0m Uninstalled lmem Python package ({})", cmd[0]);
+                    println!(
+                        "  \x1b[1;32m◈\x1b[0m Uninstalled lmem Python package ({})",
+                        cmd[0]
+                    );
                     break;
                 }
             }
@@ -1193,12 +1184,18 @@ fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
     if purge_data {
         if lightmem_dir.exists() {
             let _ = std::fs::remove_dir_all(&lightmem_dir);
-            println!("  \x1b[1;31m◈\x1b[0m Purged all data & models: {}", lightmem_dir.display());
+            println!(
+                "  \x1b[1;31m◈\x1b[0m Purged all data & models: {}",
+                lightmem_dir.display()
+            );
         }
     } else {
         let vault_file = lightmem_dir.join("memories.db");
         if vault_file.exists() {
-            println!("\n  \x1b[1;36mℹ\x1b[0m Persistent vault preserved at: {}", vault_file.display());
+            println!(
+                "\n  \x1b[1;36mℹ\x1b[0m Persistent vault preserved at: {}",
+                vault_file.display()
+            );
             println!("    (To delete your memories vault as well, pass: --purge-data)");
         }
     }
@@ -1256,7 +1253,9 @@ fn clean_rc_file(path: &Path, pattern: &str) -> Result<()> {
     }
     let new_content = cleaned_lines.join("\n") + "\n";
     std::fs::write(path, new_content)?;
-    println!("  \x1b[1;32m◈\x1b[0m Cleaned completion hooks from {}", path.display());
+    println!(
+        "  \x1b[1;32m◈\x1b[0m Cleaned completion hooks from {}",
+        path.display()
+    );
     Ok(())
 }
-

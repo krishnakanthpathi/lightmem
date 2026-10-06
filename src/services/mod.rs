@@ -19,4 +19,3 @@ pub use reranker::{
     AnswerResult, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker, Top1Reranker,
 };
 pub use search::HybridSearchEngine;
-

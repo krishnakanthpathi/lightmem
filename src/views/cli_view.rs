@@ -250,11 +250,7 @@ impl CliView {
                 "lmem answer \"<question>\"",
                 "Extractive QA via ONNX or Ollama",
             ),
-            (
-                "│",
-                "lmem graph",
-                "Terminal network tree & connection map",
-            ),
+            ("│", "lmem graph", "Terminal network tree & connection map"),
             (
                 "│",
                 "lmem related \"<id>\" --hops 2",
@@ -701,23 +697,60 @@ impl CliView {
         let tags_str = if memory.tags.is_empty() {
             "none".to_string()
         } else {
-            memory.tags.iter().map(|t| format!("#{}", t)).collect::<Vec<_>>().join(" ")
+            memory
+                .tags
+                .iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" ")
         };
 
-        println!("\n  {} {}", Self::slate("├─ Tags:       "), Self::gold(&tags_str));
-        println!("  {} {}", Self::slate("├─ Confidence: "), Self::white_bold(&format!("{:.2}", memory.confidence)));
-        println!("  {} {}", Self::slate("├─ Provenance: "), Self::slate(&memory.provenance));
-        println!("  {} {}", Self::slate("├─ Created:    "), Self::slate(&memory.created_at.to_rfc3339()));
+        println!(
+            "\n  {} {}",
+            Self::slate("├─ Tags:       "),
+            Self::gold(&tags_str)
+        );
+        println!(
+            "  {} {}",
+            Self::slate("├─ Confidence: "),
+            Self::white_bold(&format!("{:.2}", memory.confidence))
+        );
+        println!(
+            "  {} {}",
+            Self::slate("├─ Provenance: "),
+            Self::slate(&memory.provenance)
+        );
+        println!(
+            "  {} {}",
+            Self::slate("├─ Created:    "),
+            Self::slate(&memory.created_at.to_rfc3339())
+        );
         if let Some(exp) = memory.expired_at {
-            println!("  {} {}", Self::slate("╰─ Expired:    "), Self::gold(&exp.to_rfc3339()));
+            println!(
+                "  {} {}",
+                Self::slate("╰─ Expired:    "),
+                Self::gold(&exp.to_rfc3339())
+            );
         } else {
-            println!("  {} {}", Self::slate("╰─ Updated:    "), Self::slate(&memory.updated_at.to_rfc3339()));
+            println!(
+                "  {} {}",
+                Self::slate("╰─ Updated:    "),
+                Self::slate(&memory.updated_at.to_rfc3339())
+            );
         }
 
         if !links.is_empty() {
-            println!("\n  {} Knowledge Graph Links ({}):", Self::crimson_bold("◫"), links.len());
+            println!(
+                "\n  {} Knowledge Graph Links ({}):",
+                Self::crimson_bold("◫"),
+                links.len()
+            );
             for link in links {
-                let target_short = if link.target_id.len() >= 8 { &link.target_id[..8] } else { &link.target_id };
+                let target_short = if link.target_id.len() >= 8 {
+                    &link.target_id[..8]
+                } else {
+                    &link.target_id
+                };
                 println!(
                     "    ├─ ──{}──▶ ({}) {}",
                     Self::violet_bold(&link.relation),
@@ -1024,11 +1057,7 @@ impl CliView {
         Ok(())
     }
 
-    pub fn render_related(
-        start_term: &str,
-        results: &[RelatedMemory],
-        json: bool,
-    ) -> Result<()> {
+    pub fn render_related(start_term: &str, results: &[RelatedMemory], json: bool) -> Result<()> {
         if json {
             println!("{}", serde_json::to_string_pretty(results)?);
             return Ok(());
@@ -1064,7 +1093,10 @@ impl CliView {
             let short_id: String = r.memory.id.chars().take(8).collect();
             let path_str = r.relation_path.join(" ──▶ ");
             let snippet = if r.memory.content.chars().count() > 100 {
-                format!("{}...", r.memory.content.chars().take(100).collect::<String>())
+                format!(
+                    "{}...",
+                    r.memory.content.chars().take(100).collect::<String>()
+                )
             } else {
                 r.memory.content.clone()
             };
@@ -1083,20 +1115,13 @@ impl CliView {
                 Self::slate("├─"),
                 Self::violet_bold(&path_str)
             );
-            println!(
-                "    {} {}\n",
-                Self::slate("╰─"),
-                Self::slate(&snippet)
-            );
+            println!("    {} {}\n", Self::slate("╰─"), Self::slate(&snippet));
         }
 
         Ok(())
     }
 
-    pub fn render_graph(
-        snapshot: &GraphSnapshot,
-        json: bool,
-    ) -> Result<()> {
+    pub fn render_graph(snapshot: &GraphSnapshot, json: bool) -> Result<()> {
         if json {
             println!("{}", serde_json::to_string_pretty(snapshot)?);
             return Ok(());
@@ -1231,7 +1256,11 @@ impl CliView {
             return Ok(());
         }
 
-        let mode_str = if workspace { "Workspace (local)" } else { "Global (~/)" };
+        let mode_str = if workspace {
+            "Workspace (local)"
+        } else {
+            "Global (~/)"
+        };
         println!(
             "\n  {} {} {}",
             Self::crimson_bold("❖"),
@@ -1270,4 +1299,3 @@ impl CliView {
         Ok(())
     }
 }
-

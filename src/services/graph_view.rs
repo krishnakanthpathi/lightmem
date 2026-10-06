@@ -33,11 +33,8 @@ pub fn render_terminal(snapshot: &GraphSnapshot) -> String {
             .push(edge);
     }
 
-    let node_map: HashMap<String, &GraphNode> = snapshot
-        .nodes
-        .iter()
-        .map(|n| (n.id.clone(), n))
-        .collect();
+    let node_map: HashMap<String, &GraphNode> =
+        snapshot.nodes.iter().map(|n| (n.id.clone(), n)).collect();
 
     // Sort nodes: hubs with highest degree first
     let mut sorted_nodes = snapshot.nodes.clone();

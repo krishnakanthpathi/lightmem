@@ -241,10 +241,9 @@ impl LightMem {
         }
 
         // Auto-link any wikilinks [[...]] in memory content and title
-        let _ = self.storage.auto_link_memory(
-            &stored.id,
-            &format!("{}\n{}", stored.title, stored.content),
-        );
+        let _ = self
+            .storage
+            .auto_link_memory(&stored.id, &format!("{}\n{}", stored.title, stored.content));
 
         Ok((stored, conflicts))
     }
@@ -612,14 +611,9 @@ impl LightMem {
     }
 
     /// Get knowledge graph snapshot (all active nodes and edges, or focused neighborhood)
-    pub fn graph(
-        &self,
-        focus: Option<&str>,
-        hops: Option<usize>,
-    ) -> Result<GraphSnapshot> {
+    pub fn graph(&self, focus: Option<&str>, hops: Option<usize>) -> Result<GraphSnapshot> {
         self.storage.get_graph_snapshot(focus, hops)
     }
-
 
     /// Export memories to an OKF bundle
     pub fn export_okf(&self, target_path: Option<&Path>) -> Result<PathBuf> {
