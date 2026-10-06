@@ -1,0 +1,14 @@
+{
+  "name": "@lmem/win32-x64",
+  "version": "0.2.4",
+  "description": "Windows (x64) precompiled native engine for LightMem",
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krishnakanthpathi/lightmem.git",
+    "directory": "node/npm/win32-x64"
+  }
+}

@@ -14,3 +14,9 @@ __pycache__/
 /python/build/
 /python/src/lmem/bin/
 .pytest_cache/
+node_modules/
+node/node_modules/
+node/bin/lmem
+node/bin/lmem.exe
+node/dist/
+node/npm/*/bin/

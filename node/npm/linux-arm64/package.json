@@ -1,0 +1,14 @@
+{
+  "name": "@lmem/linux-arm64",
+  "version": "0.2.4",
+  "description": "Linux (ARM64) precompiled native engine for LightMem",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": ["bin"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/krishnakanthpathi/lightmem.git",
+    "directory": "node/npm/linux-arm64"
+  }
+}

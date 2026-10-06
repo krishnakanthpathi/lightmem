@@ -13,6 +13,13 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 pip install lmem
 ```
 
+### Node.js & TypeScript (Zero dependencies — Instant sub-10ms startup)
+```bash
+npm install lmem
+# or run CLI directly without installation:
+npx lmem stats
+```
+
 ### Universal Shell Installer (macOS & Linux)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh
