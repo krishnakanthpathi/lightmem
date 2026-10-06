@@ -12,4 +12,5 @@ __pycache__/
 *.egg-info/
 /python/dist/
 /python/build/
+/python/src/lmem/bin/
 .pytest_cache/

@@ -45,6 +45,11 @@ def get_binary_path() -> str:
     3. PATH, filtering out Python wrapper scripts
     4. Auto-downloads prebuilt binary to `~/.lightmem/bin/lmem` if missing.
     """
+    # 0. Check bundled binary packaged directly with the Python wheel (site-packages/lmem/bin/lmem)
+    bundled = Path(__file__).parent / "bin" / ("lmem.exe" if platform.system() == "Windows" else "lmem")
+    if _is_native_binary(bundled):
+        return str(bundled)
+
     env_path = os.environ.get("LMEM_BINARY_PATH") or os.environ.get("LIGHTMEM_BINARY_PATH")
     if env_path and _is_native_binary(env_path):
         return env_path
@@ -85,7 +90,7 @@ def get_binary_path() -> str:
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.2.2") -> str:
+def ensure_binary_downloaded(version: str = "v0.2.3") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -131,10 +136,10 @@ def ensure_binary_downloaded(version: str = "v0.2.2") -> str:
         return str(dest_exe)
     except Exception as e:
         tmp_archive.unlink(missing_ok=True)
-        # Fall back to v0.2.1 if v0.2.2 is still building on GitHub Actions
-        if version != "v0.2.1":
+        # Fall back to v0.2.2 if v0.2.3 is still building on GitHub Actions
+        if version != "v0.2.2":
             try:
-                return ensure_binary_downloaded(version="v0.2.1")
+                return ensure_binary_downloaded(version="v0.2.2")
             except Exception:
                 pass
         raise RuntimeError(f"Failed to auto-download lmem binary from {url}: {e}")
