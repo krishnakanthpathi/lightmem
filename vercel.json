@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "cleanUrls": true,
+  "outputDirectory": "static",
+  "rewrites": [
+    { "source": "/docs", "destination": "/docs.html" }
+  ],
+  "redirects": [
+    { "source": "/LightMem%20Landing%20Page.html", "destination": "/", "permanent": true },
+    { "source": "/LightMem%20Documentation.html", "destination": "/docs", "permanent": true }
+  ]
+}
