@@ -1166,7 +1166,29 @@ fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
         println!("  \x1b[38;2;113;113;122m▸ No standalone binaries found in ~/.local/bin or ~/.cargo/bin\x1b[0m");
     }
 
-    // 4. Data handling
+    // 4. Uninstall Python pip package if present
+    let pip_cmds: &[&[&str]] = &[
+        &["pip3", "uninstall", "-y", "lmem"],
+        &["pip", "uninstall", "-y", "lmem"],
+        &["python3", "-m", "pip", "uninstall", "-y", "lmem"],
+        &["python", "-m", "pip", "uninstall", "-y", "lmem"],
+    ];
+    for cmd in pip_cmds {
+        if let Ok(output) = std::process::Command::new(cmd[0])
+            .args(&cmd[1..])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("Successfully uninstalled") {
+                    println!("  \x1b[1;32m◈\x1b[0m Uninstalled lmem Python package ({})", cmd[0]);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 5. Data handling
     let lightmem_dir = home.join(".lightmem");
     if purge_data {
         if lightmem_dir.exists() {
