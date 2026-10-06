@@ -151,14 +151,29 @@ LightMem supports three swappable reranker backends for `lmem answer`, `lmem rec
 | **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
 
 ```bash
-# Pre-download ONNX models for offline usage
-lmem config --download minilm-squad2
-lmem config --download tinyroberta-squad2
-lmem config --download all
+# 1. Inspect complete active configuration
+lmem config                   # Formatted tree of all 11 settings (backend, models, URLs, DB, masked API key)
+lmem config --json            # Full machine-readable JSON configuration
 
-# Switch embedding backend (prompts for safe atomic re-indexing)
-lmem config --backend onnx --onnx-model bge-small
-lmem config --backend ollama --model nomic-embed-text --url http://localhost:11434
+# 2. Local Offline Mode (Pure-Rust ONNX embeddings & Extractive QA)
+lmem config --backend onnx --onnx-model bge-small --yes
+lmem config --reranker minilm-squad2
+lmem config --download all     # Pre-cache ONNX models locally for offline operation
+
+# 3. Local Ollama Mode (Zero-Auth / localhost)
+lmem config --backend ollama --url http://localhost:11434 --model nomic-embed-text --clear-api-key --yes
+lmem config --reranker ollama:qwen2.5:3b
+
+# 4. Authenticated Remote / Cloud Ollama (Bearer API Key)
+# Compatible with Ollama Cloud, LiteLLM proxy, Open-WebUI, or self-hosted servers with auth
+lmem config --url https://ollama.company.internal --api-key sk-your-key-here
+# Or set via environment variable:
+export OLLAMA_API_KEY="sk-your-key-here"     # or LMEM_OLLAMA_API_KEY
+
+# 5. Interchanging on the fly without changing persistent config
+# Pass `-r` to answer or conflicts to use local ONNX or remote Ollama per-query:
+lmem answer "what is my api token" -r minilm-squad2        # Fast local ONNX extractive QA
+lmem answer "summarize sprint goals" -r ollama:llama3.3:70b # Remote authenticated Ollama
 ```
 
 ---
