@@ -11,39 +11,68 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 
 
+def _is_native_binary(path: Path | str) -> bool:
+    """Checks if a file exists, is executable, and is a true native binary (not a script)."""
+    p = Path(path)
+    if not p.is_file() or not os.access(p, os.X_OK):
+        return False
+    try:
+        with open(p, "rb") as f:
+            header = f.read(4)
+            # Explicitly reject shell/python wrapper scripts starting with '#!'
+            if header[:2] == b"#!":
+                return False
+            # Check known native binary signatures:
+            # macOS Mach-O: \xcf\xfa\xed\xfe (64-bit LE), \xfe\xed\xfa\xcf (64-bit BE), \xca\xfe\xba\xbe (fat)
+            # Linux ELF: \x7fELF
+            # Windows PE: MZ
+            if (
+                header in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\x7fELF")
+                or header[:2] == b"MZ"
+            ):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def get_binary_path() -> str:
     """
-    Locates the `lmem` executable.
+    Locates the `lmem` native executable.
     Checks:
     1. Environment variable `LMEM_BINARY_PATH` or `LIGHTMEM_BINARY_PATH`
-    2. PATH (`which lmem`)
-    3. User local directory `~/.local/bin/lmem` or `~/.cargo/bin/lmem`
+    2. Well-known local install directories (~/.lightmem/bin, ~/.local/bin, ~/.cargo/bin)
+    3. PATH, filtering out Python wrapper scripts
     4. Auto-downloads prebuilt binary to `~/.lightmem/bin/lmem` if missing.
     """
     env_path = os.environ.get("LMEM_BINARY_PATH") or os.environ.get("LIGHTMEM_BINARY_PATH")
-    if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
+    if env_path and _is_native_binary(env_path):
         return env_path
-
-    which_path = shutil.which("lmem")
-    if which_path:
-        return which_path
 
     home = Path.home()
     candidate_paths = [
-        home / ".local" / "bin" / "lmem",
-        home / ".cargo" / "bin" / "lmem",
         home / ".lightmem" / "bin" / "lmem",
         home / ".lightmem" / "bin" / "lmem.exe",
+        home / ".local" / "bin" / "lmem",
+        home / ".cargo" / "bin" / "lmem",
     ]
 
     for p in candidate_paths:
-        if p.is_file() and os.access(str(p), os.X_OK):
+        if _is_native_binary(p):
             return str(p)
+
+    # Check PATH, but skip if it's a Python script/wrapper
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        if not path_dir:
+            continue
+        candidate = Path(path_dir) / ("lmem.exe" if platform.system() == "Windows" else "lmem")
+        if _is_native_binary(candidate):
+            return str(candidate)
 
     # If not found, attempt to auto-download to ~/.lightmem/bin/lmem
     try:
         downloaded = ensure_binary_downloaded()
-        if downloaded and os.path.isfile(downloaded) and os.access(downloaded, os.X_OK):
+        if downloaded and _is_native_binary(downloaded):
             return downloaded
     except Exception as e:
         pass
@@ -56,7 +85,7 @@ def get_binary_path() -> str:
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.2.1") -> str:
+def ensure_binary_downloaded(version: str = "v0.2.2") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -80,12 +109,13 @@ def ensure_binary_downloaded(version: str = "v0.2.1") -> str:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_exe = dest_dir / exe_name
 
-    if dest_exe.is_file() and os.access(str(dest_exe), os.X_OK):
+    if _is_native_binary(dest_exe):
         return str(dest_exe)
 
     url = f"https://github.com/krishnakanthpathi/lightmem/releases/download/{version}/{archive_name}"
     tmp_archive = dest_dir / archive_name
 
+    sys.stderr.write(f"Downloading LightMem native engine ({version}) from GitHub...\n")
     try:
         urllib.request.urlretrieve(url, tmp_archive)
         if archive_name.endswith(".zip"):
@@ -97,9 +127,16 @@ def ensure_binary_downloaded(version: str = "v0.2.1") -> str:
 
         tmp_archive.unlink(missing_ok=True)
         dest_exe.chmod(0o755)
+        sys.stderr.write("LightMem native engine successfully installed.\n")
         return str(dest_exe)
     except Exception as e:
         tmp_archive.unlink(missing_ok=True)
+        # Fall back to v0.2.1 if v0.2.2 is still building on GitHub Actions
+        if version != "v0.2.1":
+            try:
+                return ensure_binary_downloaded(version="v0.2.1")
+            except Exception:
+                pass
         raise RuntimeError(f"Failed to auto-download lmem binary from {url}: {e}")
 
 
