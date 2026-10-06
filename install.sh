@@ -5,8 +5,22 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.2.0"
+VERSION="v0.2.3"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
+
+# Support --uninstall / -u flag
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall|-u)
+            SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo "")"
+            if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
+                exec "$SCRIPT_DIR/uninstall.sh" "$@"
+            else
+                exec sh -c "$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/neural-reranker/uninstall.sh")" sh "$@"
+            fi
+            ;;
+    esac
+done
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"

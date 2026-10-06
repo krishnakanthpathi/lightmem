@@ -6,11 +6,14 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 
 ---
 
-## ◈ One-Line Install (macOS, Linux & Windows)
+## ◈ Quick Install (macOS, Linux & Windows)
 
-Install the prebuilt `lmem` `v0.2.0` binary and pre-cache the local ONNX embedding (`bge-small`) and Extractive QA (`minilm-squad2`) models with a single command:
+### Python (Precompiled Native Wheel — Instant sub-10ms startup)
+```bash
+pip install lmem
+```
 
-### macOS & Linux
+### Universal Shell Installer (macOS & Linux)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh
 ```
@@ -25,6 +28,26 @@ irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker
 git clone -b neural-reranker https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
+```
+
+---
+
+## ◈ Clean Uninstall
+
+To remove the binary, shell completions, and shell configuration hooks (preserves your memories database at `~/.lightmem/memories.db` by default):
+
+```bash
+# Option 1: Native CLI command
+lmem uninstall
+
+# Option 2: One-line script (macOS & Linux)
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/uninstall.sh | sh
+
+# Option 3: Windows PowerShell
+irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/uninstall.ps1 | iex
+
+# To also purge your database and downloaded models:
+lmem uninstall --purge-data
 ```
 
 ---

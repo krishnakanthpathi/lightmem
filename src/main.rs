@@ -417,6 +417,17 @@ enum Commands {
         /// Target shell (zsh, bash, fish, elvish, powershell)
         shell: clap_complete::Shell,
     },
+
+    /// Uninstall LightMem binaries, shell completions, and optionally purge data
+    Uninstall {
+        /// Purge database (~/.lightmem/memories.db) and downloaded models
+        #[arg(short = 'a', long = "purge-data")]
+        purge_data: bool,
+
+        /// Non-interactive mode (proceed without confirmation)
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
 }
 
 fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
@@ -1077,7 +1088,153 @@ fn main() -> Result<()> {
             });
             clap_complete::generate(shell, &mut cmd, "lmem", &mut io::stdout());
         }
+
+        Commands::Uninstall { purge_data, yes } => {
+            handle_uninstall(purge_data, yes)?;
+        }
     }
 
     Ok(())
 }
+
+fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
+    println!("\n  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mUninstaller\x1b[0m");
+    println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    println!("  \x1b[1;38;2;220;38;38m▸\x1b[0m \x1b[38;2;228;228;231mRemoving LightMem engine, binaries & shell completions\x1b[0m");
+    println!("  \x1b[38;2;113;113;122m────────────────────────────────────────────────\x1b[0m\n");
+
+    if !yes && std::io::stdin().is_terminal() {
+        print!("  \x1b[1;33m? Proceed with uninstalling LightMem? [y/N]:\x1b[0m ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            println!("\n  \x1b[38;2;113;113;122mAborted by user.\x1b[0m\n");
+            return Ok(());
+        }
+        println!();
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    // 1. Clean completion hooks from ~/.zshrc and ~/.bashrc
+    clean_rc_file(&home.join(".zshrc"), "lightmem/completions")?;
+    clean_rc_file(&home.join(".bashrc"), "lightmem/completions")?;
+
+    // Purge zcompdump cache
+    if let Ok(entries) = std::fs::read_dir(&home) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(".zcompdump") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    // 2. Remove completion directory
+    let comp_dir = home.join(".lightmem").join("completions");
+    if comp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&comp_dir);
+        println!("  \x1b[1;32m◈\x1b[0m Removed shell completions: ~/.lightmem/completions");
+    }
+
+    // 3. Remove standalone binaries
+    let bin_candidates = [
+        home.join(".local/bin/lmem"),
+        home.join(".local/bin/lmem.exe"),
+        home.join(".cargo/bin/lmem"),
+        home.join(".cargo/bin/lmem.exe"),
+        home.join(".lightmem/bin/lmem"),
+        home.join(".lightmem/bin/lmem.exe"),
+    ];
+    let mut removed_count = 0;
+    for bin in &bin_candidates {
+        if bin.exists() {
+            if std::fs::remove_file(bin).is_ok() {
+                println!("  \x1b[1;32m◈\x1b[0m Removed binary: {}", bin.display());
+                removed_count += 1;
+            }
+        }
+    }
+    let lightmem_bin_dir = home.join(".lightmem").join("bin");
+    if lightmem_bin_dir.exists() {
+        let _ = std::fs::remove_dir_all(&lightmem_bin_dir);
+    }
+    if removed_count == 0 {
+        println!("  \x1b[38;2;113;113;122m▸ No standalone binaries found in ~/.local/bin or ~/.cargo/bin\x1b[0m");
+    }
+
+    // 4. Data handling
+    let lightmem_dir = home.join(".lightmem");
+    if purge_data {
+        if lightmem_dir.exists() {
+            let _ = std::fs::remove_dir_all(&lightmem_dir);
+            println!("  \x1b[1;31m◈\x1b[0m Purged all data & models: {}", lightmem_dir.display());
+        }
+    } else {
+        let vault_file = lightmem_dir.join("memories.db");
+        if vault_file.exists() {
+            println!("\n  \x1b[1;36mℹ\x1b[0m Persistent vault preserved at: {}", vault_file.display());
+            println!("    (To delete your memories vault as well, pass: --purge-data)");
+        }
+    }
+
+    // 5. Try to delete own executable if it was not already in bin_candidates
+    if let Ok(current_exe) = std::env::current_exe() {
+        if current_exe.exists() && !bin_candidates.contains(&current_exe) {
+            let _ = std::fs::remove_file(&current_exe);
+        }
+    }
+
+    println!("\n  \x1b[1;32m✔\x1b[0m LightMem has been successfully uninstalled.");
+    println!("    Restart your shell or run 'rehash' to complete.\n");
+    Ok(())
+}
+
+fn clean_rc_file(path: &Path, pattern: &str) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    if !content.contains(pattern) {
+        return Ok(());
+    }
+    let mut cleaned_lines = Vec::new();
+    let mut skip = false;
+    for line in content.lines() {
+        if line.contains("# LightMem CLI completions") {
+            skip = true;
+            continue;
+        }
+        if skip {
+            if line.contains("compinit")
+                || line.contains("menu select")
+                || line.contains("lmem.bash")
+                || line.contains("menu-complete")
+                || line.contains("show-all-if-ambiguous")
+                || line.contains("lightmem/completions")
+            {
+                continue;
+            }
+            if line.trim().is_empty() {
+                skip = false;
+                continue;
+            }
+            skip = false;
+        }
+        if line.contains(pattern) {
+            continue;
+        }
+        cleaned_lines.push(line);
+    }
+    let new_content = cleaned_lines.join("\n") + "\n";
+    std::fs::write(path, new_content)?;
+    println!("  \x1b[1;32m◈\x1b[0m Cleaned completion hooks from {}", path.display());
+    Ok(())
+}
+

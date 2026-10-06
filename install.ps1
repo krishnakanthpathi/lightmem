@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
 $Branch = "neural-reranker"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.0" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.3" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Target = "x86_64-pc-windows-msvc"
 $ArchiveUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/lmem-$Target.zip"
