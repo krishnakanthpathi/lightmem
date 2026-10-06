@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # LightMem Universal Single-Command Installer (macOS & Linux)
-# Usage: curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
 
 set -e
 
@@ -16,7 +16,7 @@ for arg in "$@"; do
             if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/uninstall.sh" ]; then
                 exec "$SCRIPT_DIR/uninstall.sh" "$@"
             else
-                exec sh -c "$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/neural-reranker/uninstall.sh")" sh "$@"
+                exec sh -c "$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/uninstall.sh")" sh "$@"
             fi
             ;;
     esac
@@ -185,7 +185,7 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
-    cargo install --git "https://github.com/${REPO}.git" --branch neural-reranker --locked --force
+    cargo install --git "https://github.com/${REPO}.git" --branch main --locked --force
     if [ -f "$HOME/.cargo/bin/lmem" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
         cp "$HOME/.cargo/bin/lmem" "$INSTALL_DIR/lmem"
     fi

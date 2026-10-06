@@ -85,7 +85,7 @@ def get_binary_path() -> str:
     raise FileNotFoundError(
         "Could not find the 'lmem' native binary on this system. "
         "Install it via:\n"
-        "  curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh\n"
+        "  curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh\n"
         "Or set the LMEM_BINARY_PATH environment variable."
     )
 

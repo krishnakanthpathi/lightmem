@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # LightMem Universal Uninstaller (macOS & Linux)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/uninstall.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/uninstall.sh | sh
 # Options:
 #   --purge-data, -a    Also delete memories database (~/.lightmem/memories.db) and downloaded models
 #   --yes, -y           Non-interactive mode (proceed without confirmation)

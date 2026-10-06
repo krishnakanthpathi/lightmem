@@ -1,5 +1,5 @@
 # LightMem (lmem) Universal Windows PowerShell Uninstaller
-# Usage: irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/uninstall.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/uninstall.ps1 | iex
 
 param (
     [switch]$PurgeData,

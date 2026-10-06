@@ -15,17 +15,17 @@ pip install lmem
 
 ### Universal Shell Installer (macOS & Linux)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
 ```
 
 ### Windows (PowerShell)
 ```powershell
-irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/install.ps1 | iex
+irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.ps1 | iex
 ```
 
 ### Build from Source (Rust / Cargo)
 ```bash
-git clone -b neural-reranker https://github.com/krishnakanthpathi/lightmem.git
+git clone https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
 ```
@@ -41,10 +41,10 @@ To remove the binary, shell completions, and shell configuration hooks (preserve
 lmem uninstall
 
 # Option 2: One-line script (macOS & Linux)
-curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/uninstall.sh | sh
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/uninstall.sh | sh
 
 # Option 3: Windows PowerShell
-irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/neural-reranker/uninstall.ps1 | iex
+irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/uninstall.ps1 | iex
 
 # To also purge your database and downloaded models:
 lmem uninstall --purge-data
