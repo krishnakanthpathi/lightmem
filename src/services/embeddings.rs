@@ -129,14 +129,23 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
 pub struct OllamaEmbeddingProvider {
     pub url: String,
     pub model: String,
+    pub api_key: Option<String>,
 }
 
 impl OllamaEmbeddingProvider {
     pub fn new(url: String, model: String) -> Self {
+        Self::with_api_key(url, model, None)
+    }
+
+    pub fn with_api_key(url: String, model: String, api_key: Option<String>) -> Self {
         let clean_url = url.trim_end_matches('/').to_string();
+        let clean_key = api_key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"));
         Self {
             url: clean_url,
             model,
+            api_key: clean_key,
         }
     }
 }
@@ -166,9 +175,14 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
             prompt: text,
         };
 
-        let resp_result = ureq::post(&endpoint)
-            .timeout(std::time::Duration::from_secs(30))
-            .send_json(&body);
+        let mut req = ureq::post(&endpoint).timeout(std::time::Duration::from_secs(30));
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        let resp_result = req.send_json(&body);
 
         match resp_result {
             Ok(resp) => {
@@ -195,8 +209,15 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                     input: &'a str,
                 }
 
-                let alt_resp = ureq::post(&alt_endpoint)
-                    .timeout(std::time::Duration::from_secs(30))
+                let mut alt_req =
+                    ureq::post(&alt_endpoint).timeout(std::time::Duration::from_secs(30));
+                if let Some(ref key) = self.api_key {
+                    alt_req = alt_req.set(
+                        "Authorization",
+                        &crate::models::config::format_auth_header(key),
+                    );
+                }
+                let alt_resp = alt_req
                     .send_json(&AltRequest {
                         model: &self.model,
                         input: text,

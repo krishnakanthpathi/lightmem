@@ -2,11 +2,23 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Helper to format an HTTP Authorization header value as Bearer token
+pub fn format_auth_header(api_key: &str) -> String {
+    let trimmed = api_key.trim();
+    if trimmed.to_lowercase().starts_with("bearer ") {
+        trimmed.to_string()
+    } else {
+        format!("Bearer {}", trimmed)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightMemConfig {
     pub backend: String,
     pub onnx_model: Option<String>,
     pub ollama_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_api_key: Option<String>,
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
@@ -22,6 +34,7 @@ impl Default for LightMemConfig {
             backend: "onnx".to_string(),
             onnx_model: Some("Xenova/bge-small-en-v1.5".to_string()),
             ollama_url: "http://localhost:11434".to_string(),
+            ollama_api_key: None,
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
         }
@@ -75,6 +88,27 @@ impl LightMemConfig {
             other if other.contains(':') => format!("ollama:{}", trimmed),
             _ => "minilm-squad2".to_string(),
         }
+    }
+
+    /// Resolves effective Ollama API key from config, or environment variables (OLLAMA_API_KEY, LMEM_OLLAMA_API_KEY).
+    pub fn effective_ollama_api_key(&self) -> Option<String> {
+        self.ollama_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+            .map(String::from)
+            .or_else(|| {
+                std::env::var("OLLAMA_API_KEY")
+                    .ok()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+            })
+            .or_else(|| {
+                std::env::var("LMEM_OLLAMA_API_KEY")
+                    .ok()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+            })
     }
 
     /// Stable embedding-space identity, including card preprocessing and engine version.
@@ -280,5 +314,33 @@ impl LightMemConfig {
         }
 
         Self::global_db_path()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_auth_header() {
+        assert_eq!(format_auth_header("my-secret-key"), "Bearer my-secret-key");
+        assert_eq!(format_auth_header("Bearer already-prefixed"), "Bearer already-prefixed");
+        assert_eq!(format_auth_header("bearer lower-case"), "bearer lower-case");
+        assert_eq!(format_auth_header("  padded-token  "), "Bearer padded-token");
+    }
+
+    #[test]
+    fn test_effective_ollama_api_key_resolution() {
+        let mut cfg = LightMemConfig::default();
+        assert_eq!(cfg.effective_ollama_api_key(), None);
+
+        cfg.ollama_api_key = Some("test-key-123".to_string());
+        assert_eq!(cfg.effective_ollama_api_key(), Some("test-key-123".to_string()));
+
+        cfg.ollama_api_key = Some("none".to_string());
+        assert_eq!(cfg.effective_ollama_api_key(), None);
+
+        cfg.ollama_api_key = Some("  ".to_string());
+        assert_eq!(cfg.effective_ollama_api_key(), None);
     }
 }

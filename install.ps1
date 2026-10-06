@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
 $Branch = "main"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.4" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.5" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Target = "x86_64-pc-windows-msvc"
 $ArchiveUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/lmem-$Target.zip"

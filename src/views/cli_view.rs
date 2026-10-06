@@ -872,7 +872,40 @@ impl CliView {
         Ok(())
     }
 
-    pub fn render_config(cfg: &LightMemConfig, updated: bool) {
+    pub fn render_config(cfg: &LightMemConfig, updated: bool, json: bool) -> Result<()> {
+        if json {
+            let active_db = LightMemConfig::resolve_db_path(false);
+            let mut val = serde_json::to_value(cfg)?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "embedding_identity".into(),
+                    serde_json::Value::String(cfg.embedding_identity().unwrap_or_default()),
+                );
+                obj.insert(
+                    "active_embedding_summary".into(),
+                    serde_json::Value::String(cfg.active_embedding_summary()),
+                );
+                obj.insert(
+                    "active_reranker_summary".into(),
+                    serde_json::Value::String(cfg.active_reranker_summary()),
+                );
+                obj.insert(
+                    "config_file".into(),
+                    serde_json::Value::String(LightMemConfig::config_file().to_string_lossy().to_string()),
+                );
+                obj.insert(
+                    "active_db".into(),
+                    serde_json::Value::String(active_db.to_string_lossy().to_string()),
+                );
+                obj.insert(
+                    "has_ollama_api_key".into(),
+                    serde_json::Value::Bool(cfg.effective_ollama_api_key().is_some()),
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&val)?);
+            return Ok(());
+        }
+
         if updated {
             println!(
                 "{} {}",
@@ -888,29 +921,98 @@ impl CliView {
             Self::white_bold("LightMem Configuration")
         );
         println!(
-            "  {} {:<16} {}",
+            "  {} {:<20} {}",
             Self::slate("├─"),
-            Self::slate("Embedder"),
-            Self::emerald_bold(&cfg.active_embedding_summary())
+            Self::slate("Backend Engine"),
+            Self::emerald_bold(&cfg.backend)
         );
         println!(
-            "  {} {:<16} {}",
+            "  {} {:<20} {}",
             Self::slate("├─"),
-            Self::slate("Reranker"),
+            Self::slate("Active Embedder"),
+            Self::emerald_bold(&cfg.active_embedding_summary())
+        );
+        if cfg.backend == "onnx" || cfg.onnx_model.is_some() {
+            println!(
+                "  {} {:<20} {}",
+                Self::slate("├─"),
+                Self::slate("ONNX Model Spec"),
+                Self::slate(cfg.onnx_model.as_deref().unwrap_or("bge-small"))
+            );
+        }
+        if let Ok(id) = cfg.embedding_identity() {
+            println!(
+                "  {} {:<20} {}",
+                Self::slate("├─"),
+                Self::slate("Embedding Identity"),
+                Self::slate(&id)
+            );
+        }
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("├─"),
+            Self::slate("Active Reranker"),
             Self::crimson_bold(&cfg.active_reranker_summary())
         );
         println!(
-            "  {} {:<16} {}",
+            "  {} {:<20} {}",
             Self::slate("├─"),
-            Self::slate("Ollama URL"),
-            Self::slate(&cfg.ollama_url)
+            Self::slate("Configured Reranker"),
+            Self::slate(&cfg.reranker)
         );
         println!(
-            "  {} {:<16} {}",
+            "  {} {:<20} {}",
+            Self::slate("├─"),
+            Self::slate("Ollama Server URL"),
+            Self::slate(&cfg.ollama_url)
+        );
+        let api_key_display = if let Some(ref k) = cfg.ollama_api_key {
+            if k.len() > 8 {
+                Self::gold(&format!("{}...{} (config.json)", &k[..4], &k[k.len() - 4..]))
+            } else {
+                Self::gold("******** (config.json)")
+            }
+        } else if let Some(k) = cfg.effective_ollama_api_key() {
+            if k.len() > 8 {
+                Self::gold(&format!("{}...{} (from env: OLLAMA_API_KEY)", &k[..4], &k[k.len() - 4..]))
+            } else {
+                Self::gold("******** (from env: OLLAMA_API_KEY)")
+            }
+        } else {
+            Self::slate("none (unauthenticated)")
+        };
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("├─"),
+            Self::slate("Ollama API Key"),
+            api_key_display
+        );
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("├─"),
+            Self::slate("Ollama Embed Model"),
+            Self::slate(&cfg.embedding_model)
+        );
+        let active_db = LightMemConfig::resolve_db_path(false);
+        let db_mode = if active_db == LightMemConfig::global_db_path() {
+            "(global)"
+        } else {
+            "(local workspace)"
+        };
+        println!(
+            "  {} {:<20} {} {}",
+            Self::slate("├─"),
+            Self::slate("Active Vault DB"),
+            Self::slate(&Self::format_path(&active_db)),
+            Self::slate(db_mode)
+        );
+        println!(
+            "  {} {:<20} {}",
             Self::slate("╰─"),
             Self::slate("Config File"),
             Self::slate(&Self::format_path(&LightMemConfig::config_file()))
         );
+        Ok(())
     }
 
     pub fn render_stats(stats: &StorageStats, db_path: &Path, json: bool) -> Result<()> {

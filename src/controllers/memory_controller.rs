@@ -61,9 +61,10 @@ impl LightMem {
                     Arc::new(OnnxEmbeddingProvider::new(Some(model_str))?)
                 }
             }
-            "ollama" => Arc::new(OllamaEmbeddingProvider::new(
+            "ollama" => Arc::new(OllamaEmbeddingProvider::with_api_key(
                 self.config.ollama_url.clone(),
                 self.config.embedding_model.clone(),
+                self.config.effective_ollama_api_key(),
             )),
             "hash" => Arc::new(HashEmbeddingProvider),
             other => anyhow::bail!("Unknown embedding backend: {}", other),
@@ -728,9 +729,10 @@ impl LightMem {
                 .strip_prefix("ollama:")
                 .or_else(|| self.config.reranker.strip_prefix("OLLAMA:"))
                 .map(|s| s.to_string());
-            return Ok(Box::new(OllamaReranker::new(
+            return Ok(Box::new(OllamaReranker::with_api_key(
                 self.config.ollama_url.clone(),
                 cfg_ollama,
+                self.config.effective_ollama_api_key(),
             )));
         }
 
@@ -738,9 +740,10 @@ impl LightMem {
             .strip_prefix("ollama:")
             .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
         {
-            return Ok(Box::new(OllamaReranker::new(
+            return Ok(Box::new(OllamaReranker::with_api_key(
                 self.config.ollama_url.clone(),
                 Some(ollama_model.to_string()),
+                self.config.effective_ollama_api_key(),
             )));
         }
 

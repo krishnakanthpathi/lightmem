@@ -90,7 +90,7 @@ def get_binary_path() -> str:
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.2.4") -> str:
+def ensure_binary_downloaded(version: str = "v0.2.5") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -100,7 +100,15 @@ def ensure_binary_downloaded(version: str = "v0.2.4") -> str:
         archive_name = f"lmem-{target}.tar.gz"
         exe_name = "lmem"
     elif system == "linux":
-        target = "aarch64-unknown-linux-gnu" if machine in ["arm64", "aarch64"] else "x86_64-unknown-linux-gnu"
+        is_android = (
+            os.path.exists("/system/bin/linker64")
+            or "com.termux" in os.environ.get("PREFIX", "")
+            or "android" in platform.uname().release.lower()
+        )
+        if is_android and machine in ["arm64", "aarch64"]:
+            target = "aarch64-linux-android"
+        else:
+            target = "aarch64-unknown-linux-gnu" if machine in ["arm64", "aarch64"] else "x86_64-unknown-linux-gnu"
         archive_name = f"lmem-{target}.tar.gz"
         exe_name = "lmem"
     elif system == "windows":
@@ -136,10 +144,10 @@ def ensure_binary_downloaded(version: str = "v0.2.4") -> str:
         return str(dest_exe)
     except Exception as e:
         tmp_archive.unlink(missing_ok=True)
-        # Fall back to v0.2.3 if v0.2.4 is still building on GitHub Actions
-        if version != "v0.2.3":
+        # Fall back to v0.2.4 if v0.2.5 is still building on GitHub Actions
+        if version != "v0.2.4":
             try:
-                return ensure_binary_downloaded(version="v0.2.3")
+                return ensure_binary_downloaded(version="v0.2.4")
             except Exception:
                 pass
         raise RuntimeError(f"Failed to auto-download lmem binary from {url}: {e}")

@@ -261,6 +261,14 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
 
+        /// Ollama API key / Bearer token (pass 'none' or '' to clear)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Clear the stored Ollama API key
+        #[arg(long)]
+        clear_api_key: bool,
+
         /// Ollama embedding model name (e.g. nomic-embed-text)
         #[arg(long)]
         model: Option<String>,
@@ -276,6 +284,10 @@ enum Commands {
         /// Approve migration of the selected database when the embedding model changes
         #[arg(long)]
         yes: bool,
+
+        /// Output configuration as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Rebuild embeddings for the configured model, with progress
@@ -743,10 +755,13 @@ fn main() -> Result<()> {
             onnx_model,
             download,
             url,
+            api_key,
+            clear_api_key,
             model,
             reranker,
             reset_db,
             yes,
+            json,
         } => {
             if reset_db {
                 let lm = open_controller(effective_db, global)?;
@@ -759,6 +774,8 @@ fn main() -> Result<()> {
                     && onnx_model.is_none()
                     && download.is_none()
                     && url.is_none()
+                    && api_key.is_none()
+                    && !clear_api_key
                     && model.is_none()
                     && reranker.is_none()
                 {
@@ -818,6 +835,18 @@ fn main() -> Result<()> {
                 cfg.ollama_url = u;
                 changed = true;
             }
+            if clear_api_key {
+                cfg.ollama_api_key = None;
+                changed = true;
+            } else if let Some(key) = api_key {
+                let trimmed = key.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                    cfg.ollama_api_key = None;
+                } else {
+                    cfg.ollama_api_key = Some(trimmed.to_string());
+                }
+                changed = true;
+            }
             if let Some(m) = model {
                 cfg.embedding_model = m;
                 changed = true;
@@ -861,7 +890,7 @@ fn main() -> Result<()> {
                 }
                 cfg.save()?;
             }
-            CliView::render_config(&cfg, changed);
+            CliView::render_config(&cfg, changed, json)?;
         }
 
         Commands::Reindex { yes } => {

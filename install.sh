@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.2.4"
+VERSION="v0.2.5"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Support --uninstall / -u flag

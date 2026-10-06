@@ -528,15 +528,27 @@ impl Reranker for OnnxQaReranker {
 pub struct OllamaReranker {
     pub ollama_url: String,
     pub model: Option<String>,
+    pub api_key: Option<String>,
 }
 
 impl OllamaReranker {
     pub fn new(ollama_url: String, model: Option<String>) -> Self {
+        Self::with_api_key(ollama_url, model, None)
+    }
+
+    pub fn with_api_key(
+        ollama_url: String,
+        model: Option<String>,
+        api_key: Option<String>,
+    ) -> Self {
         Self {
             ollama_url: ollama_url.trim_end_matches('/').to_string(),
             model: model
                 .map(|m| m.trim().to_string())
                 .filter(|m| !m.is_empty()),
+            api_key: api_key
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none")),
         }
     }
 
@@ -552,7 +564,14 @@ impl OllamaReranker {
 
         // Auto-detect an installed local generative model from Ollama `/api/tags`
         let tags_url = format!("{}/api/tags", self.ollama_url);
-        if let Ok(resp) = ureq::get(&tags_url).timeout(Duration::from_secs(2)).call() {
+        let mut req = ureq::get(&tags_url).timeout(Duration::from_secs(2));
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        if let Ok(resp) = req.call() {
             if let Ok(json) = resp.into_json::<serde_json::Value>() {
                 if let Some(models) = json.get("models").and_then(|v| v.as_array()) {
                     let names: Vec<String> = models
@@ -648,8 +667,14 @@ impl Reranker for OllamaReranker {
             }
         });
 
-        let response = ureq::post(&url)
-            .timeout(Duration::from_secs(30))
+        let mut req = ureq::post(&url).timeout(Duration::from_secs(30));
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        let response = req
             .send_json(payload)
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -715,10 +740,14 @@ impl Reranker for OllamaReranker {
             }
         });
 
-        if let Ok(resp) = ureq::post(&url)
-            .timeout(Duration::from_secs(30))
-            .send_json(payload)
-        {
+        let mut req = ureq::post(&url).timeout(Duration::from_secs(30));
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        if let Ok(resp) = req.send_json(payload) {
             if let Ok(body) = resp.into_json::<serde_json::Value>() {
                 let raw = body
                     .get("response")
