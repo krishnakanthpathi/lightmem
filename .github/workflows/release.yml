@@ -26,6 +26,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: lmem-x86_64-pc-windows-msvc.zip
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            archive: lmem-aarch64-linux-android.tar.gz
 
     steps:
       - uses: actions/checkout@v4
@@ -35,16 +38,26 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build Release Binary
+      - name: Install cargo-ndk
+        if: contains(matrix.target, 'android')
+        run: cargo install cargo-ndk
+
+      - name: Build Release Binary (Standard)
+        if: "!contains(matrix.target, 'android')"
         run: cargo build --release --target ${{ matrix.target }} --bin lmem
+
+      - name: Build Release Binary (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo ndk --target ${{ matrix.target }} --platform 24 build --release --bin lmem
 
       - name: Package Tarball (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/lmem dist/lmem
+          find target/${{ matrix.target }}/release -maxdepth 2 -name "*.so" -exec cp {} dist/ \; || true
           chmod +x dist/lmem
-          tar -czf ${{ matrix.archive }} -C dist lmem
+          tar -czf ${{ matrix.archive }} -C dist .
 
       - name: Package Zip (Windows)
         if: runner.os == 'Windows'
@@ -64,6 +77,7 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
@@ -74,7 +88,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v0.2.0' }}
+          tag_name: ${{ github.ref_name }}
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
