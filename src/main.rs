@@ -57,6 +57,10 @@ enum Commands {
         #[arg(short = 's', long)]
         supersede: bool,
 
+        /// Origin or verification level (explicit_statement, validated, observed, corrected, inferred, imported)
+        #[arg(short = 'p', long)]
+        provenance: Option<String>,
+
         /// Output created memory as JSON
         #[arg(long)]
         json: bool,
@@ -544,6 +548,7 @@ fn main() -> Result<()> {
             confidence,
             ttl,
             supersede,
+            provenance,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
@@ -568,6 +573,7 @@ fn main() -> Result<()> {
                 Some(confidence),
                 ttl,
                 supersede,
+                provenance,
             )?;
             CliView::render_remembered_with_conflicts(
                 &memory,
@@ -1092,6 +1098,16 @@ fn main() -> Result<()> {
             cmd = cmd.mut_subcommand("remember", |sub| {
                 sub.mut_arg("ttl", |a| {
                     a.value_parser(PossibleValuesParser::new(["1h", "24h", "7d", "30d"]))
+                })
+                .mut_arg("provenance", |a| {
+                    a.value_parser(PossibleValuesParser::new([
+                        "explicit_statement",
+                        "validated",
+                        "observed",
+                        "corrected",
+                        "inferred",
+                        "imported",
+                    ]))
                 })
             });
             cmd = cmd.mut_subcommand("config", |sub| {

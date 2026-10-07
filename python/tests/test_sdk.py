@@ -39,10 +39,12 @@ class TestLightMemSDK(unittest.TestCase):
             title="Redis Sentinel Port",
             tags=["redis", "cache", "sentinel"],
             confidence=0.95,
+            provenance="observed",
         )
         self.assertIsNotNone(mem.id)
         self.assertEqual(mem.category, "fact")
         self.assertEqual(mem.title, "Redis Sentinel Port")
+        self.assertEqual(mem.provenance, "observed")
         self.assertIn("redis", mem.tags)
 
         # 2. Get
@@ -50,12 +52,14 @@ class TestLightMemSDK(unittest.TestCase):
         self.assertIsNotNone(fetched)
         self.assertEqual(fetched.id, mem.id)
         self.assertEqual(fetched.content, mem.content)
+        self.assertEqual(fetched.provenance, "observed")
 
         # 3. List
         paginated = self.client.list(limit=10)
         self.assertEqual(len(paginated), 1)
         self.assertEqual(paginated.total, 1)
         self.assertEqual(paginated[0].id, mem.id)
+        self.assertEqual(paginated[0].provenance, "observed")
         self.assertEqual(paginated.items[0].id, mem.id)
 
     def test_recall_and_answer(self):

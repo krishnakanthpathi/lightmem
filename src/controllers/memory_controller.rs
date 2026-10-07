@@ -133,11 +133,11 @@ impl LightMem {
         confidence: Option<f32>,
     ) -> Result<MemoryRecord> {
         let (record, _) =
-            self.remember_with_options(content, category, title, tags, confidence, None, false)?;
+            self.remember_with_options(content, category, title, tags, confidence, None, false, None)?;
         Ok(record)
     }
 
-    /// Store a new memory into the database with optional TTL and contradiction superseding
+    /// Store a new memory into the database with optional TTL, contradiction superseding, and provenance
     #[allow(clippy::too_many_arguments)]
     pub fn remember_with_options(
         &self,
@@ -148,6 +148,7 @@ impl LightMem {
         confidence: Option<f32>,
         ttl: Option<chrono::Duration>,
         supersede: bool,
+        provenance: Option<String>,
     ) -> Result<(MemoryRecord, Vec<MemoryConflict>)> {
         let clean_content = content.trim().to_string();
         if clean_content.is_empty() {
@@ -170,13 +171,17 @@ impl LightMem {
             conf.is_finite() && (0.0..=1.0).contains(&conf),
             "Confidence must be between 0 and 1"
         );
+        let clean_provenance = provenance
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| "explicit_statement".to_string());
         let mut memory = MemoryRecord::new(
             resolved_type,
             resolved_title,
             clean_content,
             tags,
             conf,
-            Some("explicit_statement".to_string()),
+            Some(clean_provenance),
         );
         if let Some(ttl_duration) = ttl {
             memory.expired_at = Some(Utc::now() + ttl_duration);

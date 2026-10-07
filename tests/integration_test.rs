@@ -537,6 +537,7 @@ fn test_ttl_auto_expiration() {
             Some(0.95),
             None,
             false,
+            None,
         )
         .unwrap();
 
@@ -549,6 +550,7 @@ fn test_ttl_auto_expiration() {
             Some(0.9),
             Some(chrono::Duration::milliseconds(-100)),
             false,
+            None,
         )
         .unwrap();
     assert!(ephemeral.expired_at.is_some());
@@ -586,6 +588,7 @@ fn test_contradiction_detection_and_supersede() {
             Some(0.9),
             None,
             false,
+            None,
         )
         .unwrap();
     assert!(conflicts_0.is_empty());
@@ -600,6 +603,7 @@ fn test_contradiction_detection_and_supersede() {
             Some(0.95),
             None,
             false,
+            None,
         )
         .unwrap();
     assert_eq!(conflicts_1.len(), 1);
@@ -630,6 +634,7 @@ fn test_contradiction_detection_and_supersede() {
             Some(0.9),
             None,
             false,
+            None,
         )
         .unwrap();
     let (new_redis, redis_conflicts) = lm
@@ -641,6 +646,7 @@ fn test_contradiction_detection_and_supersede() {
             Some(0.95),
             None,
             true,
+            None,
         )
         .unwrap();
     assert_eq!(redis_conflicts.len(), 1);
@@ -672,6 +678,7 @@ fn test_date_filtering_in_list_and_recall() {
             Some(0.9),
             None,
             false,
+            None,
         )
         .unwrap();
 
@@ -704,4 +711,78 @@ fn test_date_filtering_in_list_and_recall() {
         .recall_with_date("Kafka broker", None, None, Some(other_day), 5, None)
         .unwrap();
     assert!(other_recall.is_empty());
+}
+
+#[test]
+fn test_provenance_support() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let config = LightMemConfig {
+        backend: "hash".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(tmp.path(), config).unwrap();
+
+    // 1. Default provenance should be explicit_statement
+    let default_mem = lm
+        .remember("Default provenance fact.", None, None, vec![], None)
+        .unwrap();
+    assert_eq!(default_mem.provenance, "explicit_statement");
+
+    // 2. Custom provenance 'observed'
+    let (obs_mem, _) = lm
+        .remember_with_options(
+            "Observed memory latency on CPU.",
+            Some(MemoryType::Observation),
+            None,
+            vec![],
+            Some(0.85),
+            None,
+            false,
+            Some("observed".to_string()),
+        )
+        .unwrap();
+    assert_eq!(obs_mem.provenance, "observed");
+
+    // Verify it persists in database upon get
+    let retrieved = lm.get(&obs_mem.id).unwrap().unwrap();
+    assert_eq!(retrieved.provenance, "observed");
+
+    // 3. Custom provenance 'validated'
+    let (val_mem, _) = lm
+        .remember_with_options(
+            "Validated PostgreSQL configuration.",
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.95),
+            None,
+            false,
+            Some("validated".to_string()),
+        )
+        .unwrap();
+    assert_eq!(val_mem.provenance, "validated");
+
+    // 4. CLI test with --provenance flag
+    let config_dir = tempfile::tempdir().unwrap();
+    let db_path = config_dir.path().join("cli_prov.db");
+    let binary = env!("CARGO_BIN_EXE_lmem");
+
+    let output = std::process::Command::new(binary)
+        .args(&[
+            "--db",
+            db_path.to_str().unwrap(),
+            "remember",
+            "Observed crash on worker thread",
+            "--provenance",
+            "observed",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json_val: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json_val.get("provenance").unwrap().as_str().unwrap(),
+        "observed"
+    );
 }

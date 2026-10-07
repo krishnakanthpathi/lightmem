@@ -62,6 +62,7 @@ class LightMem:
         confidence: float = 0.9,
         ttl: Optional[str] = None,
         supersede: bool = False,
+        provenance: Optional[str] = None,
     ) -> Memory:
         args = [content]
         if category:
@@ -76,6 +77,8 @@ class LightMem:
             args.extend(["--ttl", ttl])
         if supersede:
             args.append("--supersede")
+        if provenance:
+            args.extend(["--provenance", provenance])
 
         data = self._call("remember", args)
         return Memory.from_dict(data)
