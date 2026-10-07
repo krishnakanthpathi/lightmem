@@ -849,31 +849,21 @@ fn main() -> Result<()> {
             }
             if clear_api_key {
                 cfg.ollama_api_key = None;
-                if cfg.ollama_url == "https://ollama.com" {
-                    cfg.ollama_url = "http://localhost:11434".to_string();
-                }
                 changed = true;
             } else if let Some(key) = api_key {
                 let trimmed = key.trim();
                 if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
                     cfg.ollama_api_key = None;
-                    if cfg.ollama_url == "https://ollama.com" {
-                        cfg.ollama_url = "http://localhost:11434".to_string();
-                    }
                 } else {
                     cfg.ollama_api_key = Some(trimmed.to_string());
-                    // If no explicit URL was given and current URL is default localhost, auto-switch to official Ollama Cloud
-                    if url.is_none() && (cfg.ollama_url == "http://localhost:11434" || cfg.ollama_url == "http://127.0.0.1:11434") {
-                        cfg.ollama_url = "https://ollama.com".to_string();
-                    }
                 }
                 changed = true;
             }
-            // If Ollama is pointed to Ollama Cloud or an API key is set, but embedding backend was 'ollama',
+            // If Ollama is pointed to Ollama Cloud, but embedding backend was 'ollama',
             // safely keep/switch embeddings on local ONNX so we never fail trying to call non-existent cloud /api/embeddings.
             if backend.is_none()
                 && cfg.backend == "ollama"
-                && (cfg.ollama_url == "https://ollama.com" || cfg.effective_ollama_api_key().is_some())
+                && cfg.ollama_url == "https://ollama.com"
             {
                 eprintln!(
                     "◈ Notice: Ollama Cloud (https://ollama.com) provides generative models for answering/reranking.\n\
@@ -890,6 +880,8 @@ fn main() -> Result<()> {
                 let trimmed = r.trim();
                 let lower = trimmed.to_lowercase();
                 if lower.starts_with("ollama:")
+                    || lower.starts_with("openai:")
+                    || lower.starts_with("llm:")
                     || lower.starts_with("onnx:")
                     || matches!(
                         lower.as_str(),
@@ -897,6 +889,8 @@ fn main() -> Result<()> {
                             | "qa"
                             | "precision"
                             | "ollama"
+                            | "openai"
+                            | "llm"
                             | "top1"
                             | "minilm-squad2"
                             | "tinyroberta-squad2"
@@ -907,7 +901,7 @@ fn main() -> Result<()> {
                     changed = true;
                 } else {
                     anyhow::bail!(
-                        "Invalid reranker '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), or 'top1'.",
+                        "Invalid reranker '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), 'openai' ('openai:<model>'), or 'top1'.",
                         r
                     );
                 }

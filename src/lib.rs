@@ -20,7 +20,7 @@ pub use repositories::{SqliteRepository, Storage};
 pub use services::{
     AnswerResult, ConnectResult, ConnectService, EmbeddingProvider, Exporter,
     HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, MemoryImporter,
-    OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider,
+    OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker, LlmReranker, OnnxEmbeddingProvider,
     OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, Top1Reranker,
 };
 pub use views::CliView;

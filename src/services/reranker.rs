@@ -531,6 +531,8 @@ pub struct OllamaReranker {
     pub api_key: Option<String>,
 }
 
+pub type LlmReranker = OllamaReranker;
+
 impl OllamaReranker {
     pub fn new(ollama_url: String, model: Option<String>) -> Self {
         Self::with_api_key(ollama_url, model, None)
@@ -562,9 +564,20 @@ impl OllamaReranker {
             }
         }
 
-        // Auto-detect an installed local generative model from Ollama `/api/tags`
-        let tags_url = format!("{}/api/tags", self.ollama_url);
-        let mut req = ureq::get(&tags_url).timeout(Duration::from_secs(2));
+        let preferred = [
+            "qwen2.5:3b",
+            "qwen2.5:1.5b",
+            "llama3.2:3b",
+            "llama3.2:1b",
+            "gemma4:31b",
+            "gpt-4o-mini",
+            "qwen2.5:7b",
+            "llama3.1:8b",
+        ];
+
+        // 1. Try standard OpenAI-compatible `/v1/models` endpoint
+        let v1_models_url = format!("{}/v1/models", self.ollama_url);
+        let mut req = ureq::get(&v1_models_url).timeout(Duration::from_secs(2));
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
@@ -573,20 +586,49 @@ impl OllamaReranker {
         }
         if let Ok(resp) = req.call() {
             if let Ok(json) = resp.into_json::<serde_json::Value>() {
+                if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
+                    let names: Vec<String> = data
+                        .iter()
+                        .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
+                        .collect();
+
+                    for p in preferred {
+                        if names.iter().any(|n| n.eq_ignore_ascii_case(p)) {
+                            return p.to_string();
+                        }
+                    }
+
+                    if let Some(found) = names.iter().find(|n| {
+                        let l = n.to_lowercase();
+                        !l.contains("embed")
+                            && !l.contains("bge")
+                            && !l.contains("minilm")
+                            && !l.contains("vl")
+                            && !l.contains("ocr")
+                    }) {
+                        return found.clone();
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: query Ollama-specific `/api/tags`
+        let tags_url = format!("{}/api/tags", self.ollama_url);
+        let mut req_tags = ureq::get(&tags_url).timeout(Duration::from_secs(2));
+        if let Some(ref key) = self.api_key {
+            req_tags = req_tags.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        if let Ok(resp) = req_tags.call() {
+            if let Ok(json) = resp.into_json::<serde_json::Value>() {
                 if let Some(models) = json.get("models").and_then(|v| v.as_array()) {
                     let names: Vec<String> = models
                         .iter()
                         .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
                         .collect();
 
-                    let preferred = [
-                        "qwen2.5:3b",
-                        "qwen2.5:1.5b",
-                        "llama3.2:3b",
-                        "llama3.2:1b",
-                        "qwen2.5:7b",
-                        "llama3.1:8b",
-                    ];
                     for p in preferred {
                         if names.iter().any(|n| n.eq_ignore_ascii_case(p)) {
                             return p.to_string();
@@ -601,13 +643,6 @@ impl OllamaReranker {
                             && !l.contains("vl")
                             && !l.contains("ocr")
                             && !l.contains("-cloud")
-                    }) {
-                        return found.clone();
-                    }
-
-                    if let Some(found) = names.iter().find(|n| {
-                        let l = n.to_lowercase();
-                        !l.contains("embed") && !l.contains("bge") && !l.contains("minilm")
                     }) {
                         return found.clone();
                     }
@@ -643,59 +678,97 @@ impl Reranker for OllamaReranker {
             memories_block.push_str(&format!("[{}] {}\n", idx, c.memory.content));
         }
 
-        let prompt = format!(
-            "You are a strict extractive question-answering engine. Answer the question using ONLY the provided memory records.\n\
+        let system_prompt = "You are a strict extractive question-answering engine. Answer the question using ONLY the provided memory records.\n\
              Rules:\n\
              1. Extract the exact concise factual value (e.g. name, ID, account number, port, OS, URL, college name, score) from the single best matching memory.\n\
              2. Do NOT include labels or full sentences — return ONLY the extracted value itself.\n\
              3. If none of the memories contain the answer, or if a memory states the information is not recorded, return null for \"answer\" and null for \"memory_index\".\n\
-             4. Respond with valid JSON matching: {{\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1}}\n\n\
-             Memories:\n{}\n\
-             Question: {}\n",
-            memories_block, question
-        );
+             4. Respond with valid JSON matching: {\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1}";
 
-        let url = format!("{}/api/generate", self.ollama_url);
-        let payload = serde_json::json!({
+        let user_prompt = format!("Memories:\n{}\nQuestion: {}", memories_block, question);
+
+        // 1. Try standard OpenAI-compatible `/v1/chat/completions` endpoint
+        let chat_url = format!("{}/v1/chat/completions", self.ollama_url);
+        let chat_payload = serde_json::json!({
             "model": model_name,
-            "prompt": prompt,
-            "stream": false,
-            "format": "json",
-            "options": {
-                "temperature": 0.0,
-                "num_predict": 128
-            }
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 128
         });
 
-        let mut req = ureq::post(&url).timeout(Duration::from_secs(30));
+        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
                 &crate::models::config::format_auth_header(key),
             );
         }
-        let response = req
-            .send_json(payload)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Ollama QA request to {} (model '{}') failed: {}",
-                    url,
+
+        let raw_response = match req.send_json(chat_payload) {
+            Ok(resp) => {
+                let body: serde_json::Value = resp
+                    .into_json()
+                    .context("Failed to parse JSON response from /v1/chat/completions")?;
+                body.get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c0| c0.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| body.get("response").and_then(|v| v.as_str()))
+                    .unwrap_or("{}")
+                    .to_string()
+            }
+            Err(ureq::Error::Status(404, _)) => {
+                // Fallback to legacy Ollama /api/generate
+                let gen_url = format!("{}/api/generate", self.ollama_url);
+                let gen_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+                let gen_payload = serde_json::json!({
+                    "model": model_name,
+                    "prompt": gen_prompt,
+                    "stream": false,
+                    "format": "json",
+                    "options": {
+                        "temperature": 0.0,
+                        "num_predict": 128
+                    }
+                });
+                let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(30));
+                if let Some(ref key) = self.api_key {
+                    fallback_req = fallback_req.set(
+                        "Authorization",
+                        &crate::models::config::format_auth_header(key),
+                    );
+                }
+                let resp = fallback_req.send_json(gen_payload).map_err(|e| {
+                    anyhow::anyhow!("Ollama QA request to {} failed: {}", gen_url, e)
+                })?;
+                let body: serde_json::Value = resp.into_json()?;
+                body.get("response")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string()
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Chat completions request to {} (model '{}') failed: {}",
+                    chat_url,
                     model_name,
                     e
-                )
-            })?;
-
-        let body: serde_json::Value = response
-            .into_json()
-            .context("Failed to parse JSON response from Ollama /api/generate")?;
-
-        let raw_response = body
-            .get("response")
-            .and_then(|v| v.as_str())
-            .unwrap_or("{}");
+                );
+            }
+        };
 
         if let Some((answer, mem_idx, confidence)) =
-            parse_and_ground_ollama_answer(raw_response, &gated)
+            parse_and_ground_ollama_answer(&raw_response, &gated)
         {
             return Ok(AnswerResult {
                 answer,
@@ -710,16 +783,16 @@ impl Reranker for OllamaReranker {
 
     fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
         let model_name = self.resolve_model();
-        let prompt = format!(
-            "You are a memory consolidation and conflict resolution engine.\n\
+        let system_prompt = "You are a memory consolidation and conflict resolution engine.\n\
              Merge the following two overlapping memories into a single accurate memory.\n\
              Rules:\n\
              1. Always prefer factual values (numbers, ports, statuses, URLs, IDs) from the [NEWER] memory when they differ from [OLDER].\n\
              2. Preserve any additional non-contradictory details from [OLDER] so no context is lost.\n\
              3. Do NOT invent any facts not present in the two memories.\n\
-             4. Respond with valid JSON: {{\"title\": string, \"content\": string}}\n\n\
-             [OLDER · {}] Title: {}\nContent: {}\n\n\
-             [NEWER · {}] Title: {}\nContent: {}\n",
+             4. Respond with valid JSON: {\"title\": string, \"content\": string}";
+
+        let user_prompt = format!(
+            "[OLDER · {}] Title: {}\nContent: {}\n\n[NEWER · {}] Title: {}\nContent: {}\n",
             older.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
             older.title,
             older.content,
@@ -728,52 +801,96 @@ impl Reranker for OllamaReranker {
             newer.content,
         );
 
-        let url = format!("{}/api/generate", self.ollama_url);
-        let payload = serde_json::json!({
+        let chat_url = format!("{}/v1/chat/completions", self.ollama_url);
+        let chat_payload = serde_json::json!({
             "model": model_name,
-            "prompt": prompt,
-            "stream": false,
-            "format": "json",
-            "options": {
-                "temperature": 0.0,
-                "num_predict": 256
-            }
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 256
         });
 
-        let mut req = ureq::post(&url).timeout(Duration::from_secs(30));
+        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
                 &crate::models::config::format_auth_header(key),
             );
         }
-        if let Ok(resp) = req.send_json(payload) {
+
+        let raw_opt = if let Ok(resp) = req.send_json(chat_payload) {
             if let Ok(body) = resp.into_json::<serde_json::Value>() {
-                let raw = body
-                    .get("response")
+                body.get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c0| c0.get("message"))
+                    .and_then(|m| m.get("content"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                if let Some(json_slice) = extract_json_slice(raw) {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
-                        if let Some(merged_c) = parsed
-                            .get("content")
+                    .or_else(|| body.get("response").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        } else {
+            // Legacy /api/generate fallback
+            let gen_url = format!("{}/api/generate", self.ollama_url);
+            let gen_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+            let gen_payload = serde_json::json!({
+                "model": model_name,
+                "prompt": gen_prompt,
+                "stream": false,
+                "format": "json",
+                "options": {
+                    "temperature": 0.0,
+                    "num_predict": 256
+                }
+            });
+            let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(30));
+            if let Some(ref key) = self.api_key {
+                fallback_req = fallback_req.set(
+                    "Authorization",
+                    &crate::models::config::format_auth_header(key),
+                );
+            }
+            if let Ok(resp) = fallback_req.send_json(gen_payload) {
+                if let Ok(body) = resp.into_json::<serde_json::Value>() {
+                    body.get("response").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some(raw) = raw_opt {
+            if let Some(json_slice) = extract_json_slice(&raw) {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
+                    if let Some(merged_c) = parsed
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let merged_t = parsed
+                            .get("title")
                             .and_then(|v| v.as_str())
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
-                        {
-                            let merged_t = parsed
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(&newer.title);
-                            return Ok(build_merged_record(
-                                older,
-                                newer,
-                                merged_c.to_string(),
-                                merged_t.to_string(),
-                            ));
-                        }
+                            .unwrap_or(&newer.title);
+                        return Ok(build_merged_record(
+                            older,
+                            newer,
+                            merged_c.to_string(),
+                            merged_t.to_string(),
+                        ));
                     }
                 }
             }

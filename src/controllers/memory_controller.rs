@@ -722,12 +722,16 @@ impl LightMem {
             return Ok(Box::new(Top1Reranker));
         }
 
-        if lower == "ollama" {
+        if lower == "ollama" || lower == "openai" || lower == "llm" {
             let cfg_ollama = self
                 .config
                 .reranker
                 .strip_prefix("ollama:")
                 .or_else(|| self.config.reranker.strip_prefix("OLLAMA:"))
+                .or_else(|| self.config.reranker.strip_prefix("openai:"))
+                .or_else(|| self.config.reranker.strip_prefix("OPENAI:"))
+                .or_else(|| self.config.reranker.strip_prefix("llm:"))
+                .or_else(|| self.config.reranker.strip_prefix("LLM:"))
                 .map(|s| s.to_string());
             return Ok(Box::new(OllamaReranker::with_api_key(
                 self.config.effective_ollama_url(),
@@ -739,6 +743,10 @@ impl LightMem {
         if let Some(ollama_model) = active_reranker
             .strip_prefix("ollama:")
             .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
+            .or_else(|| active_reranker.strip_prefix("openai:"))
+            .or_else(|| active_reranker.strip_prefix("OPENAI:"))
+            .or_else(|| active_reranker.strip_prefix("llm:"))
+            .or_else(|| active_reranker.strip_prefix("LLM:"))
         {
             return Ok(Box::new(OllamaReranker::with_api_key(
                 self.config.effective_ollama_url(),
@@ -770,7 +778,7 @@ impl LightMem {
                 Ok(Box::new(OnnxQaReranker::new(Some(lower))))
             }
             other => anyhow::bail!(
-                "Unknown reranker: '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), or 'top1'.",
+                "Unknown reranker: '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), 'openai' ('openai:<model>'), or 'top1'.",
                 other
             ),
         }

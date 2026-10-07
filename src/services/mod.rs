@@ -16,6 +16,7 @@ pub use exporter::Exporter;
 pub use graph_view::render_terminal;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
 pub use reranker::{
-    AnswerResult, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker, Top1Reranker,
+    AnswerResult, LlmReranker, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker,
+    Top1Reranker,
 };
 pub use search::HybridSearchEngine;

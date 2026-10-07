@@ -52,6 +52,10 @@ impl LightMemConfig {
         if let Some(ollama_m) = trimmed
             .strip_prefix("ollama:")
             .or_else(|| trimmed.strip_prefix("OLLAMA:"))
+            .or_else(|| trimmed.strip_prefix("openai:"))
+            .or_else(|| trimmed.strip_prefix("OPENAI:"))
+            .or_else(|| trimmed.strip_prefix("llm:"))
+            .or_else(|| trimmed.strip_prefix("LLM:"))
         {
             return format!("ollama:{}", ollama_m.trim());
         }
@@ -62,7 +66,7 @@ impl LightMemConfig {
             return Self::normalize_reranker(onnx_m, None);
         }
         match lower.as_str() {
-            "ollama" => {
+            "ollama" | "openai" | "llm" => {
                 if let Some(qm) = legacy_qa.map(str::trim).filter(|m| {
                     !m.is_empty() && !matches!(*m, "minilm-squad2" | "tinyroberta-squad2")
                 }) {
@@ -113,19 +117,10 @@ impl LightMemConfig {
         }
     }
 
-    /// Resolves the effective Ollama base URL:
-    /// - If the configured URL is localhost/default, but an API key is present (config or env)
-    ///   and no custom non-localhost URL was explicitly set, default to official Ollama Cloud `https://ollama.com`.
-    /// - Otherwise returns the normalized configured URL (defaulting to `http://localhost:11434`).
+    /// Resolves the effective base URL for Ollama / OpenAI-compatible endpoints:
+    /// Always defaults to localhost `http://localhost:11434` unless an explicit custom URL was provided.
     pub fn effective_ollama_url(&self) -> String {
-        let normalized = Self::normalize_ollama_url(&self.ollama_url);
-        if (normalized == "http://localhost:11434" || normalized == "http://127.0.0.1:11434")
-            && self.effective_ollama_api_key().is_some()
-        {
-            "https://ollama.com".to_string()
-        } else {
-            normalized
-        }
+        Self::normalize_ollama_url(&self.ollama_url)
     }
 
     /// Resolves effective Ollama API key from config, or environment variables (OLLAMA_API_KEY, LMEM_OLLAMA_API_KEY).
@@ -415,12 +410,12 @@ mod tests {
     #[test]
     fn test_effective_ollama_url_resolution() {
         let mut cfg = LightMemConfig::default();
-        // Unauthenticated default URL is localhost:11434
+        // Default URL is always localhost:11434
         assert_eq!(cfg.effective_ollama_url(), "http://localhost:11434");
 
-        // When API key is provided, localhost URL automatically resolves to https://ollama.com
+        // When API key is provided, default URL remains localhost:11434 unless explicitly changed
         cfg.ollama_api_key = Some("test-api-key-123".to_string());
-        assert_eq!(cfg.effective_ollama_url(), "https://ollama.com");
+        assert_eq!(cfg.effective_ollama_url(), "http://localhost:11434");
 
         // Explicit custom URL is preserved and normalized
         cfg.ollama_url = "https://custom-ollama-proxy.internal/api/chat".to_string();

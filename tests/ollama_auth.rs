@@ -65,7 +65,7 @@ fn test_ollama_reranker_sends_authorization_header() {
             if req.contains("Authorization: Bearer reranker-secret-99") {
                 auth_received_clone.store(true, Ordering::SeqCst);
             }
-            let body = r#"{"response":"{\"answer\":\"5432\",\"memory_index\":0,\"confidence\":0.95}"}"#;
+            let body = r#"{"choices":[{"message":{"content":"{\"answer\":\"5432\",\"memory_index\":0,\"confidence\":0.95}"}}],"response":"{\"answer\":\"5432\",\"memory_index\":0,\"confidence\":0.95}"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -117,7 +117,7 @@ fn test_config_cli_api_key_flag_and_json_output() {
 
     let binary = env!("CARGO_BIN_EXE_lmem");
 
-    // 1. Set API key (auto-switches URL to https://ollama.com when no explicit url is provided)
+    // 1. Set API key (keeps default URL as localhost http://localhost:11434)
     let output = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
         .args(&["config", "--api-key", "sk-supersecret123456"])
@@ -125,9 +125,9 @@ fn test_config_cli_api_key_flag_and_json_output() {
         .unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Ollama API Key"));
+    assert!(stdout.contains("API Key"));
     assert!(stdout.contains("sk-s...3456"));
-    assert!(stdout.contains("https://ollama.com"));
+    assert!(stdout.contains("http://localhost:11434"));
 
     // 2. Read with --json flag
     let output_json = std::process::Command::new(binary)
@@ -148,7 +148,7 @@ fn test_config_cli_api_key_flag_and_json_output() {
     );
     assert_eq!(
         json_val.get("ollama_url").unwrap().as_str().unwrap(),
-        "https://ollama.com"
+        "http://localhost:11434"
     );
     assert!(json_val.get("active_db").is_some());
     assert!(json_val.get("config_file").is_some());
