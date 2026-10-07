@@ -9,6 +9,31 @@ Complete operational reference for using the `lmem` CLI to persist, retrieve, qu
 
 ---
 
+## Prerequisites & Installation
+
+If `lmem` is not installed or not found on PATH (`which lmem` fails), install it before running memory commands:
+
+```bash
+# Option 1: macOS & Linux (curl shell installer)
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
+
+# Option 2: Windows PowerShell
+irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.ps1 | iex
+
+# Option 3: Python pip (bundles or auto-downloads binary to ~/.lightmem/bin)
+pip install -U lmem
+
+# Option 4: Cargo (build from source)
+cargo install --git https://github.com/krishnakanthpathi/lightmem.git
+```
+
+Verify binary availability:
+```bash
+lmem --version
+```
+
+---
+
 ## 1. Quick Command Reference
 
 Always execute `lmem` via shell commands. Never simulate memory storage or rely solely on ephemeral conversation history for long-term facts, preferences, or architectural decisions.
