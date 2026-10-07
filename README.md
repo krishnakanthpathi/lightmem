@@ -151,29 +151,27 @@ LightMem supports three swappable reranker backends for `lmem answer`, `lmem rec
 | **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
 
 ```bash
-# 1. Inspect complete active configuration
-lmem config                   # Formatted tree of all 11 settings (backend, models, URLs, DB, masked API key)
+# 1. Inspect complete active configuration and available presets
+lmem config                   # Formatted tree of settings and setup presets
 lmem config --json            # Full machine-readable JSON configuration
 
-# 2. Local Offline Mode (Pure-Rust ONNX embeddings & Extractive QA)
-lmem config --backend onnx --onnx-model bge-small --yes
-lmem config --reranker minilm-squad2
-lmem config --download all     # Pre-cache ONNX models locally for offline operation
+# 2. Preset 1: 100% Offline Local Mode (ONNX bge-small + minilm-squad2 QA)
+lmem config --preset local
+lmem config --download all    # Pre-cache ONNX models locally for offline operation
 
-# 3. Local Ollama Mode (Zero-Auth / localhost)
-lmem config --backend ollama --url http://localhost:11434 --model nomic-embed-text --clear-api-key --yes
-lmem config --reranker ollama:qwen2.5:3b
+# 3. Preset 2: Local Embeddings + Ollama Cloud Model Reranker (gemma4:31b-cloud)
+lmem config --preset ollama-cloud
 
-# 4. Authenticated Remote / Cloud Ollama (Bearer API Key)
-# Compatible with Ollama Cloud, LiteLLM proxy, Open-WebUI, or self-hosted servers with auth
-lmem config --url https://ollama.company.internal --api-key sk-your-key-here
-# Or set via environment variable:
-export OLLAMA_API_KEY="sk-your-key-here"     # or LMEM_OLLAMA_API_KEY
+# 4. Preset 3: Local Embeddings + Ollama Localhost LLM Reranker (auto-detected / qwen2.5:1.5b)
+lmem config --preset ollama-local
 
-# 5. Interchanging on the fly without changing persistent config
-# Pass `-r` to answer or conflicts to use local ONNX or remote Ollama per-query:
-lmem answer "what is my api token" -r minilm-squad2        # Fast local ONNX extractive QA
-lmem answer "summarize sprint goals" -r ollama:llama3.3:70b # Remote authenticated Ollama
+# 5. Custom URL or Fine-Grained Configuration
+lmem config --url http://localhost:11434 --reranker ollama:qwen2.5:3b
+
+# 6. Interchanging on the fly without changing persistent config
+# Pass `-r` to answer or conflicts to use local ONNX or Ollama per-query:
+lmem answer "what is my api token" -r minilm-squad2            # Fast local ONNX extractive QA
+lmem answer "summarize sprint goals" -r ollama:gemma4:31b-cloud # Ollama OpenAI-compatible reranker
 ```
 
 ---

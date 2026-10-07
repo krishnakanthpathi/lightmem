@@ -898,8 +898,12 @@ impl CliView {
                     serde_json::Value::String(active_db.to_string_lossy().to_string()),
                 );
                 obj.insert(
-                    "has_ollama_api_key".into(),
-                    serde_json::Value::Bool(cfg.effective_ollama_api_key().is_some()),
+                    "presets".into(),
+                    serde_json::json!({
+                        "local": "100% offline (bge-small ONNX embeddings + minilm-squad2 QA reranker)",
+                        "ollama-cloud": "Local ONNX embeddings + Ollama gemma4:31b-cloud reranker (via localhost:11434)",
+                        "ollama-local": "Local ONNX embeddings + Ollama localhost LLM reranker"
+                    }),
                 );
             }
             println!("{}", serde_json::to_string_pretty(&val)?);
@@ -966,27 +970,6 @@ impl CliView {
             Self::slate("Ollama Server URL"),
             Self::slate(&cfg.effective_ollama_url())
         );
-        let api_key_display = if let Some(ref k) = cfg.ollama_api_key {
-            if k.len() > 8 {
-                Self::gold(&format!("{}...{} (config.json)", &k[..4], &k[k.len() - 4..]))
-            } else {
-                Self::gold("******** (config.json)")
-            }
-        } else if let Some(k) = cfg.effective_ollama_api_key() {
-            if k.len() > 8 {
-                Self::gold(&format!("{}...{} (from env: OLLAMA_API_KEY)", &k[..4], &k[k.len() - 4..]))
-            } else {
-                Self::gold("******** (from env: OLLAMA_API_KEY)")
-            }
-        } else {
-            Self::slate("none (unauthenticated / localhost)")
-        };
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Ollama API Key"),
-            api_key_display
-        );
         println!(
             "  {} {:<20} {}",
             Self::slate("├─"),
@@ -1011,6 +994,31 @@ impl CliView {
             Self::slate("╰─"),
             Self::slate("Config File"),
             Self::slate(&Self::format_path(&LightMemConfig::config_file()))
+        );
+
+        println!();
+        println!(
+            "  {} {}",
+            Self::crimson_bold("◈"),
+            Self::white_bold("Available Setup Presets")
+        );
+        println!(
+            "    {}  {:<35} {}",
+            Self::emerald_bold("1. local       "),
+            Self::slate("lmem config --preset local"),
+            Self::slate("100% offline (bge-small ONNX + minilm-squad2 QA reranker)")
+        );
+        println!(
+            "    {}  {:<35} {}",
+            Self::emerald_bold("2. ollama-cloud"),
+            Self::slate("lmem config --preset ollama-cloud"),
+            Self::slate("ONNX embeddings + Ollama gemma4:31b-cloud reranker")
+        );
+        println!(
+            "    {}  {:<35} {}",
+            Self::emerald_bold("3. ollama-local"),
+            Self::slate("lmem config --preset ollama-local"),
+            Self::slate("ONNX embeddings + Ollama localhost LLM reranker")
         );
         Ok(())
     }

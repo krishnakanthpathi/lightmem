@@ -110,26 +110,38 @@ fn test_ollama_reranker_sends_authorization_header() {
 }
 
 #[test]
-fn test_config_cli_api_key_flag_and_json_output() {
+fn test_config_cli_presets_and_json_output() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config_dir = temp_dir.path().join("config");
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let binary = env!("CARGO_BIN_EXE_lmem");
 
-    // 1. Set API key (keeps default URL as localhost http://localhost:11434)
-    let output = std::process::Command::new(binary)
+    // 1. Initial config view displays presets
+    let output_init = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--api-key", "sk-supersecret123456"])
+        .args(&["config"])
         .output()
         .unwrap();
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("API Key"));
-    assert!(stdout.contains("sk-s...3456"));
-    assert!(stdout.contains("http://localhost:11434"));
+    assert!(output_init.status.success());
+    let stdout_init = String::from_utf8_lossy(&output_init.stdout);
+    assert!(stdout_init.contains("Available Setup Presets"));
+    assert!(stdout_init.contains("1. local"));
+    assert!(stdout_init.contains("2. ollama-cloud"));
+    assert!(stdout_init.contains("3. ollama-local"));
 
-    // 2. Read with --json flag
+    // 2. Apply --preset ollama-cloud
+    let output_cloud = std::process::Command::new(binary)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(&["config", "--preset", "ollama-cloud"])
+        .output()
+        .unwrap();
+    assert!(output_cloud.status.success());
+    let stdout_cloud = String::from_utf8_lossy(&output_cloud.stdout);
+    assert!(stdout_cloud.contains("ollama:gemma4:31b-cloud"));
+    assert!(stdout_cloud.contains("http://localhost:11434"));
+
+    // 3. Read with --json flag and verify presets object
     let output_json = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
         .args(&["config", "--json"])
@@ -139,22 +151,42 @@ fn test_config_cli_api_key_flag_and_json_output() {
     let json_val: serde_json::Value =
         serde_json::from_slice(&output_json.stdout).expect("Valid JSON");
     assert_eq!(
-        json_val.get("ollama_api_key").unwrap().as_str().unwrap(),
-        "sk-supersecret123456"
-    );
-    assert_eq!(
-        json_val.get("has_ollama_api_key").unwrap().as_bool().unwrap(),
-        true
+        json_val.get("reranker").unwrap().as_str().unwrap(),
+        "ollama:gemma4:31b-cloud"
     );
     assert_eq!(
         json_val.get("ollama_url").unwrap().as_str().unwrap(),
         "http://localhost:11434"
     );
+    assert!(json_val.get("presets").is_some());
+    assert!(json_val.get("presets").unwrap().get("local").is_some());
+    assert!(json_val.get("presets").unwrap().get("ollama-cloud").is_some());
+    assert!(json_val.get("presets").unwrap().get("ollama-local").is_some());
     assert!(json_val.get("active_db").is_some());
     assert!(json_val.get("config_file").is_some());
     assert!(json_val.get("embedding_identity").is_some());
 
-    // 3. Set custom URL with trailing /api/chat - verifies normalization
+    // 4. Apply --preset ollama-local
+    let output_local_llm = std::process::Command::new(binary)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(&["config", "--preset", "ollama-local"])
+        .output()
+        .unwrap();
+    assert!(output_local_llm.status.success());
+    let stdout_local_llm = String::from_utf8_lossy(&output_local_llm.stdout);
+    assert!(stdout_local_llm.contains("ollama"));
+
+    // 5. Apply --preset local (offline)
+    let output_local = std::process::Command::new(binary)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(&["config", "--preset", "local"])
+        .output()
+        .unwrap();
+    assert!(output_local.status.success());
+    let stdout_local = String::from_utf8_lossy(&output_local.stdout);
+    assert!(stdout_local.contains("minilm-squad2"));
+
+    // 6. Set custom URL with trailing /api/chat - verifies normalization
     let output_url = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
         .args(&["config", "--url", "https://custom-proxy.internal/api/chat/"])
@@ -163,24 +195,4 @@ fn test_config_cli_api_key_flag_and_json_output() {
     assert!(output_url.status.success());
     let stdout_url = String::from_utf8_lossy(&output_url.stdout);
     assert!(stdout_url.contains("https://custom-proxy.internal"));
-
-    // 4. Clear API key (resets URL back to localhost if it was cloud)
-    let output_clear = std::process::Command::new(binary)
-        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--clear-api-key"])
-        .output()
-        .unwrap();
-    assert!(output_clear.status.success());
-    let stdout_clear = String::from_utf8_lossy(&output_clear.stdout);
-    assert!(stdout_clear.contains("none (unauthenticated"));
-
-    let output_json_after = std::process::Command::new(binary)
-        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--json"])
-        .output()
-        .unwrap();
-    assert!(output_json_after.status.success());
-    let json_after: serde_json::Value = serde_json::from_slice(&output_json_after.stdout).unwrap();
-    assert!(json_after.get("ollama_api_key").is_none() || json_after.get("ollama_api_key").unwrap().is_null());
-    assert_eq!(json_after.get("has_ollama_api_key").unwrap().as_bool().unwrap(), false);
 }

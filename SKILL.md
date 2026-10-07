@@ -69,16 +69,15 @@ lmem export ./memory_bundle                        # Export human-readable OKF v
 lmem export ./backup.json --json                   # Full lossless JSON backup envelope
 lmem import ./backup.json --enrich                 # Transactional import with heuristic enrichment
 
-# 9. Engine, Reranker & Auth Configuration
-lmem config                                        # View all 11 active settings (Backend, Embedder, Identity, Reranker, DB, URL, Key status)
+# 9. Engine, Reranker & Preset Configuration
+lmem config                                        # View active settings & available setup presets
 lmem config --json                                 # Machine-readable JSON configuration
-lmem config --backend onnx --reranker minilm-squad2 # 1. Pure offline local ONNX (default)
-lmem config --backend ollama --url http://localhost:11434 --clear-api-key # 2. Local Ollama (zero-auth)
-lmem config --backend ollama --url https://ollama.company.com --api-key <KEY> # 3. Remote/Cloud Ollama (Bearer auth)
-lmem config --clear-api-key                        # Clear stored Ollama API key
+lmem config --preset local                         # Preset 1: 100% offline (bge-small ONNX + minilm-squad2 QA)
+lmem config --preset ollama-cloud                  # Preset 2: Local ONNX embeddings + Ollama gemma4:31b-cloud reranker
+lmem config --preset ollama-local                  # Preset 3: Local ONNX embeddings + Ollama localhost LLM reranker
 lmem config --download all                         # Pre-cache ONNX embedding + QA models for offline use
 lmem answer "test question" -r minilm-squad2       # Per-query local ONNX override
-lmem answer "test question" -r ollama:qwen2.5:3b   # Per-query Ollama override
+lmem answer "test question" -r ollama:gemma4:31b-cloud # Per-query Ollama override
 
 # 10. AI Agent Platform Connection (dumps LightMem SKILL.md folder)
 lmem connect                                       # Auto-detect all installed agent platforms and deploy skill

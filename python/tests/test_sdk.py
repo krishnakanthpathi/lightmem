@@ -21,8 +21,8 @@ class TestLightMemSDK(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_package_exports(self):
-        self.assertEqual(lmem.__version__, "0.2.6")
-        self.assertEqual(lightmem.__version__, "0.2.6")
+        self.assertEqual(lmem.__version__, "0.2.7")
+        self.assertEqual(lightmem.__version__, "0.2.7")
         self.assertTrue(callable(lmem.LightMem))
         self.assertTrue(callable(lightmem.LightMem))
 

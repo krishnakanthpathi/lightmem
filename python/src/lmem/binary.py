@@ -90,7 +90,7 @@ def get_binary_path() -> str:
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.2.6") -> str:
+def ensure_binary_downloaded(version: str = "v0.2.7") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -144,10 +144,10 @@ def ensure_binary_downloaded(version: str = "v0.2.6") -> str:
         return str(dest_exe)
     except Exception as e:
         tmp_archive.unlink(missing_ok=True)
-        # Fall back to v0.2.5 if v0.2.6 is still building on GitHub Actions
-        if version != "v0.2.5":
+        # Fall back to v0.2.6 if v0.2.7 is still building on GitHub Actions
+        if version != "v0.2.6":
             try:
-                return ensure_binary_downloaded(version="v0.2.5")
+                return ensure_binary_downloaded(version="v0.2.6")
             except Exception:
                 pass
         raise RuntimeError(f"Failed to auto-download lmem binary from {url}: {e}")

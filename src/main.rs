@@ -261,13 +261,9 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
 
-        /// Ollama API key / Bearer token (pass 'none' or '' to clear)
-        #[arg(long)]
-        api_key: Option<String>,
-
-        /// Clear the stored Ollama API key
-        #[arg(long)]
-        clear_api_key: bool,
+        /// Apply a standard setup preset: 'local' (offline ONNX embeddings + ONNX QA reranker), 'ollama-cloud' (ONNX embeddings + Ollama gemma4:31b-cloud), or 'ollama-local' (ONNX embeddings + Ollama localhost LLM)
+        #[arg(long, visible_alias = "profile")]
+        preset: Option<String>,
 
         /// Ollama embedding model name (e.g. nomic-embed-text)
         #[arg(long)]
@@ -751,12 +747,11 @@ fn main() -> Result<()> {
         }
 
         Commands::Config {
+            preset,
             backend,
             onnx_model,
             download,
             url,
-            api_key,
-            clear_api_key,
             model,
             reranker,
             reset_db,
@@ -770,12 +765,11 @@ fn main() -> Result<()> {
                 drop(lm);
                 remove_db_files(&db_path);
                 CliView::render_clear(removed, true, &db_path, false)?;
-                if backend.is_none()
+                if preset.is_none()
+                    && backend.is_none()
                     && onnx_model.is_none()
                     && download.is_none()
                     && url.is_none()
-                    && api_key.is_none()
-                    && !clear_api_key
                     && model.is_none()
                     && reranker.is_none()
                 {
@@ -823,6 +817,35 @@ fn main() -> Result<()> {
             let previous_identity = cfg.embedding_identity().ok();
             let mut changed = false;
 
+            if let Some(ref p) = preset {
+                match p.to_lowercase().as_str() {
+                    "local" | "offline" | "onnx" => {
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("bge-small".to_string());
+                        cfg.reranker = "minilm-squad2".to_string();
+                        changed = true;
+                    }
+                    "ollama-cloud" | "cloud" => {
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("bge-small".to_string());
+                        cfg.reranker = "ollama:gemma4:31b-cloud".to_string();
+                        cfg.ollama_url = "http://localhost:11434".to_string();
+                        changed = true;
+                    }
+                    "ollama-local" | "ollama" => {
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("bge-small".to_string());
+                        cfg.reranker = "ollama".to_string();
+                        cfg.ollama_url = "http://localhost:11434".to_string();
+                        changed = true;
+                    }
+                    other => anyhow::bail!(
+                        "Unknown preset '{}'. Choose 'local' (full local ONNX), 'ollama-cloud' (Ollama gemma4:31b-cloud), or 'ollama-local' (Ollama localhost).",
+                        other
+                    ),
+                }
+            }
+
             if let Some(ref b) = backend {
                 let target_url = url
                     .as_ref()
@@ -845,18 +868,6 @@ fn main() -> Result<()> {
             }
             if let Some(ref u) = url {
                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(u);
-                changed = true;
-            }
-            if clear_api_key {
-                cfg.ollama_api_key = None;
-                changed = true;
-            } else if let Some(key) = api_key {
-                let trimmed = key.trim();
-                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
-                    cfg.ollama_api_key = None;
-                } else {
-                    cfg.ollama_api_key = Some(trimmed.to_string());
-                }
                 changed = true;
             }
             // If Ollama is pointed to Ollama Cloud, but embedding backend was 'ollama',
@@ -1084,7 +1095,14 @@ fn main() -> Result<()> {
                 })
             });
             cmd = cmd.mut_subcommand("config", |sub| {
-                sub.mut_arg("backend", |a| {
+                sub.mut_arg("preset", |a| {
+                    a.value_parser(PossibleValuesParser::new([
+                        "local",
+                        "ollama-cloud",
+                        "ollama-local",
+                    ]))
+                })
+                .mut_arg("backend", |a| {
                     a.value_parser(PossibleValuesParser::new(["onnx", "ollama", "hash"]))
                 })
                 .mut_arg("onnx_model", |a| {
@@ -1106,6 +1124,7 @@ fn main() -> Result<()> {
                         "tinyroberta-squad2",
                         "onnx",
                         "ollama",
+                        "ollama:gemma4:31b-cloud",
                         "ollama:qwen2.5:3b",
                         "ollama:qwen2.5:1.5b",
                         "ollama:llama3.2:1b",
