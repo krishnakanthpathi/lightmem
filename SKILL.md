@@ -48,20 +48,23 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
   --provenance validated \
   --supersede
 
-# 2. Hybrid Search (SQLite FTS5 BM25 + Vector Cosine RRF + Acronym Boost)
+# 2. Hybrid Search & Similarity Filtering (SQLite FTS5 BM25 + Vector Cosine RRF + Acronym Boost)
 lmem recall "postgres port" -l 5
 lmem recall "postgres port" -t fact --min-similarity 0.5 --json
+lmem recall "new architectural idea" --min-similarity 0.70 -l 50 --json # Count & find semantically similar existing memories
 lmem recall "service gateway" --multi-hop          # Expands recall hits with 1-hop graph neighbors
 
 # 3. Knowledge Graph, Linking & Multi-Hop Traversal
 lmem autolink                                      # Auto-link vault via title mentions, shared tags, and vector similarity
-lmem autolink --min-similarity 0.80 --json         # Configure similarity threshold or export JSON report
+lmem autolink --min-similarity 0.75 --json         # Configure cosine similarity threshold (creates weighted relates_to edges)
 lmem remember "API Gateway routes to [[PostgreSQL DB]]" # Auto-links via [[wikilinks]]
 lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0  # Explicit directional relation
 lmem unlink <SRC_ID> <DST_ID>                       # Remove link
+lmem related <MEMORY_ID> -n 1 --json               # List & count direct 1-hop similar/connected memories
 lmem related <MEMORY_ID> --hops 2                  # Multi-hop graph traversal with hop-decay scoring
 lmem graph                                         # ASCII/Unicode network tree in terminal
 lmem graph --focus <MEMORY_ID> --hops 2            # Neighborhood subgraph view
+lmem graph --focus <MEMORY_ID> -n 1 --json         # Focused neighborhood node & edge counts as JSON
 lmem graph --json                                  # Export graph nodes and edges as JSON
 
 # 4. Extractive QA / LLM Grounded Answer (extracts the exact span from top candidates)
@@ -173,12 +176,23 @@ LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ index
    - Breadth-first graph search up to $N$ hops (`lmem related <id> --hops 2`).
    - Cycle-safe with hop-distance attenuation scoring ($1.0 / \text{hop}$).
    - `lmem recall "<query>" --multi-hop` expands semantic recall hits with 1-hop connected neighbors.
-4. **Interactive Force-Directed Visualizer (`lmem graph`)**:
-   - Standalone single-file HTML/Canvas application rendered with Obsidian dark glass aesthetic (`#0b0c10`).
-   - Real-time physics simulation (Coulomb repulsion, Hooke spring attraction, center gravity).
-   - Color-coded by the 14 memory categories.
-   - Hover glow, zoom/pan, search filter, category toggles, and click-to-open memory detail drawer.
-   - CLI flags: `lmem graph --browser` (auto-opens browser), `lmem graph --terminal` (Unicode tree), `lmem graph --focus <id> --hops 2` (subgraph neighborhood), `lmem graph --json`.
+4. **Interactive Force-Directed Visualizer & Topology (`lmem graph`)**:
+   - Terminal network tree or JSON export.
+   - CLI flags: `lmem graph` (terminal Unicode tree), `lmem graph --focus <id> --hops 2` (neighborhood subgraph), `lmem graph --json` (export nodes and edges array).
+5. **Graph Similarity Search & Counting Similar Memories**:
+   - **Pre-Insert / Query Similarity Count**:
+     Use `lmem recall "<query_or_text>" --min-similarity <0.1-1.0> -l <N> --json` to inspect and count existing memories with high cosine similarity before deciding whether to store, link, or supersede.
+   - **Vault-Wide Semantic Auto-Linking (`lmem autolink`)**:
+     LightMem scans all active memories across three similarity dimensions:
+     1. *Semantic Vector Cosine Similarity*: Memory pairs with $\text{sim} \ge \text{min\_similarity}$ (default `0.75`) automatically receive bidirectional `relates_to` edges with edge weight equal to their cosine similarity ($0.10 - 1.00$).
+     2. *Title Mentions*: Content mentioning another active memory's exact non-generic title receives a `mentions` edge ($w = 1.0$).
+     3. *Shared Topics*: Memories sharing $\ge 2$ non-generic tags receive bidirectional `shared_topic` edges ($w = 0.8$).
+     Output reports: `New links created: X | Total nodes: Y | Total edges: Z`.
+   - **Counting Connected Similar Neighbors for an Existing Node**:
+     - `lmem related <ID> -n 1 --json` outputs all direct 1-hop connected memories, their relation types (`relates_to`, `mentions`, `shared_topic`, custom), and similarity weights.
+     - `lmem graph --focus <ID> -n 1 --json` returns the exact subgraph `{ nodes: [...], edges: [...] }` to inspect neighborhood cluster size.
+   - **Graph-Expanded Recall (`--multi-hop`)**:
+     `lmem recall "<query>" --multi-hop` executes hybrid search and automatically traverses graph edges to pull in similar connected neighbors.
 
 ---
 
@@ -187,9 +201,12 @@ LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ index
 | Command | Output | When to Use |
 | :--- | :--- | :--- |
 | `lmem recall "<query>"` | Top-$K$ full memory cards with RRF score (`BM25 + Vector + Acronym Boost`), ID, category, and tags | When gathering broad context before planning, coding, or debugging |
+| `lmem recall "<query>" --min-similarity 0.70` | Top-$K$ memories filtered by minimum cosine similarity threshold | When checking how many existing memories are semantically similar to a new query or statement |
 | `lmem recall "<query>" --multi-hop` | Recall results expanded with 1-hop connected graph neighbors | When context requires knowing dependencies and adjacent architectural relationships |
+| `lmem autolink [--min-similarity 0.75]` | Summary of newly discovered graph edges, total nodes, and edges | When auto-connecting the vault by embedding similarity, title mentions, and shared tags |
+| `lmem related "<id>" -n 1` | Direct 1-hop connected neighbors, relation types, and similarity weights | When counting or inspecting memories directly linked/similar to a specific node |
 | `lmem related "<id>" --hops 2` | Breadth-first connected memories along relation paths with hop-decay scores | When investigating causal chains, dependencies, or downstream impacts of a specific memory |
-| `lmem graph --browser` | Interactive Obsidian-style HTML force-directed canvas graph | When exploring visual topology, clustering, or presenting knowledge architecture |
+| `lmem graph --focus <id> -n 1` | Focused network tree or JSON subgraph for a node's immediate neighborhood | When inspecting node/edge cluster counts and topology around a concept |
 | `lmem answer "<question>"` | Exact extracted span (via ONNX `minilm-squad2` / `tinyroberta-squad2` or `ollama:<model>`), confidence `%`, and source memory ID | When answering a specific factual question (`"what port..."`, `"what is my..."`, `"who is..."`) |
 | `lmem conflicts` | Pairs of semantically similar + lexically overlapping memories with `[OLDER · UTC]` and `[NEWER · UTC]` timestamps | When cleaning up duplicate memories or merging updated facts into a single canonical record |
 
