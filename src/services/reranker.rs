@@ -1045,11 +1045,20 @@ fn clean_extracted_span(raw: &str) -> String {
         s = s.trim_end_matches(')').trim();
     }
 
-    // If the model included a short "Label: Value" prefix (not a URL like https://), strip the label
+    // If the model included a short "Label: Value" prefix (not a URL like https://), strip the label.
+    // Guard against stripping numeric timestamps or time intervals (e.g. "18:00 to 19:00" or "from 18:00 to 19:00").
     if !s.contains("://") {
         if let Some((lhs, rhs)) = s.split_once(':') {
             let rhs_clean = rhs.trim();
-            if !rhs_clean.is_empty() && lhs.split_whitespace().count() <= 4 {
+            let lhs_trimmed = lhs.trim();
+            let is_time_or_numeric = lhs_trimmed.chars().all(|c| c.is_ascii_digit())
+                || (lhs_trimmed.ends_with(|c: char| c.is_ascii_digit())
+                    && rhs.starts_with(|c: char| c.is_ascii_digit()));
+            if !rhs_clean.is_empty()
+                && !lhs_trimmed.is_empty()
+                && lhs.split_whitespace().count() <= 4
+                && !is_time_or_numeric
+            {
                 s = rhs_clean;
             }
         }
@@ -1176,6 +1185,31 @@ mod tests {
             "https://atlas.example.test/api"
         );
         assert_eq!(clean_extracted_span("(22A31A05I7)"), "22A31A05I7");
+        assert_eq!(
+            clean_extracted_span("18:00 to 19:00"),
+            "18:00 to 19:00"
+        );
+        assert_eq!(
+            clean_extracted_span("10:30 AM"),
+            "10:30 AM"
+        );
+        assert_eq!(
+            clean_extracted_span("Time: 18:00 to 19:00"),
+            "18:00 to 19:00"
+        );
+        assert_eq!(
+            clean_extracted_span("from 18:00 to 19:00"),
+            "from 18:00 to 19:00"
+        );
+        assert_eq!(
+            clean_extracted_span("between 18:00 and 19:00"),
+            "between 18:00 and 19:00"
+        );
+        assert_eq!(
+            clean_extracted_span("Daily routine: from 18:00 to 19:00"),
+            "from 18:00 to 19:00"
+        );
+        assert_eq!(clean_extracted_span("Port: 5432"), "5432");
     }
 
     #[test]
