@@ -964,7 +964,7 @@ impl CliView {
             "  {} {:<20} {}",
             Self::slate("├─"),
             Self::slate("Ollama Server URL"),
-            Self::slate(&cfg.ollama_url)
+            Self::slate(&cfg.effective_ollama_url())
         );
         let api_key_display = if let Some(ref k) = cfg.ollama_api_key {
             if k.len() > 8 {
@@ -979,7 +979,7 @@ impl CliView {
                 Self::gold("******** (from env: OLLAMA_API_KEY)")
             }
         } else {
-            Self::slate("none (unauthenticated)")
+            Self::slate("none (unauthenticated / localhost)")
         };
         println!(
             "  {} {:<20} {}",

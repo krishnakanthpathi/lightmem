@@ -62,7 +62,7 @@ impl LightMem {
                 }
             }
             "ollama" => Arc::new(OllamaEmbeddingProvider::with_api_key(
-                self.config.ollama_url.clone(),
+                self.config.effective_ollama_url(),
                 self.config.embedding_model.clone(),
                 self.config.effective_ollama_api_key(),
             )),
@@ -730,7 +730,7 @@ impl LightMem {
                 .or_else(|| self.config.reranker.strip_prefix("OLLAMA:"))
                 .map(|s| s.to_string());
             return Ok(Box::new(OllamaReranker::with_api_key(
-                self.config.ollama_url.clone(),
+                self.config.effective_ollama_url(),
                 cfg_ollama,
                 self.config.effective_ollama_api_key(),
             )));
@@ -741,7 +741,7 @@ impl LightMem {
             .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
         {
             return Ok(Box::new(OllamaReranker::with_api_key(
-                self.config.ollama_url.clone(),
+                self.config.effective_ollama_url(),
                 Some(ollama_model.to_string()),
                 self.config.effective_ollama_api_key(),
             )));

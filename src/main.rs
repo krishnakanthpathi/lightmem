@@ -823,28 +823,63 @@ fn main() -> Result<()> {
             let previous_identity = cfg.embedding_identity().ok();
             let mut changed = false;
 
-            if let Some(b) = backend {
-                cfg.backend = b;
+            if let Some(ref b) = backend {
+                let target_url = url
+                    .as_ref()
+                    .map(|u| LightMemConfig::normalize_ollama_url(u))
+                    .unwrap_or_else(|| cfg.effective_ollama_url());
+                if b == "ollama" && target_url == "https://ollama.com" {
+                    anyhow::bail!(
+                        "Ollama Cloud (https://ollama.com) does not provide an embedding endpoint; it only hosts generative LLMs.\n\
+                         ◈ For vector search, keep '--backend onnx' (local ONNX, recommended) or connect to a local Ollama with '--url http://localhost:11434'.\n\
+                         ◈ To use Ollama Cloud for question answering and reranking, run:\n\
+                           lmem config --reranker ollama"
+                    );
+                }
+                cfg.backend = b.clone();
                 changed = true;
             }
             if let Some(om) = onnx_model {
                 cfg.onnx_model = Some(om);
                 changed = true;
             }
-            if let Some(u) = url {
-                cfg.ollama_url = u;
+            if let Some(ref u) = url {
+                cfg.ollama_url = LightMemConfig::normalize_ollama_url(u);
                 changed = true;
             }
             if clear_api_key {
                 cfg.ollama_api_key = None;
+                if cfg.ollama_url == "https://ollama.com" {
+                    cfg.ollama_url = "http://localhost:11434".to_string();
+                }
                 changed = true;
             } else if let Some(key) = api_key {
                 let trimmed = key.trim();
                 if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
                     cfg.ollama_api_key = None;
+                    if cfg.ollama_url == "https://ollama.com" {
+                        cfg.ollama_url = "http://localhost:11434".to_string();
+                    }
                 } else {
                     cfg.ollama_api_key = Some(trimmed.to_string());
+                    // If no explicit URL was given and current URL is default localhost, auto-switch to official Ollama Cloud
+                    if url.is_none() && (cfg.ollama_url == "http://localhost:11434" || cfg.ollama_url == "http://127.0.0.1:11434") {
+                        cfg.ollama_url = "https://ollama.com".to_string();
+                    }
                 }
+                changed = true;
+            }
+            // If Ollama is pointed to Ollama Cloud or an API key is set, but embedding backend was 'ollama',
+            // safely keep/switch embeddings on local ONNX so we never fail trying to call non-existent cloud /api/embeddings.
+            if backend.is_none()
+                && cfg.backend == "ollama"
+                && (cfg.ollama_url == "https://ollama.com" || cfg.effective_ollama_api_key().is_some())
+            {
+                eprintln!(
+                    "◈ Notice: Ollama Cloud (https://ollama.com) provides generative models for answering/reranking.\n\
+                     ◈ Automatically keeping embedding backend on local ONNX ('bge-small') for fast offline search."
+                );
+                cfg.backend = "onnx".to_string();
                 changed = true;
             }
             if let Some(m) = model {

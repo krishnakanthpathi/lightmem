@@ -90,6 +90,44 @@ impl LightMemConfig {
         }
     }
 
+    /// Normalizes an Ollama endpoint URL by trimming whitespace, trailing slashes,
+    /// and stripping trailing path suffixes like `/api/chat`, `/api/generate`, `/api/embeddings`, `/api/embed`, `/api`, or `/v1`.
+    pub fn normalize_ollama_url(raw: &str) -> String {
+        let mut u = raw.trim().trim_end_matches('/').to_string();
+        for suffix in [
+            "/api/chat",
+            "/api/generate",
+            "/api/embeddings",
+            "/api/embed",
+            "/api",
+            "/v1",
+        ] {
+            if u.ends_with(suffix) {
+                u = u[..u.len() - suffix.len()].trim_end_matches('/').to_string();
+            }
+        }
+        if u.is_empty() {
+            "http://localhost:11434".to_string()
+        } else {
+            u
+        }
+    }
+
+    /// Resolves the effective Ollama base URL:
+    /// - If the configured URL is localhost/default, but an API key is present (config or env)
+    ///   and no custom non-localhost URL was explicitly set, default to official Ollama Cloud `https://ollama.com`.
+    /// - Otherwise returns the normalized configured URL (defaulting to `http://localhost:11434`).
+    pub fn effective_ollama_url(&self) -> String {
+        let normalized = Self::normalize_ollama_url(&self.ollama_url);
+        if (normalized == "http://localhost:11434" || normalized == "http://127.0.0.1:11434")
+            && self.effective_ollama_api_key().is_some()
+        {
+            "https://ollama.com".to_string()
+        } else {
+            normalized
+        }
+    }
+
     /// Resolves effective Ollama API key from config, or environment variables (OLLAMA_API_KEY, LMEM_OLLAMA_API_KEY).
     pub fn effective_ollama_api_key(&self) -> Option<String> {
         self.ollama_api_key
@@ -117,7 +155,7 @@ impl LightMemConfig {
             "hash" => "hash:fnv-bigram-v1".to_string(),
             "ollama" => format!(
                 "ollama:{}:{}",
-                self.ollama_url.trim_end_matches('/'),
+                self.effective_ollama_url().trim_end_matches('/'),
                 self.embedding_model
             ),
             "onnx" => {
@@ -199,7 +237,8 @@ impl LightMemConfig {
             },
             "ollama" => format!(
                 "{} (via Ollama @ {})",
-                self.embedding_model, self.ollama_url
+                self.embedding_model,
+                self.effective_ollama_url()
             ),
             "hash" => "deterministic-trigram-hash (384-dim offline)".to_string(),
             other => other.to_string(),
@@ -208,13 +247,14 @@ impl LightMemConfig {
 
     pub fn active_reranker_summary(&self) -> String {
         let norm = Self::normalize_reranker(&self.reranker, None);
+        let eff_url = self.effective_ollama_url();
         if let Some(ollama_model) = norm.strip_prefix("ollama:") {
-            return format!("ollama:{} (@ {})", ollama_model, self.ollama_url);
+            return format!("ollama:{} (@ {})", ollama_model, eff_url);
         }
         match norm.as_str() {
             "tinyroberta-squad2" => "tinyroberta-squad2 (local ONNX Extractive QA)".to_string(),
             "minilm-squad2" => "minilm-squad2 (local ONNX Extractive QA)".to_string(),
-            "ollama" => format!("ollama:auto (@ {})", self.ollama_url),
+            "ollama" => format!("ollama:auto (@ {})", eff_url),
             "top1" => "top1 (0ms vector rank-1)".to_string(),
             other => format!("{} (local ONNX Extractive QA)", other),
         }
@@ -342,5 +382,48 @@ mod tests {
 
         cfg.ollama_api_key = Some("  ".to_string());
         assert_eq!(cfg.effective_ollama_api_key(), None);
+    }
+
+    #[test]
+    fn test_normalize_ollama_url() {
+        assert_eq!(
+            LightMemConfig::normalize_ollama_url("https://ollama.com/api/chat"),
+            "https://ollama.com"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_ollama_url("https://ollama.com/api/generate"),
+            "https://ollama.com"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_ollama_url("https://ollama.com/api/"),
+            "https://ollama.com"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_ollama_url("http://localhost:11434/api"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_ollama_url("http://localhost:11434/v1/"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_ollama_url(""),
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn test_effective_ollama_url_resolution() {
+        let mut cfg = LightMemConfig::default();
+        // Unauthenticated default URL is localhost:11434
+        assert_eq!(cfg.effective_ollama_url(), "http://localhost:11434");
+
+        // When API key is provided, localhost URL automatically resolves to https://ollama.com
+        cfg.ollama_api_key = Some("test-api-key-123".to_string());
+        assert_eq!(cfg.effective_ollama_url(), "https://ollama.com");
+
+        // Explicit custom URL is preserved and normalized
+        cfg.ollama_url = "https://custom-ollama-proxy.internal/api/chat".to_string();
+        assert_eq!(cfg.effective_ollama_url(), "https://custom-ollama-proxy.internal");
     }
 }

@@ -17,14 +17,21 @@ fn test_ollama_embedding_provider_sends_authorization_header() {
 
     let handle = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 2048];
-            let n = stream.read(&mut buf).unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             if req.contains("Authorization: Bearer secret-test-token-42") {
                 auth_received_clone.store(true, Ordering::SeqCst);
             }
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"embedding\": [0.1, 0.2, 0.3]}";
+            let body = r#"{"embedding": [0.1, 0.2, 0.3]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
             let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
 
@@ -36,7 +43,7 @@ fn test_ollama_embedding_provider_sends_authorization_header() {
 
     let res = provider.embed("hello authenticated ollama");
     let _ = handle.join();
-    assert!(res.is_ok(), "Embedding request should succeed");
+    assert!(res.is_ok(), "Embedding error: {:?}", res.err());
     assert!(
         auth_received.load(Ordering::SeqCst),
         "HTTP server should have received Authorization: Bearer secret-test-token-42"
@@ -53,7 +60,7 @@ fn test_ollama_reranker_sends_authorization_header() {
     let handle = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
             let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap();
+            let n = stream.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]);
             if req.contains("Authorization: Bearer reranker-secret-99") {
                 auth_received_clone.store(true, Ordering::SeqCst);
@@ -66,6 +73,7 @@ fn test_ollama_reranker_sends_authorization_header() {
             );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
 
@@ -109,7 +117,7 @@ fn test_config_cli_api_key_flag_and_json_output() {
 
     let binary = env!("CARGO_BIN_EXE_lmem");
 
-    // 1. Set API key
+    // 1. Set API key (auto-switches URL to https://ollama.com when no explicit url is provided)
     let output = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
         .args(&["config", "--api-key", "sk-supersecret123456"])
@@ -119,6 +127,7 @@ fn test_config_cli_api_key_flag_and_json_output() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Ollama API Key"));
     assert!(stdout.contains("sk-s...3456"));
+    assert!(stdout.contains("https://ollama.com"));
 
     // 2. Read with --json flag
     let output_json = std::process::Command::new(binary)
@@ -137,11 +146,25 @@ fn test_config_cli_api_key_flag_and_json_output() {
         json_val.get("has_ollama_api_key").unwrap().as_bool().unwrap(),
         true
     );
+    assert_eq!(
+        json_val.get("ollama_url").unwrap().as_str().unwrap(),
+        "https://ollama.com"
+    );
     assert!(json_val.get("active_db").is_some());
     assert!(json_val.get("config_file").is_some());
     assert!(json_val.get("embedding_identity").is_some());
 
-    // 3. Clear API key
+    // 3. Set custom URL with trailing /api/chat - verifies normalization
+    let output_url = std::process::Command::new(binary)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(&["config", "--url", "https://custom-proxy.internal/api/chat/"])
+        .output()
+        .unwrap();
+    assert!(output_url.status.success());
+    let stdout_url = String::from_utf8_lossy(&output_url.stdout);
+    assert!(stdout_url.contains("https://custom-proxy.internal"));
+
+    // 4. Clear API key (resets URL back to localhost if it was cloud)
     let output_clear = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
         .args(&["config", "--clear-api-key"])
@@ -149,7 +172,7 @@ fn test_config_cli_api_key_flag_and_json_output() {
         .unwrap();
     assert!(output_clear.status.success());
     let stdout_clear = String::from_utf8_lossy(&output_clear.stdout);
-    assert!(stdout_clear.contains("none (unauthenticated)"));
+    assert!(stdout_clear.contains("none (unauthenticated"));
 
     let output_json_after = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
