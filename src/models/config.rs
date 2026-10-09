@@ -94,6 +94,36 @@ impl LightMemConfig {
         }
     }
 
+    /// Apply a standard setup preset: 'local', 'ollama-cloud', or 'ollama-local'
+    pub fn apply_preset(&mut self, preset: &str) -> Result<()> {
+        match preset.to_lowercase().as_str() {
+            "local" | "offline" | "onnx" => {
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "minilm-squad2".to_string();
+                Ok(())
+            }
+            "ollama-cloud" | "cloud" => {
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "ollama:gemma4:31b-cloud".to_string();
+                self.ollama_url = "http://localhost:11434".to_string();
+                Ok(())
+            }
+            "ollama-local" | "ollama" => {
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "ollama".to_string();
+                self.ollama_url = "http://localhost:11434".to_string();
+                Ok(())
+            }
+            other => anyhow::bail!(
+                "Unknown preset '{}'. Choose 'local' (full local ONNX), 'ollama-cloud' (Ollama gemma4:31b-cloud), or 'ollama-local' (Ollama localhost).",
+                other
+            ),
+        }
+    }
+
     /// Normalizes an Ollama endpoint URL by trimming whitespace, trailing slashes,
     /// and stripping trailing path suffixes like `/api/chat`, `/api/generate`, `/api/embeddings`, `/api/embed`, `/api`, or `/v1`.
     pub fn normalize_ollama_url(raw: &str) -> String {

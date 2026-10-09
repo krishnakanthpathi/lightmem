@@ -326,7 +326,116 @@ esac
 # 4. Pre-warm ONNX Extractive QA Model (minilm-squad2)
 download_onnx_model "minilm-squad2" 128000
 
-# 5. Install Shell Completions with Interactive Tab + Arrow-Key Menu Navigation
+# 5. Interactive LLM Engine Setup (Default for Ingestion & QA)
+select_llm_interactive() {
+    sel=1
+    printf "\n  \033[1;31m❖\033[0m \033[1;37mConfigure LLM Engine for Memory Ingestion & QA\033[0m \033[38;2;148;163;184m(Use ↑/↓ arrows or 1-4, then Enter):\033[0m\n" >/dev/tty
+    render_llm_menu() {
+        idx=1
+        for item in \
+            "ollama-local ─ Local Ollama (http://localhost:11434 · Auto-detects models · Recommended)" \
+            "ollama-cloud ─ Ollama Cloud (https://ollama.com · gemma4:31b-cloud)" \
+            "custom       ─ Custom OpenAI-compatible / Remote LLM endpoint (URL + Model)" \
+            "offline      ─ 100% Offline (Local ONNX QA + deterministic NLP · No LLM)"
+        do
+            name="${item%% *}"
+            rest="${item#* }"
+            if [ "$idx" -eq "$sel" ]; then
+                printf "\r\033[2K    \033[1;31m▸ [%d]\033[0m \033[1;37m%s\033[0m \033[38;2;248;250;252m%s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
+            else
+                printf "\r\033[2K      \033[38;2;148;163;184m[%d] %s %s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
+            fi
+            idx=$(( idx + 1 ))
+        done
+    }
+
+    if stty -g </dev/tty >/dev/null 2>&1; then
+        old_tty="$(stty -g </dev/tty)"
+        render_llm_menu
+        while :; do
+            stty -icanon -echo min 1 time 0 </dev/tty 2>/dev/null || break
+            key="$(dd bs=1 count=1 </dev/tty 2>/dev/null)"
+            stty "$old_tty" </dev/tty 2>/dev/null || true
+            case "$key" in
+                ""|"$(printf '\r')"|"$(printf '\n')")
+                    break
+                    ;;
+                1|2|3|4)
+                    sel="$key"
+                    printf "\033[4A" >/dev/tty
+                    render_llm_menu
+                    break
+                    ;;
+                "$(printf '\033')")
+                    stty -icanon -echo min 0 time 1 </dev/tty 2>/dev/null || true
+                    seq="$(dd bs=2 count=1 </dev/tty 2>/dev/null)"
+                    stty "$old_tty" </dev/tty 2>/dev/null || true
+                    case "$seq" in
+                        "[A"|"OA")
+                            sel=$(( sel - 1 ))
+                            [ "$sel" -lt 1 ] && sel=4
+                            ;;
+                        "[B"|"OB")
+                            sel=$(( sel + 1 ))
+                            [ "$sel" -gt 4 ] && sel=1
+                            ;;
+                    esac
+                    printf "\033[4A" >/dev/tty
+                    render_llm_menu
+                    ;;
+            esac
+        done
+        stty "$old_tty" </dev/tty 2>/dev/null || true
+        printf "\n" >/dev/tty
+        LLM_CHOICE="$sel"
+    else
+        render_llm_menu
+        printf "  \033[1;31m▸\033[0m Enter choice \033[38;2;148;163;184m[1-4, default=1]\033[0m: " >/dev/tty
+        read -r LLM_CHOICE </dev/tty || LLM_CHOICE="1"
+        printf "\n" >/dev/tty
+    fi
+}
+
+LLM_CHOICE="${LIGHTMEM_LLM:-}"
+if [ -z "$LLM_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    select_llm_interactive || LLM_CHOICE="1"
+fi
+[ -z "$LLM_CHOICE" ] && LLM_CHOICE="1"
+
+case "$LLM_CHOICE" in
+    2|cloud|ollama-cloud)
+        printf "  \033[1;31m▸\033[0m Enter Ollama Cloud model \033[38;2;148;163;184m[default=gemma4:31b-cloud]\033[0m: " >/dev/tty
+        read -r CLOUD_MODEL </dev/tty || CLOUD_MODEL=""
+        [ -z "$CLOUD_MODEL" ] && CLOUD_MODEL="gemma4:31b-cloud"
+        "$INSTALL_DIR/lmem" config --preset ollama-cloud --reranker "ollama:$CLOUD_MODEL" --yes >/dev/null 2>&1 || true
+        printf "  \033[1;32m◈\033[0m Configured Ollama Cloud (%s)... \033[1;32m100%%\033[0m\n" "$CLOUD_MODEL"
+        ;;
+    3|custom)
+        printf "  \033[1;31m▸\033[0m Enter LLM endpoint URL \033[38;2;148;163;184m[default=http://localhost:11434]\033[0m: " >/dev/tty
+        read -r CUSTOM_URL </dev/tty || CUSTOM_URL=""
+        [ -z "$CUSTOM_URL" ] && CUSTOM_URL="http://localhost:11434"
+        printf "  \033[1;31m▸\033[0m Enter Model name \033[38;2;148;163;184m[e.g. qwen2.5:3b, llama3.2:3b]\033[0m: " >/dev/tty
+        read -r CUSTOM_MODEL </dev/tty || CUSTOM_MODEL=""
+        [ -z "$CUSTOM_MODEL" ] && CUSTOM_MODEL="qwen2.5:3b"
+        "$INSTALL_DIR/lmem" config --url "$CUSTOM_URL" --reranker "ollama:$CUSTOM_MODEL" --yes >/dev/null 2>&1 || true
+        printf "  \033[1;32m◈\033[0m Configured custom endpoint (%s · %s)... \033[1;32m100%%\033[0m\n" "$CUSTOM_URL" "$CUSTOM_MODEL"
+        ;;
+    4|offline|local)
+        "$INSTALL_DIR/lmem" config --preset local --yes >/dev/null 2>&1 || true
+        printf "  \033[1;32m◈\033[0m Configured 100%% offline local ONNX mode... \033[1;32m100%%\033[0m\n"
+        ;;
+    *)
+        # 1. Local Ollama (Default & Recommended)
+        "$INSTALL_DIR/lmem" config --preset ollama-local --yes >/dev/null 2>&1 || true
+        if curl -s -m 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
+            printf "  \033[1;32m◈\033[0m Configured Local Ollama (active & connected at http://localhost:11434)... \033[1;32m100%%\033[0m\n"
+        else
+            printf "  \033[1;33m▸\033[0m Configured Local Ollama (http://localhost:11434 · start with 'ollama serve')... \033[1;32m100%%\033[0m\n"
+        fi
+        ;;
+esac
+
+# 6. Install Shell Completions with Interactive Tab + Arrow-Key Menu Navigation
 COMP_DIR="$HOME/.lightmem/completions"
 mkdir -p "$COMP_DIR"
 "$INSTALL_DIR/lmem" completions zsh > "$COMP_DIR/_lmem" 2>/dev/null || true

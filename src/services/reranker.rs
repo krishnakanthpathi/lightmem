@@ -554,7 +554,7 @@ impl OllamaReranker {
         }
     }
 
-    fn resolve_model(&self) -> String {
+    pub fn resolve_model(&self) -> String {
         if let Some(ref explicit) = self.model {
             if !matches!(
                 explicit.as_str(),

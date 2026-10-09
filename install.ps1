@@ -64,8 +64,52 @@ $PrevErrPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 & $ExePath config --download bge-small
 & $ExePath config --download minilm-squad2
-& $ExePath config --backend onnx --onnx-model bge-small --reranker minilm-squad2 --yes
 $ErrorActionPreference = $PrevErrPref
+
+# Interactive LLM Setup
+$LlmChoice = if ($env:LIGHTMEM_LLM) { $env:LIGHTMEM_LLM } else { "" }
+if ([string]::IsNullOrWhiteSpace($LlmChoice) -and [Environment]::UserInteractive) {
+    Write-Host ""
+    Write-Host "  ❖ Select LLM Engine for Memory Ingestion & QA:" -ForegroundColor Red
+    Write-Host "    [1] Local Ollama (http://localhost:11434 · Auto-detects models · Recommended)"
+    Write-Host "    [2] Ollama Cloud (https://ollama.com · gemma4:31b-cloud)"
+    Write-Host "    [3] Custom Remote LLM (URL + Model)"
+    Write-Host "    [4] Offline Local ONNX (100% offline, no LLM required)"
+    Write-Host ""
+    $PromptChoice = Read-Host "  ▸ Enter choice [1-4, default=1]"
+    $LlmChoice = if ([string]::IsNullOrWhiteSpace($PromptChoice)) { "1" } else { $PromptChoice.Trim() }
+}
+if ([string]::IsNullOrWhiteSpace($LlmChoice)) { $LlmChoice = "1" }
+
+switch -Wildcard ($LlmChoice) {
+    "2" {
+        $CloudModel = Read-Host "  ▸ Enter Ollama Cloud model [default: gemma4:31b-cloud]"
+        if ([string]::IsNullOrWhiteSpace($CloudModel)) { $CloudModel = "gemma4:31b-cloud" }
+        & $ExePath config --preset ollama-cloud --reranker "ollama:$CloudModel" --yes
+        Write-Host "  ✓ Configured Ollama Cloud ($CloudModel)" -ForegroundColor Green
+    }
+    "3" {
+        $CustomUrl = Read-Host "  ▸ Enter LLM endpoint URL [default: http://localhost:11434]"
+        if ([string]::IsNullOrWhiteSpace($CustomUrl)) { $CustomUrl = "http://localhost:11434" }
+        $CustomModel = Read-Host "  ▸ Enter LLM model name [default: qwen2.5:3b]"
+        if ([string]::IsNullOrWhiteSpace($CustomModel)) { $CustomModel = "qwen2.5:3b" }
+        & $ExePath config --url $CustomUrl --reranker "ollama:$CustomModel" --yes
+        Write-Host "  ✓ Configured custom LLM ($CustomUrl · $CustomModel)" -ForegroundColor Green
+    }
+    "4" {
+        & $ExePath config --preset local --yes
+        Write-Host "  ✓ Configured 100% offline local ONNX mode" -ForegroundColor Green
+    }
+    Default {
+        & $ExePath config --preset ollama-local --yes
+        try {
+            $testResp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
+            Write-Host "  ✓ Configured Local Ollama (connected at http://localhost:11434)" -ForegroundColor Green
+        } catch {
+            Write-Host "  ! Configured Local Ollama (http://localhost:11434 · start with 'ollama serve')" -ForegroundColor Yellow
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "  ✦ LightMem ($ReleaseTag) is ready! Run: lmem" -ForegroundColor Green

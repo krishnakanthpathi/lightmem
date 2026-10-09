@@ -66,29 +66,65 @@ impl ObserverService {
 
         let threshold = confidence_threshold.unwrap_or(0.85);
 
-        // 1. If an LLM reranker/extractor is requested or configured, try LLM extraction first
-        if let Some(spec) = reranker_spec {
-            let lower = spec.trim().to_lowercase();
-            if lower.starts_with("ollama")
-                || lower.starts_with("openai")
-                || lower.starts_with("llm")
-            {
+        // Check if offline mode is explicitly requested via env or flag
+        let is_offline = std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
+            || std::env::var_os("LIGHTMEM_OFFLINE").is_some();
+
+        let wants_local = if let Some(spec) = reranker_spec {
+            let l = spec.trim().to_lowercase();
+            matches!(
+                l.as_str(),
+                "local"
+                    | "none"
+                    | "offline"
+                    | "minilm-squad2"
+                    | "tinyroberta-squad2"
+                    | "top1"
+                    | "onnx"
+            )
+        } else {
+            false
+        };
+
+        // 1. LLM Extraction by Default:
+        // Try LLM extraction first unless offline mode or explicit local mode is set
+        if !is_offline && !wants_local {
+            let effective_llm_spec = reranker_spec.unwrap_or_else(|| {
                 if let Some(cfg) = config {
-                    if let Ok(candidates) = Self::extract_via_llm(trimmed, spec, cfg) {
-                        if !candidates.is_empty() {
-                            return Ok(Self::post_process_candidates(
-                                candidates,
-                                category_override,
-                                extra_tags,
-                                threshold,
-                            ));
-                        }
+                    let r = cfg.reranker.trim();
+                    let lower = r.to_lowercase();
+                    if lower.starts_with("ollama:")
+                        || lower.starts_with("openai:")
+                        || lower.starts_with("llm:")
+                        || lower == "ollama"
+                    {
+                        r
+                    } else {
+                        "ollama"
                     }
+                } else {
+                    "ollama"
+                }
+            });
+
+            let default_cfg = LightMemConfig::default();
+            let effective_cfg = config.unwrap_or(&default_cfg);
+
+            if let Ok(candidates) =
+                Self::extract_via_llm(trimmed, effective_llm_spec, effective_cfg)
+            {
+                if !candidates.is_empty() {
+                    return Ok(Self::post_process_candidates(
+                        candidates,
+                        category_override,
+                        extra_tags,
+                        threshold,
+                    ));
                 }
             }
         }
 
-        // 2. Local deterministic NLP & regex heuristic extractor (100% offline, 0ms latency)
+        // 2. Local deterministic NLP & regex heuristic extractor fallback (100% offline, 0ms latency)
         let candidates = Self::extract_local(trimmed);
         Ok(Self::post_process_candidates(
             candidates,
@@ -694,11 +730,13 @@ impl ObserverService {
             .or_else(|| reranker_spec.strip_prefix("llm:"))
             .unwrap_or(reranker_spec);
 
-        let _ollama = OllamaReranker::with_api_key(
+        let ollama = OllamaReranker::with_api_key(
             config.effective_ollama_url(),
             Some(model_spec.to_string()),
             config.effective_ollama_api_key(),
         );
+
+        let resolved_model = ollama.resolve_model();
 
         let system_prompt = "You are an expert AI agent memory extractor. Extract key atomic long-term memories (facts, preferences, decisions, rules, goals, observations) from the given conversation or notes.\n\
             Ignore conversational filler, greetings, and trivial chit-chat.\n\
@@ -715,7 +753,7 @@ impl ObserverService {
 
         let chat_url = format!("{}/v1/chat/completions", config.effective_ollama_url());
         let payload = serde_json::json!({
-            "model": model_spec,
+            "model": resolved_model,
             "messages": [
                 { "role": "system", "content": system_prompt },
                 { "role": "user", "content": text }
@@ -724,7 +762,7 @@ impl ObserverService {
             "max_tokens": 1024
         });
 
-        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
+        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(12));
         if let Some(ref key) = config.effective_ollama_api_key() {
             req = req.set(
                 "Authorization",
@@ -732,20 +770,50 @@ impl ObserverService {
             );
         }
 
-        let resp = req
-            .send_json(payload)
-            .context("Ollama LLM extraction request failed")?;
-        let json_resp: serde_json::Value = resp.into_json()?;
-        let raw_content = json_resp
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-            .and_then(|m| m.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
+        let resp_result = req.send_json(payload);
+        let raw_content = match resp_result {
+            Ok(resp) => {
+                let json_resp: serde_json::Value = resp.into_json()?;
+                json_resp
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|m| m.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+            Err(_) => {
+                // Fallback to Ollama native /api/generate endpoint
+                let gen_url = format!("{}/api/generate", config.effective_ollama_url());
+                let gen_prompt = format!("{}\n\nText:\n{}", system_prompt, text);
+                let gen_payload = serde_json::json!({
+                    "model": resolved_model,
+                    "prompt": gen_prompt,
+                    "stream": false,
+                    "format": "json"
+                });
+                let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(12));
+                if let Some(ref key) = config.effective_ollama_api_key() {
+                    fallback_req = fallback_req.set(
+                        "Authorization",
+                        &crate::models::config::format_auth_header(key),
+                    );
+                }
+                let fallback_resp = fallback_req
+                    .send_json(gen_payload)
+                    .context("Ollama extraction request failed")?;
+                let json_resp: serde_json::Value = fallback_resp.into_json()?;
+                json_resp
+                    .get("response")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            }
+        };
 
-        Self::parse_llm_json_response(raw_content)
+        Self::parse_llm_json_response(&raw_content)
     }
 
     /// Parse LLM JSON array response into ObservedCandidates.

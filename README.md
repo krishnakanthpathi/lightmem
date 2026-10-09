@@ -159,11 +159,15 @@ LightMem supports three swappable reranker backends for `lmem answer`, `lmem rec
 | **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
 
 ```bash
-# 1. Inspect complete active configuration and available presets
+# 1. Interactive Setup Wizard (prompted automatically during install)
+lmem setup                    # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
+lmem setup --preset ollama-local # One-shot preset configuration
+
+# 2. Inspect complete active configuration and available presets
 lmem config                   # Formatted tree of settings and setup presets
 lmem config --json            # Full machine-readable JSON configuration
 
-# 2. Preset 1: 100% Offline Local Mode (ONNX bge-small + minilm-squad2 QA)
+# 3. Preset 1: 100% Offline Local Mode (ONNX bge-small + minilm-squad2 QA)
 lmem config --preset local
 lmem config --download all    # Pre-cache ONNX models locally for offline operation
 

@@ -107,7 +107,10 @@ lmem export ./memory_bundle                        # Export human-readable OKF v
 lmem export ./backup.json --json                   # Full lossless JSON backup envelope
 lmem import ./backup.json --enrich                 # Transactional import with heuristic enrichment
 
-# 9. Engine, Reranker & Preset Configuration
+# 9. Engine, Reranker & Setup Wizard
+lmem setup                                         # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
+lmem setup --preset ollama-local                   # Configure Local Ollama LLM backend
+lmem setup --preset local                          # Configure 100% offline local ONNX mode
 lmem config                                        # View active settings & available setup presets
 lmem config --json                                 # Machine-readable JSON configuration
 lmem config --preset local                         # Preset 1: 100% offline (bge-small ONNX + minilm-squad2 QA)

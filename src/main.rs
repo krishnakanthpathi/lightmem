@@ -291,6 +291,25 @@ enum Commands {
         json: bool,
     },
 
+    /// Interactive wizard to configure LLM and embedding engines
+    Setup {
+        /// Setup preset directly without interactive prompt ('local', 'ollama-local', 'ollama-cloud')
+        #[arg(long)]
+        preset: Option<String>,
+
+        /// Ollama / OpenAI server URL (e.g. http://localhost:11434)
+        #[arg(long)]
+        url: Option<String>,
+
+        /// LLM model name or reranker spec
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Approve prompts without confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
     /// Rebuild embeddings for the configured model, with progress
     Reindex {
         /// Explicitly approve migration without an interactive prompt
@@ -864,32 +883,8 @@ fn main() -> Result<()> {
             let mut changed = false;
 
             if let Some(ref p) = preset {
-                match p.to_lowercase().as_str() {
-                    "local" | "offline" | "onnx" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("bge-small".to_string());
-                        cfg.reranker = "minilm-squad2".to_string();
-                        changed = true;
-                    }
-                    "ollama-cloud" | "cloud" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("bge-small".to_string());
-                        cfg.reranker = "ollama:gemma4:31b-cloud".to_string();
-                        cfg.ollama_url = "http://localhost:11434".to_string();
-                        changed = true;
-                    }
-                    "ollama-local" | "ollama" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("bge-small".to_string());
-                        cfg.reranker = "ollama".to_string();
-                        cfg.ollama_url = "http://localhost:11434".to_string();
-                        changed = true;
-                    }
-                    other => anyhow::bail!(
-                        "Unknown preset '{}'. Choose 'local' (full local ONNX), 'ollama-cloud' (Ollama gemma4:31b-cloud), or 'ollama-local' (Ollama localhost).",
-                        other
-                    ),
-                }
+                cfg.apply_preset(p)?;
+                changed = true;
             }
 
             if let Some(ref b) = backend {
@@ -977,6 +972,122 @@ fn main() -> Result<()> {
                 cfg.save()?;
             }
             CliView::render_config(&cfg, changed, json)?;
+        }
+
+        Commands::Setup {
+            preset,
+            url,
+            model,
+            yes,
+        } => {
+            let mut cfg = LightMemConfig::try_load()?;
+            let previous_identity = cfg.embedding_identity().ok();
+            let changed = true;
+
+            if let Some(ref p) = preset {
+                cfg.apply_preset(p)?;
+            } else if io::stdin().is_terminal() && !yes {
+                println!(
+                    "\n  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mSetup Wizard\x1b[0m"
+                );
+                println!(
+                    "  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
+                );
+                println!(
+                    "  \x1b[1;38;2;220;38;38m▸\x1b[0m \x1b[38;2;228;228;231mConfigure LLM Engine for Memory Ingestion & QA\x1b[0m\n"
+                );
+
+                println!(
+                    "    \x1b[1;31m[1]\x1b[0m \x1b[1;37mLocal Ollama\x1b[0m   ─ http://localhost:11434 (Auto-detects models · Recommended)"
+                );
+                println!(
+                    "    \x1b[38;2;148;163;184m[2]\x1b[0m Ollama Cloud  ─ https://ollama.com (Cloud LLM e.g. gemma4:31b-cloud)"
+                );
+                println!(
+                    "    \x1b[38;2;148;163;184m[3]\x1b[0m Custom Remote ─ OpenAI-compatible / Remote Ollama (URL + Model)"
+                );
+                println!(
+                    "    \x1b[38;2;148;163;184m[4]\x1b[0m Offline Local ─ 100% offline (Local ONNX QA + deterministic NLP · No LLM)\n"
+                );
+
+                print!("  \x1b[1;31m▸\x1b[0m Enter choice [1-4, default=1]: ");
+                io::stdout().flush()?;
+                let mut choice = String::new();
+                io::stdin().read_line(&mut choice)?;
+                let trimmed = choice.trim();
+
+                match trimmed {
+                    "2" | "cloud" | "ollama-cloud" => {
+                        print!("  \x1b[1;31m▸\x1b[0m Enter Ollama Cloud model [default: gemma4:31b-cloud]: ");
+                        io::stdout().flush()?;
+                        let mut m = String::new();
+                        io::stdin().read_line(&mut m)?;
+                        let m_trim = m.trim();
+                        let cloud_m = if m_trim.is_empty() {
+                            "gemma4:31b-cloud"
+                        } else {
+                            m_trim
+                        };
+                        cfg.apply_preset("ollama-cloud")?;
+                        cfg.reranker = format!("ollama:{}", cloud_m);
+                    }
+                    "3" | "custom" => {
+                        print!("  \x1b[1;31m▸\x1b[0m Enter LLM endpoint URL [default: http://localhost:11434]: ");
+                        io::stdout().flush()?;
+                        let mut u = String::new();
+                        io::stdin().read_line(&mut u)?;
+                        let u_trim = u.trim();
+                        let target_url = if u_trim.is_empty() {
+                            "http://localhost:11434"
+                        } else {
+                            u_trim
+                        };
+                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(target_url);
+
+                        print!("  \x1b[1;31m▸\x1b[0m Enter LLM model name [e.g. qwen2.5:3b]: ");
+                        io::stdout().flush()?;
+                        let mut m = String::new();
+                        io::stdin().read_line(&mut m)?;
+                        let m_trim = m.trim();
+                        let model_name = if m_trim.is_empty() {
+                            "qwen2.5:3b"
+                        } else {
+                            m_trim
+                        };
+                        cfg.reranker = format!("ollama:{}", model_name);
+                    }
+                    "4" | "local" | "offline" => {
+                        cfg.apply_preset("local")?;
+                    }
+                    _ => {
+                        cfg.apply_preset("ollama-local")?;
+                    }
+                }
+            } else {
+                // Non-interactive fallback: apply ollama-local preset
+                cfg.apply_preset("ollama-local")?;
+            }
+
+            if let Some(ref u) = url {
+                cfg.ollama_url = LightMemConfig::normalize_ollama_url(u);
+            }
+            if let Some(ref m) = model {
+                cfg.reranker = LightMemConfig::normalize_reranker(m, None);
+            }
+
+            if changed {
+                let path = effective_db
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+                let lm = LightMem::open_at(&path, cfg.clone())?;
+                if previous_identity.as_deref() != Some(lm.requested_embedding_identity())
+                    && !migrate_embeddings(&lm, yes, false, false)?
+                {
+                    return Ok(());
+                }
+                cfg.save()?;
+            }
+            CliView::render_config(&cfg, changed, false)?;
         }
 
         Commands::Reindex { yes } => {
