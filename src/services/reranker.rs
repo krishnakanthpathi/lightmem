@@ -556,9 +556,19 @@ impl OllamaReranker {
 
     pub fn resolve_model(&self) -> String {
         if let Some(ref explicit) = self.model {
+            let l = explicit.trim().to_lowercase();
             if !matches!(
-                explicit.as_str(),
-                "minilm-squad2" | "tinyroberta-squad2" | "onnx" | "qa" | "auto"
+                l.as_str(),
+                "minilm-squad2"
+                    | "tinyroberta-squad2"
+                    | "onnx"
+                    | "qa"
+                    | "auto"
+                    | "ollama"
+                    | "openai"
+                    | "llm"
+                    | "default"
+                    | ""
             ) {
                 return explicit.clone();
             }

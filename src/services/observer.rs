@@ -728,11 +728,21 @@ impl ObserverService {
             .strip_prefix("ollama:")
             .or_else(|| reranker_spec.strip_prefix("openai:"))
             .or_else(|| reranker_spec.strip_prefix("llm:"))
-            .unwrap_or(reranker_spec);
+            .unwrap_or(reranker_spec)
+            .trim();
+
+        let explicit_model = if matches!(
+            model_spec.to_lowercase().as_str(),
+            "ollama" | "openai" | "llm" | "auto" | "default" | ""
+        ) {
+            None
+        } else {
+            Some(model_spec.to_string())
+        };
 
         let ollama = OllamaReranker::with_api_key(
             config.effective_ollama_url(),
-            Some(model_spec.to_string()),
+            explicit_model,
             config.effective_ollama_api_key(),
         );
 
