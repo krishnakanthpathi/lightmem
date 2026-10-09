@@ -12,7 +12,9 @@ from .models import (
     StorageStats,
     PaginatedList,
     MemoryInspection,
+    ObservedCandidate,
 )
+
 
 
 class LightMem:
@@ -270,3 +272,36 @@ class LightMem:
     def stats(self) -> StorageStats:
         data = self._call("stats", [])
         return StorageStats.from_dict(data)
+
+    # 15. Conversational Observation & Ingestion
+    def observe(
+        self,
+        input_text_or_path: str,
+        yes: bool = False,
+        dry_run: bool = False,
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        confidence: Optional[float] = None,
+        reranker: Optional[str] = None,
+    ) -> List[Any]:
+        args = [input_text_or_path]
+        if yes:
+            args.append("--yes")
+        if dry_run:
+            args.append("--dry-run")
+        if category:
+            args.extend(["-t", category])
+        if tags:
+            args.extend(["--tags", ",".join(tags)])
+        if confidence is not None:
+            args.extend(["-c", str(confidence)])
+        if reranker:
+            args.extend(["-r", reranker])
+
+        data = self._call("observe", args)
+        if isinstance(data, list):
+            if yes:
+                return [Memory.from_dict(item) for item in data]
+            else:
+                return [ObservedCandidate.from_dict(item) for item in data]
+        return data

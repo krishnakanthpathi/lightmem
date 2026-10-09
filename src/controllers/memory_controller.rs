@@ -6,10 +6,11 @@ use crate::models::{
 use crate::repositories::Storage;
 use crate::services::{
     cosine_similarity, AnswerResult, EmbeddingProvider, Exporter, HashEmbeddingProvider,
-    HybridSearchEngine, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter,
-    OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, Reranker,
-    Top1Reranker,
+    HybridSearchEngine, JsonMemoryImporter, MemoryImporter, ObservedCandidate, ObserverService,
+    OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider,
+    OnnxQaReranker, Reranker, Top1Reranker,
 };
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
@@ -132,8 +133,9 @@ impl LightMem {
         tags: Vec<String>,
         confidence: Option<f32>,
     ) -> Result<MemoryRecord> {
-        let (record, _) =
-            self.remember_with_options(content, category, title, tags, confidence, None, false, None)?;
+        let (record, _) = self.remember_with_options(
+            content, category, title, tags, confidence, None, false, None,
+        )?;
         Ok(record)
     }
 
@@ -418,6 +420,7 @@ impl LightMem {
     }
 
     /// Hybrid Recall with optional multi-hop expansion along knowledge graph links
+    #[allow(clippy::too_many_arguments)]
     pub fn recall_expanded(
         &self,
         query: &str,
@@ -835,5 +838,58 @@ impl LightMem {
         let candidates = self.recall_with_date(question, category, as_of, on_date, limit, None)?;
         let reranker = self.build_reranker(reranker_override)?;
         reranker.answer(question, &candidates)
+    }
+
+    /// Extract candidate observations/facts from conversation or text.
+    pub fn observe_and_extract(
+        &self,
+        raw_text: &str,
+        category_override: Option<MemoryType>,
+        extra_tags: Option<&[String]>,
+        confidence_threshold: Option<f32>,
+        reranker_spec: Option<&str>,
+    ) -> Result<Vec<ObservedCandidate>> {
+        ObserverService::extract(
+            raw_text,
+            category_override,
+            extra_tags,
+            confidence_threshold,
+            reranker_spec,
+            Some(&self.config),
+        )
+    }
+
+    /// Save an individual observed candidate memory into SQLite and index it.
+    pub fn save_observed_candidate(&self, candidate: &ObservedCandidate) -> Result<MemoryRecord> {
+        let memory = candidate.to_memory_record();
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let mut stored_batch = self.storage.insert_indexed_batch(
+            &[memory],
+            self.embedder()?.as_ref(),
+            &self.embedding_identity,
+            true,
+        )?;
+        Ok(stored_batch.remove(0))
+    }
+
+    /// Batch save multiple observed candidate memories into SQLite and index them.
+    pub fn save_observed_candidates(
+        &self,
+        candidates: &[ObservedCandidate],
+    ) -> Result<Vec<MemoryRecord>> {
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let records: Vec<MemoryRecord> = candidates.iter().map(|c| c.to_memory_record()).collect();
+        let stored_batch = self.storage.insert_indexed_batch(
+            &records,
+            self.embedder()?.as_ref(),
+            &self.embedding_identity,
+            true,
+        )?;
+        Ok(stored_batch)
     }
 }

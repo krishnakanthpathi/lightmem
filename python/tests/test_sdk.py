@@ -134,6 +134,24 @@ class TestLightMemSDK(unittest.TestCase):
         self.assertTrue(forgotten)
         self.assertEqual(self.client.stats().total_memories, 0)
 
+    def test_observe_conversational_ingestion(self):
+        chat = "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!"
+        
+        # 1. Dry run returns ObservedCandidate instances without saving
+        candidates = self.client.observe(chat, dry_run=True)
+        self.assertGreaterEqual(len(candidates), 1)
+        self.assertIsInstance(candidates[0], lmem.ObservedCandidate)
+        self.assertIn("dark mode", candidates[0].content.lower())
+        self.assertEqual(self.client.stats().total_memories, 0)
+
+        # 2. Persisting with yes=True returns saved Memory instances
+        saved = self.client.observe(chat, yes=True)
+        self.assertGreaterEqual(len(saved), 1)
+        self.assertIsInstance(saved[0], lmem.Memory)
+        self.assertEqual(saved[0].provenance, "observed")
+        self.assertEqual(self.client.stats().total_memories, len(saved))
+
 
 if __name__ == "__main__":
     unittest.main()
+

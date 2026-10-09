@@ -100,8 +100,16 @@ lmem
 # Store a memory (category is auto-inferred across 14 types if -t is omitted)
 lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
 
+# Ingest dialogue, chat transcripts, or notes, extract atomic candidate memories, and review/confirm before saving
+lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive confirmation [y/n/a/q]
+lmem observe conversation.txt --yes                   # Auto-confirm and save all extracted memories
+lmem observe conversation.txt --dry-run               # Preview extracted candidates without saving
+lmem observe conversation.txt --dry-run --json        # Export candidates as JSON for agent inspection
+lmem observe conversation.txt -r ollama:qwen2.5:3b    # LLM-assisted semantic extraction (aliases: observed, extract)
+
 # Store a memory and automatically merge/supersede any conflicting older memory
 lmem remember "PostgreSQL 16 runs on port 6432" --title "Postgres Port" --supersede
+
 
 # Hybrid semantic + keyword recall (with optional --as-of or single-day --date filter)
 lmem recall "postgres port" --limit 5

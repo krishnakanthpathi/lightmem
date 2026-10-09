@@ -861,7 +861,9 @@ impl Reranker for OllamaReranker {
             }
             if let Ok(resp) = fallback_req.send_json(gen_payload) {
                 if let Ok(body) = resp.into_json::<serde_json::Value>() {
-                    body.get("response").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    body.get("response")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -1185,14 +1187,8 @@ mod tests {
             "https://atlas.example.test/api"
         );
         assert_eq!(clean_extracted_span("(22A31A05I7)"), "22A31A05I7");
-        assert_eq!(
-            clean_extracted_span("18:00 to 19:00"),
-            "18:00 to 19:00"
-        );
-        assert_eq!(
-            clean_extracted_span("10:30 AM"),
-            "10:30 AM"
-        );
+        assert_eq!(clean_extracted_span("18:00 to 19:00"), "18:00 to 19:00");
+        assert_eq!(clean_extracted_span("10:30 AM"), "10:30 AM");
         assert_eq!(
             clean_extracted_span("Time: 18:00 to 19:00"),
             "18:00 to 19:00"

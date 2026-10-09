@@ -893,8 +893,7 @@ impl Storage {
                 continue;
             }
 
-            for j in (i + 1)..candidates.len() {
-                let b = &candidates[j];
+            for b in candidates.iter().skip(i + 1) {
                 let shared_count = b
                     .tags
                     .iter()
@@ -918,8 +917,8 @@ impl Storage {
                 continue;
             };
 
-            for j in (i + 1)..candidates.len() {
-                let b_id = &candidates[j].id;
+            for b in candidates.iter().skip(i + 1) {
+                let b_id = &b.id;
                 let Some(b_vec) = vectors.get(b_id) else {
                     continue;
                 };

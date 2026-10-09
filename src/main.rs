@@ -1,8 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
+use colored::*;
 use lightmem::{parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -398,6 +399,45 @@ enum Commands {
         min_similarity: f32,
 
         /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Ingest conversation or notes, extract atomic candidate memories, and confirm before saving
+    #[command(alias = "observed", alias = "extract")]
+    Observe {
+        /// Conversation text, note content, or path to text/markdown/jsonl file (reads from stdin if omitted or '-')
+        input: Option<String>,
+
+        /// Path to a conversation or transcript file to observe
+        #[arg(short = 'f', long)]
+        file: Option<PathBuf>,
+
+        /// Save all extracted memories without interactive confirmation prompt
+        #[arg(short = 'y', long, visible_alias = "resolve")]
+        yes: bool,
+
+        /// Dry run: extract and display candidate memories without saving to the database
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Override category for all extracted memories
+        #[arg(short = 't', long = "type")]
+        category: Option<MemoryType>,
+
+        /// Comma-separated tags to attach to all extracted memories
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Minimum confidence threshold for extracted facts (0.0 to 1.0)
+        #[arg(short = 'c', long, default_value = "0.85")]
+        confidence: f32,
+
+        /// Override reranker/extractor model (e.g. 'ollama:qwen2.5:3b')
+        #[arg(short = 'r', long)]
+        reranker: Option<String>,
+
+        /// Output extracted observations as JSON
         #[arg(long)]
         json: bool,
     },
@@ -1071,6 +1111,163 @@ fn main() -> Result<()> {
             CliView::render_autolink(new_links, snapshot.nodes.len(), snapshot.edges.len(), json)?;
         }
 
+        Commands::Observe {
+            input,
+            file,
+            yes,
+            dry_run,
+            category,
+            tags,
+            confidence,
+            reranker,
+            json,
+        } => {
+            let lm = open_controller(effective_db, global)?;
+            if !dry_run && !migrate_embeddings(&lm, false, json, false)? {
+                return Ok(());
+            }
+
+            // 1. Resolve raw text from file, argument, or stdin
+            let raw_text = if let Some(ref path) = file {
+                std::fs::read_to_string(path).with_context(|| {
+                    format!("Failed to read conversation file: {}", path.display())
+                })?
+            } else if let Some(ref arg) = input {
+                if arg == "-" {
+                    let mut buf = String::new();
+                    io::stdin().read_to_string(&mut buf)?;
+                    buf
+                } else if Path::new(arg).is_file() {
+                    std::fs::read_to_string(arg)
+                        .with_context(|| format!("Failed to read file: {}", arg))?
+                } else {
+                    arg.clone()
+                }
+            } else if !io::stdin().is_terminal() {
+                let mut buf = String::new();
+                io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                anyhow::bail!("Provide conversation text or a file path (or pipe via stdin): `lmem observe \"User: I prefer dark mode\"`");
+            };
+
+            let parsed_tags: Option<Vec<String>> = tags.map(|t| {
+                t.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            });
+
+            let candidates = lm.observe_and_extract(
+                &raw_text,
+                category,
+                parsed_tags.as_deref(),
+                Some(confidence),
+                reranker.as_deref(),
+            )?;
+
+            if candidates.is_empty() {
+                CliView::render_observed_candidates(&[], dry_run, json)?;
+                return Ok(());
+            }
+
+            // 2. Dry-run mode: display or output JSON without saving
+            if dry_run {
+                CliView::render_observed_candidates(&candidates, true, json)?;
+                return Ok(());
+            }
+
+            // 3. Batch / Non-interactive confirmation mode (--yes)
+            if yes {
+                let saved_records = lm.save_observed_candidates(&candidates)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&saved_records)?);
+                } else {
+                    CliView::render_observed_candidates(&candidates, false, false)?;
+                    CliView::render_observed_summary(saved_records.len(), 0, false, false)?;
+                }
+                return Ok(());
+            }
+
+            // 4. Non-interactive terminal without --yes (e.g. piped or JSON inspection)
+            if json || !io::stdin().is_terminal() {
+                CliView::render_observed_candidates(&candidates, true, json)?;
+                return Ok(());
+            }
+
+            // 5. Interactive terminal step-by-step confirmation review
+            CliView::render_observed_candidates(&candidates, false, false)?;
+            println!(
+                "  {}",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    .bright_black()
+            );
+            println!("  Reviewing candidate memories one by one:\n");
+
+            let mut saved_count = 0usize;
+            let mut skipped_count = 0usize;
+            let mut force_all = false;
+
+            for (i, c) in candidates.iter().enumerate() {
+                println!(
+                    "  {} [{}] {} {} {}",
+                    CliView::crimson_bold(&format!("[Candidate {}/{}]", i + 1, candidates.len())),
+                    CliView::violet_bold(c.category.as_str()),
+                    CliView::white_bold(&c.title),
+                    CliView::emerald_bold(&format!(
+                        "({}% conf)",
+                        (c.confidence * 100.0).round() as u32
+                    )),
+                    CliView::slate(&format!("[{}]", c.provenance))
+                );
+                println!(
+                    "    Content: {}",
+                    CliView::gold(&format!("\"{}\"", c.content))
+                );
+
+                let should_save = if force_all {
+                    true
+                } else {
+                    print!("  Save this memory? [y]es / [n]o (skip) / [a]ll (--yes) / [q]uit: ");
+                    io::stdout().flush()?;
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer)?;
+                    match answer.trim().to_lowercase().as_str() {
+                        "y" | "yes" => true,
+                        "a" | "all" => {
+                            force_all = true;
+                            true
+                        }
+                        "q" | "quit" => {
+                            println!(
+                                "  Stopped candidate review ({} saved, {} skipped).",
+                                saved_count, skipped_count
+                            );
+                            break;
+                        }
+                        _ => false,
+                    }
+                };
+
+                if should_save {
+                    let record = lm.save_observed_candidate(c)?;
+                    saved_count += 1;
+                    println!(
+                        "  {} Saved memory {} ({}): \"{}\"\n",
+                        CliView::emerald_bold("✓"),
+                        CliView::gold(&record.id[..8]),
+                        CliView::violet_bold(record.category.as_str()),
+                        record.title
+                    );
+                } else {
+                    skipped_count += 1;
+                    println!("  {} Skipped.\n", CliView::slate("↷"));
+                }
+            }
+
+            CliView::render_observed_summary(saved_count, skipped_count, false, false)?;
+        }
+
         Commands::Connect {
             platform,
             workspace,
@@ -1235,13 +1432,12 @@ fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
     ];
     let mut removed_count = 0;
     for bin in &bin_candidates {
-        if bin.exists() {
-            if std::fs::remove_file(bin).is_ok() {
-                println!("  \x1b[1;32m◈\x1b[0m Removed binary: {}", bin.display());
-                removed_count += 1;
-            }
+        if bin.exists() && std::fs::remove_file(bin).is_ok() {
+            println!("  \x1b[1;32m◈\x1b[0m Removed binary: {}", bin.display());
+            removed_count += 1;
         }
     }
+
     let lightmem_bin_dir = home.join(".lightmem").join("bin");
     if lightmem_bin_dir.exists() {
         let _ = std::fs::remove_dir_all(&lightmem_bin_dir);

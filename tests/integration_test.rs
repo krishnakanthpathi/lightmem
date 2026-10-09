@@ -768,7 +768,7 @@ fn test_provenance_support() {
     let binary = env!("CARGO_BIN_EXE_lmem");
 
     let output = std::process::Command::new(binary)
-        .args(&[
+        .args([
             "--db",
             db_path.to_str().unwrap(),
             "remember",
@@ -779,6 +779,7 @@ fn test_provenance_support() {
         ])
         .output()
         .unwrap();
+
     assert!(output.status.success());
     let json_val: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(

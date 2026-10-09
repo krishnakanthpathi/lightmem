@@ -107,7 +107,9 @@ impl LightMemConfig {
             "/v1",
         ] {
             if u.ends_with(suffix) {
-                u = u[..u.len() - suffix.len()].trim_end_matches('/').to_string();
+                u = u[..u.len() - suffix.len()]
+                    .trim_end_matches('/')
+                    .to_string();
             }
         }
         if u.is_empty() {
@@ -359,9 +361,15 @@ mod tests {
     #[test]
     fn test_format_auth_header() {
         assert_eq!(format_auth_header("my-secret-key"), "Bearer my-secret-key");
-        assert_eq!(format_auth_header("Bearer already-prefixed"), "Bearer already-prefixed");
+        assert_eq!(
+            format_auth_header("Bearer already-prefixed"),
+            "Bearer already-prefixed"
+        );
         assert_eq!(format_auth_header("bearer lower-case"), "bearer lower-case");
-        assert_eq!(format_auth_header("  padded-token  "), "Bearer padded-token");
+        assert_eq!(
+            format_auth_header("  padded-token  "),
+            "Bearer padded-token"
+        );
     }
 
     #[test]
@@ -370,7 +378,10 @@ mod tests {
         assert_eq!(cfg.effective_ollama_api_key(), None);
 
         cfg.ollama_api_key = Some("test-key-123".to_string());
-        assert_eq!(cfg.effective_ollama_api_key(), Some("test-key-123".to_string()));
+        assert_eq!(
+            cfg.effective_ollama_api_key(),
+            Some("test-key-123".to_string())
+        );
 
         cfg.ollama_api_key = Some("none".to_string());
         assert_eq!(cfg.effective_ollama_api_key(), None);
@@ -419,6 +430,9 @@ mod tests {
 
         // Explicit custom URL is preserved and normalized
         cfg.ollama_url = "https://custom-ollama-proxy.internal/api/chat".to_string();
-        assert_eq!(cfg.effective_ollama_url(), "https://custom-ollama-proxy.internal");
+        assert_eq!(
+            cfg.effective_ollama_url(),
+            "https://custom-ollama-proxy.internal"
+        );
     }
 }

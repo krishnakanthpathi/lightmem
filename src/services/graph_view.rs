@@ -38,7 +38,7 @@ pub fn render_terminal(snapshot: &GraphSnapshot) -> String {
 
     // Sort nodes: hubs with highest degree first
     let mut sorted_nodes = snapshot.nodes.clone();
-    sorted_nodes.sort_by(|a, b| b.degree.cmp(&a.degree));
+    sorted_nodes.sort_by_key(|a| std::cmp::Reverse(a.degree));
 
     let mut visited_roots = HashSet::new();
 

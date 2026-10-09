@@ -2,7 +2,8 @@ use crate::models::{
     GraphSnapshot, LightMemConfig, MemoryConflict, MemoryRecord, PaginatedMemories, RelatedMemory,
     ScoredMemory, StorageStats,
 };
-use crate::services::AnswerResult;
+use crate::services::{AnswerResult, ObservedCandidate};
+
 use anyhow::Result;
 use colored::*;
 use std::path::Path;
@@ -38,35 +39,35 @@ pub struct CliView;
 
 impl CliView {
     // Theme palette (24-bit TrueColor)
-    fn crimson(s: &str) -> ColoredString {
+    pub fn crimson(s: &str) -> ColoredString {
         s.truecolor(220, 38, 38)
     }
 
-    fn crimson_bold(s: &str) -> ColoredString {
+    pub fn crimson_bold(s: &str) -> ColoredString {
         s.truecolor(220, 38, 38).bold()
     }
 
-    fn rose(s: &str) -> ColoredString {
+    pub fn rose(s: &str) -> ColoredString {
         s.truecolor(248, 113, 113)
     }
 
-    fn violet_bold(s: &str) -> ColoredString {
+    pub fn violet_bold(s: &str) -> ColoredString {
         s.truecolor(167, 139, 250).bold()
     }
 
-    fn gold(s: &str) -> ColoredString {
+    pub fn gold(s: &str) -> ColoredString {
         s.truecolor(251, 191, 36)
     }
 
-    fn white_bold(s: &str) -> ColoredString {
+    pub fn white_bold(s: &str) -> ColoredString {
         s.truecolor(248, 250, 252).bold()
     }
 
-    fn slate(s: &str) -> ColoredString {
+    pub fn slate(s: &str) -> ColoredString {
         s.truecolor(113, 113, 122)
     }
 
-    fn emerald_bold(s: &str) -> ColoredString {
+    pub fn emerald_bold(s: &str) -> ColoredString {
         s.truecolor(52, 211, 153).bold()
     }
 
@@ -891,7 +892,9 @@ impl CliView {
                 );
                 obj.insert(
                     "config_file".into(),
-                    serde_json::Value::String(LightMemConfig::config_file().to_string_lossy().to_string()),
+                    serde_json::Value::String(
+                        LightMemConfig::config_file().to_string_lossy().to_string(),
+                    ),
                 );
                 obj.insert(
                     "active_db".into(),
@@ -1405,6 +1408,118 @@ impl CliView {
             Self::gold("lmem connect <platform>"),
             Self::gold("lmem connect all")
         );
+        println!();
+        Ok(())
+    }
+
+    pub fn render_observed_card(idx: usize, total: usize, candidate: &ObservedCandidate) {
+        let conf_pct = (candidate.confidence * 100.0).round() as u32;
+        println!(
+            "  {} [{}] {} {} {}",
+            Self::crimson_bold(&format!("{:02}/{:02}.", idx + 1, total)),
+            Self::violet_bold(candidate.category.as_str()),
+            Self::white_bold(&candidate.title),
+            Self::emerald_bold(&format!("({}% confidence)", conf_pct)),
+            Self::slate(&format!("[{}]", candidate.provenance))
+        );
+        let tags_str = if candidate.tags.is_empty() {
+            String::new()
+        } else {
+            format!(" tags: [{}]", candidate.tags.join(", "))
+        };
+        if !tags_str.is_empty() {
+            println!("       {}", Self::slate(&tags_str));
+        }
+        println!(
+            "       {}",
+            Self::gold(&format!("\"{}\"", candidate.content))
+        );
+        println!();
+    }
+
+    pub fn render_observed_candidates(
+        candidates: &[ObservedCandidate],
+        dry_run: bool,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(candidates)?);
+            return Ok(());
+        }
+
+        let mode_label = if dry_run {
+            "DRY RUN (PREVIEW ONLY — NOT SAVED)"
+        } else {
+            "DISCOVERED CANDIDATES"
+        };
+
+        println!(
+            "\n  {} {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("OBSERVED CONVERSATIONAL MEMORIES"),
+            Self::slate(&format!("({})", mode_label))
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
+        );
+
+        if candidates.is_empty() {
+            println!(
+                "  {}",
+                Self::slate("No atomic facts or observations detected in the provided input.")
+            );
+            println!();
+            return Ok(());
+        }
+
+        for (i, c) in candidates.iter().enumerate() {
+            Self::render_observed_card(i, candidates.len(), c);
+        }
+
+        if dry_run {
+            println!(
+                "  {} Found {} candidate memories. Remove {} to save them.",
+                Self::gold("Notice:"),
+                candidates.len(),
+                Self::crimson_bold("--dry-run")
+            );
+            println!();
+        }
+
+        Ok(())
+    }
+
+    pub fn render_observed_summary(
+        saved: usize,
+        skipped: usize,
+        dry_run: bool,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let res = serde_json::json!({
+                "saved": saved,
+                "skipped": skipped,
+                "dry_run": dry_run,
+            });
+            println!("{}", serde_json::to_string_pretty(&res)?);
+            return Ok(());
+        }
+
+        if dry_run {
+            println!(
+                "  {} Dry-run completed: {} candidates inspected, 0 saved.",
+                Self::gold("✦"),
+                saved + skipped
+            );
+        } else {
+            println!(
+                "  {} Observation ingestion complete: {} saved, {} skipped.",
+                Self::emerald_bold("✦"),
+                Self::emerald_bold(&saved.to_string()),
+                Self::slate(&skipped.to_string())
+            );
+        }
         println!();
         Ok(())
     }

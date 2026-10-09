@@ -12,6 +12,7 @@ from .models import (
     StorageStats,
     PaginatedList,
     MemoryInspection,
+    ObservedCandidate,
 )
 from .binary import get_binary_path
 
@@ -25,5 +26,7 @@ __all__ = [
     "StorageStats",
     "PaginatedList",
     "MemoryInspection",
+    "ObservedCandidate",
     "get_binary_path",
 ]
+

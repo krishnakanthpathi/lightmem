@@ -1,6 +1,6 @@
 use lightmem::{
-    EmbeddingProvider, MemoryRecord, MemoryType, OllamaEmbeddingProvider, OllamaReranker,
-    Reranker, ScoredMemory,
+    EmbeddingProvider, MemoryRecord, MemoryType, OllamaEmbeddingProvider, OllamaReranker, Reranker,
+    ScoredMemory,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -120,7 +120,7 @@ fn test_config_cli_presets_and_json_output() {
     // 1. Initial config view displays presets
     let output_init = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config"])
+        .args(["config"])
         .output()
         .unwrap();
     assert!(output_init.status.success());
@@ -133,7 +133,7 @@ fn test_config_cli_presets_and_json_output() {
     // 2. Apply --preset ollama-cloud
     let output_cloud = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--preset", "ollama-cloud"])
+        .args(["config", "--preset", "ollama-cloud"])
         .output()
         .unwrap();
     assert!(output_cloud.status.success());
@@ -144,7 +144,7 @@ fn test_config_cli_presets_and_json_output() {
     // 3. Read with --json flag and verify presets object
     let output_json = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--json"])
+        .args(["config", "--json"])
         .output()
         .unwrap();
     assert!(output_json.status.success());
@@ -160,8 +160,16 @@ fn test_config_cli_presets_and_json_output() {
     );
     assert!(json_val.get("presets").is_some());
     assert!(json_val.get("presets").unwrap().get("local").is_some());
-    assert!(json_val.get("presets").unwrap().get("ollama-cloud").is_some());
-    assert!(json_val.get("presets").unwrap().get("ollama-local").is_some());
+    assert!(json_val
+        .get("presets")
+        .unwrap()
+        .get("ollama-cloud")
+        .is_some());
+    assert!(json_val
+        .get("presets")
+        .unwrap()
+        .get("ollama-local")
+        .is_some());
     assert!(json_val.get("active_db").is_some());
     assert!(json_val.get("config_file").is_some());
     assert!(json_val.get("embedding_identity").is_some());
@@ -169,7 +177,7 @@ fn test_config_cli_presets_and_json_output() {
     // 4. Apply --preset ollama-local
     let output_local_llm = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--preset", "ollama-local"])
+        .args(["config", "--preset", "ollama-local"])
         .output()
         .unwrap();
     assert!(output_local_llm.status.success());
@@ -179,7 +187,7 @@ fn test_config_cli_presets_and_json_output() {
     // 5. Apply --preset local (offline)
     let output_local = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--preset", "local"])
+        .args(["config", "--preset", "local"])
         .output()
         .unwrap();
     assert!(output_local.status.success());
@@ -189,7 +197,7 @@ fn test_config_cli_presets_and_json_output() {
     // 6. Set custom URL with trailing /api/chat - verifies normalization
     let output_url = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
-        .args(&["config", "--url", "https://custom-proxy.internal/api/chat/"])
+        .args(["config", "--url", "https://custom-proxy.internal/api/chat/"])
         .output()
         .unwrap();
     assert!(output_url.status.success());

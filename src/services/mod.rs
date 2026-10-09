@@ -3,6 +3,7 @@ pub mod embeddings;
 pub mod exporter;
 pub mod graph_view;
 pub mod importer;
+pub mod observer;
 pub mod reranker;
 pub mod search;
 
@@ -15,6 +16,7 @@ pub use embeddings::{
 pub use exporter::Exporter;
 pub use graph_view::render_terminal;
 pub use importer::{ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter};
+pub use observer::{ObservedCandidate, ObserverService};
 pub use reranker::{
     AnswerResult, LlmReranker, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker,
     Top1Reranker,

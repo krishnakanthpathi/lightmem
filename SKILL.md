@@ -48,7 +48,17 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
   --provenance validated \
   --supersede
 
+# 1b. Conversational Ingestion & Observation (Extract candidate memories with confirmation)
+lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive review [y/n/a/q]
+lmem observe transcript.txt                            # Ingest transcript file with interactive review
+cat dialogue.jsonl | lmem observe                      # Pipe conversation via stdin
+lmem observe "User: PostgreSQL runs on port 5433" --yes # Confirm & persist all candidates immediately
+lmem observe chat.txt --dry-run                        # Preview candidate memories without saving
+lmem observe chat.txt --dry-run --json                 # Export candidates as JSON for agent inspection
+lmem observe chat.txt -r ollama:qwen2.5:3b             # Use LLM-assisted semantic extraction (aliases: observed, extract)
+
 # 2. Hybrid Search & Similarity Filtering (SQLite FTS5 BM25 + Vector Cosine RRF + Acronym Boost)
+
 lmem recall "postgres port" -l 5
 lmem recall "postgres port" -t fact --min-similarity 0.5 --json
 lmem recall "new architectural idea" --min-similarity 0.70 -l 50 --json # Count & find semantically similar existing memories

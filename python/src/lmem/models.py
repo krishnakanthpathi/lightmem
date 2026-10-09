@@ -158,3 +158,25 @@ class PaginatedList(list):
     @property
     def items(self) -> List[Memory]:
         return list(self)
+
+
+@dataclass
+class ObservedCandidate:
+    title: str
+    content: str
+    category: str
+    tags: List[str] = field(default_factory=list)
+    confidence: float = 0.85
+    provenance: str = "observed"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ObservedCandidate:
+        return cls(
+            title=data.get("title", ""),
+            content=data.get("content", ""),
+            category=data.get("category", "observation"),
+            tags=data.get("tags", []),
+            confidence=float(data.get("confidence", 0.85)),
+            provenance=data.get("provenance", "observed"),
+        )
+
