@@ -16,7 +16,7 @@ from .models import (
 )
 from .binary import get_binary_path
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 __all__ = [
     "LightMem",
     "Memory",
