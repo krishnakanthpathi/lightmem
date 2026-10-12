@@ -1,4 +1,7 @@
-use crate::models::{MemoryRecord, MemoryStatus, MemoryType};
+use crate::models::{
+    compute_sha256_hex, decode_base64, AttachmentInput, AttachmentMetadata, MemoryRecord,
+    MemoryStatus, MemoryType,
+};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,10 +22,30 @@ pub struct ImportCandidate {
     pub expired_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub status: Option<MemoryStatus>,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentMetadata>,
 }
 
 impl ImportCandidate {
     pub fn to_memory_record(self) -> MemoryRecord {
+        let (record, _) = self.into_record_and_attachments().unwrap_or_else(|_| {
+            (
+                MemoryRecord::new(
+                    MemoryType::Fact,
+                    String::new(),
+                    String::new(),
+                    Vec::new(),
+                    0.9,
+                    None,
+                ),
+                Vec::new(),
+            )
+        });
+        record
+    }
+
+    pub fn into_record_and_attachments(mut self) -> Result<(MemoryRecord, Vec<AttachmentInput>)> {
+        let raw_attachments = std::mem::take(&mut self.attachments);
         let cat = self.category.unwrap_or(MemoryType::Fact);
         let mut record = MemoryRecord::new(
             cat,
@@ -42,7 +65,39 @@ impl ImportCandidate {
         record.updated_at = self.updated_at.unwrap_or(record.updated_at);
         record.expired_at = self.expired_at;
         record.status = self.status.unwrap_or(MemoryStatus::Active);
-        record
+
+        let mut clean_metas = Vec::with_capacity(raw_attachments.len());
+        let mut att_inputs = Vec::new();
+        for mut meta in raw_attachments {
+            meta.memory_id = record.id.clone();
+            if let Some(b64) = meta.data_base64.take() {
+                let data = decode_base64(&b64).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Invalid base64 payload for attachment '{}': {}",
+                        meta.filename,
+                        e
+                    )
+                })?;
+                if !meta.sha256.is_empty() {
+                    let actual_sha = compute_sha256_hex(&data);
+                    anyhow::ensure!(
+                        actual_sha == meta.sha256,
+                        "Imported attachment '{}' failed SHA-256 verification (expected {}, got {})",
+                        meta.filename,
+                        meta.sha256,
+                        actual_sha
+                    );
+                }
+                meta.size_bytes = data.len() as u64;
+                att_inputs.push(AttachmentInput {
+                    metadata: meta.clone(),
+                    data,
+                });
+            }
+            clean_metas.push(meta);
+        }
+        record.attachments = clean_metas;
+        Ok((record, att_inputs))
     }
 }
 
@@ -60,6 +115,7 @@ impl From<MemoryRecord> for ImportCandidate {
             updated_at: Some(m.updated_at),
             expired_at: m.expired_at,
             status: Some(m.status),
+            attachments: m.attachments,
         }
     }
 }
@@ -371,6 +427,12 @@ fn parse_json_candidate(val: &serde_json::Value, _enrich: bool) -> Option<Import
                 .ok()
         });
 
+    let attachments: Vec<AttachmentMetadata> = val
+        .get("attachments")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
     Some(ImportCandidate {
         id,
         category,
@@ -383,6 +445,7 @@ fn parse_json_candidate(val: &serde_json::Value, _enrich: bool) -> Option<Import
         updated_at: None,
         expired_at: None,
         status: None,
+        attachments,
     })
 }
 
@@ -591,6 +654,7 @@ impl OkfMemoryImporter {
             updated_at: None,
             expired_at: None,
             status: None,
+            attachments: Vec::new(),
         })
     }
 }
@@ -659,6 +723,7 @@ impl MemoryImporter for OkfMemoryImporter {
                         updated_at: None,
                         expired_at: None,
                         status: None,
+                        attachments: Vec::new(),
                     });
                 }
             }

@@ -57,7 +57,7 @@ class LightMem:
     # 1. Store
     def remember(
         self,
-        content: str,
+        content: Optional[str] = None,
         category: Optional[str] = None,
         title: Optional[str] = None,
         tags: Optional[List[str]] = None,
@@ -65,8 +65,13 @@ class LightMem:
         ttl: Optional[str] = None,
         supersede: bool = False,
         provenance: Optional[str] = None,
+        files: Optional[List[str | Path]] = None,
+        extract: bool = False,
+        reranker: Optional[str] = None,
     ) -> Memory:
-        args = [content]
+        args: List[str] = []
+        if content is not None and (content or not files):
+            args.append(content)
         if category:
             args.extend(["-t", category])
         if title:
@@ -81,6 +86,13 @@ class LightMem:
             args.append("--supersede")
         if provenance:
             args.extend(["--provenance", provenance])
+        if files:
+            for f in files:
+                args.extend(["-f", str(f)])
+        if extract:
+            args.append("--extract")
+        if reranker:
+            args.extend(["-r", reranker])
 
         data = self._call("remember", args)
         return Memory.from_dict(data)
@@ -91,14 +103,19 @@ class LightMem:
         query: str,
         limit: int = 5,
         category: Optional[str] = None,
+        media: Optional[str] = None,
         min_similarity: Optional[float] = None,
         multi_hop: bool = False,
         as_of: Optional[str] = None,
         date: Optional[str] = None,
-    ) -> List[ScoredMemory]:
+        save_to: Optional[str | Path] = None,
+        path: bool = False,
+    ) -> List[ScoredMemory] | List[str]:
         args = [query, "-l", str(limit)]
         if category:
             args.extend(["-t", category])
+        if media:
+            args.extend(["--media", media])
         if min_similarity is not None:
             args.extend(["--min-similarity", str(min_similarity)])
         if multi_hop:
@@ -107,8 +124,14 @@ class LightMem:
             args.extend(["--as-of", as_of])
         if date:
             args.extend(["--date", date])
+        if save_to:
+            args.extend(["--save-to", str(save_to)])
+        if path:
+            args.append("--path")
 
         data = self._call("recall", args)
+        if path:
+            return [str(p) for p in data] if isinstance(data, list) else []
         if isinstance(data, list):
             return [ScoredMemory.from_dict(item) for item in data]
         return []
@@ -143,10 +166,13 @@ class LightMem:
         limit: int = 20,
         offset: int = 0,
         category: Optional[str] = None,
+        media: Optional[str] = None,
         status: str = "active",
         as_of: Optional[str] = None,
         date: Optional[str] = None,
-    ) -> PaginatedList:
+        save_to: Optional[str | Path] = None,
+        path: bool = False,
+    ) -> PaginatedList | List[str]:
         args = ["-l", str(limit), "--status", status]
         if page is not None:
             args.extend(["--page", str(page)])
@@ -154,12 +180,20 @@ class LightMem:
             args.extend(["--offset", str(offset)])
         if category:
             args.extend(["-t", category])
+        if media:
+            args.extend(["--media", media])
         if as_of:
             args.extend(["--as-of", as_of])
         if date:
             args.extend(["--date", date])
+        if save_to:
+            args.extend(["--save-to", str(save_to)])
+        if path:
+            args.append("--path")
 
         data = self._call("list", args)
+        if path:
+            return [str(p) for p in data] if isinstance(data, list) else []
         items = [Memory.from_dict(item) for item in data.get("items", [])]
         return PaginatedList(
             items=items,
@@ -169,6 +203,7 @@ class LightMem:
             page=int(data.get("page", page or 1)),
             total_pages=int(data.get("total_pages", 1)),
             has_more=bool(data.get("has_more", False)),
+            saved_attachments=[str(p) for p in data.get("saved_attachments", [])],
         )
 
     # 5. Get Single Memory
@@ -180,12 +215,35 @@ class LightMem:
             return None
 
     # 5b. Inspect Memory & Graph Links
-    def inspect(self, memory_id: str) -> Optional[MemoryInspection]:
+    def inspect(
+        self,
+        memory_id: str | List[str],
+        *extra_ids: str,
+        save_to: Optional[str | Path] = None,
+        path: bool = False,
+    ) -> Optional[MemoryInspection] | List[MemoryInspection] | List[str]:
+        terms: List[str] = []
+        if isinstance(memory_id, (list, tuple)):
+            terms.extend(str(t) for t in memory_id)
+        else:
+            terms.append(str(memory_id))
+        terms.extend(str(t) for t in extra_ids)
+
+        args = list(terms)
+        if save_to:
+            args.extend(["--save-to", str(save_to)])
+        if path:
+            args.append("--path")
+
         try:
-            data = self._call("inspect", [memory_id])
+            data = self._call("inspect", args)
+            if path:
+                return [str(p) for p in data] if isinstance(data, list) else []
+            if isinstance(data, list):
+                return [MemoryInspection.from_dict(item) for item in data]
             return MemoryInspection.from_dict(data) if data else None
         except RuntimeError:
-            return None
+            return [] if (path or len(terms) > 1) else None
 
     # 6. Forget (Soft or Hard)
     def forget(self, memory_id: str, hard: bool = False) -> bool:

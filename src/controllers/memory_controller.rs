@@ -1,7 +1,7 @@
 use crate::models::{
-    detect_memory_conflict_with_similarity, GraphSnapshot, LightMemConfig, MemoryConflict,
-    MemoryLink, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory,
-    ScoredMemory, StorageStats,
+    detect_memory_conflict_with_similarity, AttachmentInput, AttachmentMetadata, GraphSnapshot,
+    LightMemConfig, MemoryConflict, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
+    PaginatedMemories, RelatedMemory, ScoredMemory, StorageStats,
 };
 use crate::repositories::Storage;
 use crate::services::{
@@ -256,6 +256,221 @@ impl LightMem {
         Ok((stored, conflicts))
     }
 
+    /// Store a memory with one or more file/image/audio/document attachments.
+    /// By default (`extract_llm == false`), only deterministic file metadata is attached and indexed.
+    /// When `extract_llm == true`, the single configured LLM is invoked to extract text/descriptions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_attachments(
+        &self,
+        content: Option<&str>,
+        files: &[PathBuf],
+        extract_llm: bool,
+        reranker_override: Option<&str>,
+        category: Option<MemoryType>,
+        title: Option<String>,
+        mut tags: Vec<String>,
+        confidence: Option<f32>,
+        ttl: Option<chrono::Duration>,
+        supersede: bool,
+        provenance: Option<String>,
+    ) -> Result<(MemoryRecord, Vec<MemoryConflict>)> {
+        if files.is_empty() {
+            let text = content.unwrap_or("");
+            return self.remember_with_options(
+                text, category, title, tags, confidence, ttl, supersede, provenance,
+            );
+        }
+
+        let mut attachment_inputs = Vec::with_capacity(files.len());
+        let mut seen_sha = HashSet::new();
+        for path in files {
+            let att = AttachmentInput::from_path(path)?;
+            if !seen_sha.insert(att.metadata.sha256.clone()) {
+                continue;
+            }
+            if !tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&att.metadata.media_kind))
+            {
+                tags.push(att.metadata.media_kind.clone());
+            }
+            attachment_inputs.push(att);
+        }
+
+        let user_text = content.map(str::trim).filter(|s| !s.is_empty());
+        let mut content_parts: Vec<String> = Vec::new();
+        if let Some(txt) = user_text {
+            content_parts.push(txt.to_string());
+        }
+
+        if extract_llm {
+            for att in &attachment_inputs {
+                let extracted = ObserverService::extract_attachment_via_llm(
+                    att,
+                    user_text,
+                    reranker_override,
+                    &self.config,
+                )?;
+                content_parts.push(format!("[{}]: {}", att.metadata.filename, extracted));
+            }
+        }
+
+        let final_content = if !content_parts.is_empty() {
+            content_parts.join("\n\n")
+        } else {
+            attachment_inputs
+                .iter()
+                .map(|a| {
+                    let m = &a.metadata;
+                    let mut extra = Vec::new();
+                    if let Some(ref dims) = m.dimensions {
+                        extra.push(dims.clone());
+                    }
+                    if let Some(dur) = m.duration_secs {
+                        extra.push(format!("{:.1}s", dur));
+                    }
+                    extra.push(format!("{} bytes", m.size_bytes));
+                    extra.push(format!("sha256:{}", &m.sha256[..m.sha256.len().min(12)]));
+                    format!(
+                        "Attached {} {} ({}, {})",
+                        m.media_kind,
+                        m.filename,
+                        m.mime_type,
+                        extra.join(", ")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        let resolved_type = category.unwrap_or_else(|| {
+            if user_text.is_some() || extract_llm {
+                MemoryType::infer(&final_content)
+            } else {
+                MemoryType::Artifact
+            }
+        });
+
+        let resolved_title = title.unwrap_or_else(|| {
+            if let Some(txt) = user_text {
+                txt.lines()
+                    .next()
+                    .unwrap_or("Attachment Memory")
+                    .chars()
+                    .take(80)
+                    .collect()
+            } else if attachment_inputs.len() == 1 {
+                attachment_inputs[0].metadata.filename.clone()
+            } else {
+                format!(
+                    "{} (+{} more)",
+                    attachment_inputs[0].metadata.filename,
+                    attachment_inputs.len() - 1
+                )
+            }
+        });
+
+        let conf = confidence.unwrap_or(0.95);
+        anyhow::ensure!(
+            conf.is_finite() && (0.0..=1.0).contains(&conf),
+            "Confidence must be between 0 and 1"
+        );
+        let clean_provenance = provenance
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .unwrap_or_else(|| {
+                if extract_llm {
+                    "attachment_llm_extracted".to_string()
+                } else {
+                    "attachment".to_string()
+                }
+            });
+
+        let mut memory = MemoryRecord::new(
+            resolved_type,
+            resolved_title,
+            final_content,
+            tags,
+            conf,
+            Some(clean_provenance),
+        );
+        if let Some(ttl_duration) = ttl {
+            memory.expired_at = Some(Utc::now() + ttl_duration);
+        }
+        for att in &mut attachment_inputs {
+            att.metadata.memory_id = memory.id.clone();
+        }
+        memory.attachments = attachment_inputs
+            .iter()
+            .map(|a| a.metadata.clone())
+            .collect();
+
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let mut stored = self.storage.insert_indexed_with_attachments(
+            &memory,
+            &attachment_inputs,
+            self.embedder()?.as_ref(),
+            &self.embedding_identity,
+            true,
+        )?;
+
+        let active_peers = self.storage.list_memories(
+            Some(stored.category),
+            Some(MemoryStatus::Active),
+            None,
+            0,
+        )?;
+        let vec_map: HashMap<String, Vec<f32>> = self
+            .storage
+            .get_candidate_vectors_checked(
+                Some(stored.category),
+                Some(MemoryStatus::Active),
+                None,
+                Some(&self.embedding_identity),
+            )
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let stored_vec = vec_map.get(&stored.id);
+        let mut best_conflict: Option<MemoryConflict> = None;
+
+        for peer in &active_peers {
+            if peer.id == stored.id {
+                continue;
+            }
+            let vec_sim =
+                stored_vec.and_then(|sv| vec_map.get(&peer.id).map(|pv| cosine_similarity(sv, pv)));
+            if let Some(conflict) =
+                detect_memory_conflict_with_similarity(&stored, peer, vec_sim, 0.72)
+            {
+                if conflict.older_memory.id == peer.id
+                    && best_conflict
+                        .as_ref()
+                        .map(|prev| conflict.similarity > prev.similarity)
+                        .unwrap_or(true)
+                {
+                    best_conflict = Some(conflict);
+                }
+            }
+        }
+
+        let mut conflicts = Vec::new();
+        if let Some(conflict) = best_conflict {
+            if supersede {
+                stored = self.merge_conflict_pair(&conflict, reranker_override)?;
+            }
+            conflicts.push(conflict);
+        }
+
+        let _ = self
+            .storage
+            .auto_link_memory(&stored.id, &format!("{}\n{}", stored.title, stored.content));
+
+        Ok((stored, conflicts))
+    }
+
     /// Scan active memories by finding each memory's closest vector neighbor and checking overlap.
     pub fn find_conflicts(&self, resolve: bool) -> Result<Vec<MemoryConflict>> {
         self.find_conflicts_with_options(resolve, 0.78, None)
@@ -359,6 +574,9 @@ impl LightMem {
         let merged = reranker.merge_conflict(&older, &newer)?;
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
+        let _ = self
+            .storage
+            .copy_attachments_between_memories(&older.id, &merged.id)?;
         let mut updated = self.storage.insert_indexed_batch(
             &[merged],
             self.embedder()?.as_ref(),
@@ -569,6 +787,65 @@ impl LightMem {
         self.storage.get_memory_by_id_or_title(id)
     }
 
+    /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
+    pub fn get_attachments_data(
+        &self,
+        id_or_title: &str,
+    ) -> Result<Vec<(AttachmentMetadata, Vec<u8>)>> {
+        self.storage.get_memory_attachments_data(id_or_title)
+    }
+
+    /// Export all attachments of a memory to a target directory or file path on disk (verifying SHA-256 integrity)
+    pub fn save_attachments_to(&self, id_or_title: &str, target: &Path) -> Result<Vec<PathBuf>> {
+        self.storage.save_attachments_to(id_or_title, target)
+    }
+
+    /// Export all attachments across multiple memories to a target directory or file path on disk (verifying SHA-256 integrity)
+    pub fn save_memories_attachments_to(
+        &self,
+        id_or_titles: &[String],
+        target: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        self.storage
+            .save_memories_attachments_to(id_or_titles, target)
+    }
+
+    /// Default vault attachments cache directory (`<db_parent>/attachments`)
+    pub fn default_attachments_dir(&self) -> PathBuf {
+        self.db_path()
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .join("attachments")
+    }
+
+    /// Materialize and verify all attachments of a memory into `save_to` (or `default_attachments_dir()` if `None`), returning their absolute paths
+    pub fn materialize_attachments(
+        &self,
+        id_or_title: &str,
+        save_to: Option<&Path>,
+    ) -> Result<Vec<PathBuf>> {
+        self.materialize_memories_attachments(&[id_or_title.to_string()], save_to)
+    }
+
+    /// Materialize and verify all attachments across multiple memories into `save_to` (or `default_attachments_dir()` if `None`), returning their absolute paths
+    pub fn materialize_memories_attachments(
+        &self,
+        id_or_titles: &[String],
+        save_to: Option<&Path>,
+    ) -> Result<Vec<PathBuf>> {
+        let target = save_to
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.default_attachments_dir());
+        let paths = self
+            .storage
+            .save_memories_attachments_to(id_or_titles, &target)?;
+        Ok(paths
+            .into_iter()
+            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+            .collect())
+    }
+
     /// Forget (soft-delete or hard delete) a memory
     pub fn forget(&self, id: &str, hard_delete: bool) -> Result<bool> {
         self.storage.forget_memory(id, hard_delete)
@@ -653,6 +930,7 @@ impl LightMem {
             files.push(file_path.to_path_buf());
         }
         let mut records = Vec::new();
+        let mut attachments_by_mem = Vec::new();
         let mut restore = false;
         for file in files {
             let raw = std::fs::read_to_string(&file)
@@ -672,7 +950,11 @@ impl LightMem {
                     candidate.confidence.is_finite() && (0.0..=1.0).contains(&candidate.confidence),
                     "Invalid import confidence"
                 );
-                records.push(candidate.to_memory_record());
+                let (record, att_inputs) = candidate.into_record_and_attachments()?;
+                if !att_inputs.is_empty() {
+                    attachments_by_mem.push((record.id.clone(), att_inputs));
+                }
+                records.push(record);
             }
         }
         if records.is_empty() {
@@ -680,8 +962,9 @@ impl LightMem {
         }
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        self.storage.insert_indexed_batch(
+        self.storage.insert_indexed_batch_with_attachments(
             &records,
+            &attachments_by_mem,
             self.embedder()?.as_ref(),
             &self.embedding_identity,
             !restore,

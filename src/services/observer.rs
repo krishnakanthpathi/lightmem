@@ -1,4 +1,4 @@
-use crate::models::{LightMemConfig, MemoryRecord, MemoryType};
+use crate::models::{encode_base64, AttachmentInput, LightMemConfig, MemoryRecord, MemoryType};
 use crate::services::reranker::OllamaReranker;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -909,6 +909,253 @@ impl ObserverService {
         }
 
         Ok(results)
+    }
+
+    /// Explicit opt-in LLM extraction for an attachment using the single configured LLM model
+    /// via the OpenAI-compatible (`/v1/chat/completions`) or Ollama (`/api/generate`) endpoint.
+    pub fn extract_attachment_via_llm(
+        attachment: &AttachmentInput,
+        user_note: Option<&str>,
+        reranker_spec: Option<&str>,
+        config: &LightMemConfig,
+    ) -> Result<String> {
+        let raw_spec = reranker_spec.unwrap_or(&config.reranker);
+        let model_spec = raw_spec
+            .strip_prefix("ollama:")
+            .or_else(|| raw_spec.strip_prefix("openai:"))
+            .or_else(|| raw_spec.strip_prefix("llm:"))
+            .unwrap_or(raw_spec)
+            .trim();
+
+        let explicit_model = if matches!(
+            model_spec.to_lowercase().as_str(),
+            "ollama"
+                | "openai"
+                | "llm"
+                | "auto"
+                | "default"
+                | ""
+                | "minilm-squad2"
+                | "tinyroberta-squad2"
+                | "top1"
+                | "none"
+        ) {
+            None
+        } else {
+            Some(model_spec.to_string())
+        };
+
+        let ollama = OllamaReranker::with_api_key(
+            config.effective_ollama_url(),
+            explicit_model,
+            config.effective_ollama_api_key(),
+        );
+        let resolved_model = ollama.resolve_model();
+        let meta = &attachment.metadata;
+
+        let context_note = user_note
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("User context: {}\n", s))
+            .unwrap_or_default();
+
+        let prompt = format!(
+            "Extract a concise, factual, self-contained summary and any visible text or key technical details from the attached {} '{}' ({}).\n\
+             {}Return plain text only without markdown code fences or conversational filler.",
+            meta.media_kind, meta.filename, meta.mime_type, context_note
+        );
+
+        let (effective_mime, effective_bytes) = if meta.media_kind == "video" {
+            if let Some(frame_jpg) = Self::extract_video_keyframe_jpeg(&attachment.data) {
+                ("image/jpeg".to_string(), frame_jpg)
+            } else {
+                (meta.mime_type.clone(), attachment.data.clone())
+            }
+        } else {
+            (meta.mime_type.clone(), attachment.data.clone())
+        };
+
+        let b64 = encode_base64(&effective_bytes);
+        let chat_url = format!("{}/v1/chat/completions", config.effective_ollama_url());
+
+        let user_content = if meta.media_kind == "image" || meta.media_kind == "video" {
+            serde_json::json!([
+                { "type": "text", "text": prompt },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", effective_mime, b64)
+                    }
+                }
+            ])
+        } else if meta.media_kind == "audio" {
+            let fmt = meta
+                .mime_type
+                .split('/')
+                .nth(1)
+                .unwrap_or("wav")
+                .trim_start_matches("x-");
+            serde_json::json!([
+                { "type": "text", "text": prompt },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": b64,
+                        "format": fmt
+                    }
+                }
+            ])
+        } else if let Ok(utf8_text) = std::str::from_utf8(&attachment.data) {
+            let snippet: String = utf8_text.chars().take(16_000).collect();
+            serde_json::json!(format!("{}\n\nFile contents:\n{}", prompt, snippet))
+        } else {
+            serde_json::json!([
+                { "type": "text", "text": prompt },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", effective_mime, b64)
+                    }
+                }
+            ])
+        };
+
+        let chat_payload = serde_json::json!({
+            "model": resolved_model,
+            "messages": [
+                { "role": "user", "content": user_content }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 512
+        });
+
+        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
+        if let Some(ref key) = config.effective_ollama_api_key() {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+
+        if let Ok(resp) = req.send_json(chat_payload) {
+            if let Ok(json_resp) = resp.into_json::<serde_json::Value>() {
+                if let Some(text) = json_resp
+                    .get("choices")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|m| m.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return Ok(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        // Fallback to Ollama native /api/generate endpoint
+        let gen_url = format!("{}/api/generate", config.effective_ollama_url());
+        let gen_payload = if let Ok(utf8_text) = std::str::from_utf8(&attachment.data) {
+            let snippet: String = utf8_text.chars().take(16_000).collect();
+            serde_json::json!({
+                "model": resolved_model,
+                "prompt": format!("{}\n\nFile contents:\n{}", prompt, snippet),
+                "stream": false
+            })
+        } else {
+            serde_json::json!({
+                "model": resolved_model,
+                "prompt": prompt,
+                "images": [b64],
+                "stream": false
+            })
+        };
+
+        let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(30));
+        if let Some(ref key) = config.effective_ollama_api_key() {
+            fallback_req = fallback_req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        let fallback_resp = fallback_req.send_json(gen_payload).with_context(|| {
+            format!(
+                "LLM attachment extraction failed for '{}' using model '{}' at {}",
+                meta.filename,
+                resolved_model,
+                config.effective_ollama_url()
+            )
+        })?;
+        let json_resp: serde_json::Value = fallback_resp.into_json()?;
+        let extracted = json_resp
+            .get("response")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        anyhow::ensure!(
+            !extracted.is_empty(),
+            "LLM model '{}' returned an empty extraction response for '{}'",
+            resolved_model,
+            meta.filename
+        );
+        Ok(extracted)
+    }
+
+    /// Extract a single representative JPEG keyframe from raw video bytes using `ffmpeg` (if installed)
+    /// so single-model vision LLMs can describe `.mp4`/`.mov`/`.webm` attachments when `--extract` is used.
+    fn extract_video_keyframe_jpeg(video_bytes: &[u8]) -> Option<Vec<u8>> {
+        let tmp_dir = std::env::temp_dir();
+        let uid = uuid::Uuid::new_v4();
+        let in_path = tmp_dir.join(format!("lmem_vid_{}.mp4", uid));
+        let out_path = tmp_dir.join(format!("lmem_frame_{}.jpg", uid));
+        if std::fs::write(&in_path, video_bytes).is_err() {
+            return None;
+        }
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-ss",
+                "1",
+                "-i",
+                in_path.to_str().unwrap_or(""),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(1280,iw)':-2",
+                "-q:v",
+                "4",
+                out_path.to_str().unwrap_or(""),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if !status.map(|s| s.success()).unwrap_or(false) || !out_path.exists() {
+            let _ = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-i",
+                    in_path.to_str().unwrap_or(""),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale='min(1280,iw)':-2",
+                    "-q:v",
+                    "4",
+                    out_path.to_str().unwrap_or(""),
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+
+        let frame = std::fs::read(&out_path).ok().filter(|b| !b.is_empty());
+        let _ = std::fs::remove_file(&in_path);
+        let _ = std::fs::remove_file(&out_path);
+        frame
     }
 }
 

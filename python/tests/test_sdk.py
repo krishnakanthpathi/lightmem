@@ -21,8 +21,8 @@ class TestLightMemSDK(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_package_exports(self):
-        self.assertEqual(lmem.__version__, "0.2.8")
-        self.assertEqual(lightmem.__version__, "0.2.8")
+        self.assertEqual(lmem.__version__, "0.2.9")
+        self.assertEqual(lightmem.__version__, "0.2.9")
         self.assertTrue(callable(lmem.LightMem))
         self.assertTrue(callable(lightmem.LightMem))
 
@@ -150,6 +150,40 @@ class TestLightMemSDK(unittest.TestCase):
         self.assertIsInstance(saved[0], lmem.Memory)
         self.assertEqual(saved[0].provenance, "observed")
         self.assertEqual(self.client.stats().total_memories, len(saved))
+
+    def test_attachments_and_paths(self):
+        import struct
+
+        png_path = Path(self.temp_dir.name) / "diagram.png"
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            + struct.pack(">II", 320, 240)
+            + b"\x08\x06\x00\x00\x00"
+            + b"X" * 32
+        )
+        png_path.write_bytes(png_bytes)
+
+        # 1. File-only remember via SDK
+        mem = self.client.remember(files=[png_path], tags=["diagram", "ui"])
+        self.assertEqual(len(mem.attachments), 1)
+        self.assertEqual(mem.attachments[0].filename, "diagram.png")
+        self.assertEqual(mem.attachments[0].media_type, "image")
+        self.assertEqual(mem.attachments[0].dimensions, "320x240")
+
+        # 2. Inspect with path=True returns materialized path list
+        paths = self.client.inspect(mem.id, path=True)
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(Path(paths[0]).exists())
+        self.assertEqual(Path(paths[0]).read_bytes(), png_bytes)
+
+        # 3. Recall with media filter and path=True
+        rec_paths = self.client.recall("diagram", media="image", path=True)
+        self.assertEqual(len(rec_paths), 1)
+        self.assertEqual(Path(rec_paths[0]).read_bytes(), png_bytes)
+
+        # 4. List with media filter and path=True
+        list_paths = self.client.list(media="image", path=True)
+        self.assertEqual(len(list_paths), 1)
 
 
 if __name__ == "__main__":

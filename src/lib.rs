@@ -12,9 +12,11 @@ pub use services::{connect, embeddings, exporter, importer, observer, reranker, 
 // Primary SDK Re-exports
 pub use controllers::{LightMem, MemoryController};
 pub use models::{
-    detect_memory_conflict, detect_memory_conflict_with_similarity, extract_meaningful_tokens,
-    parse_ttl_duration, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
-    PaginatedMemories, ScoredMemory, StorageStats,
+    compute_sha256_hex, decode_base64, detect_memory_conflict,
+    detect_memory_conflict_with_similarity, detect_mime_and_kind, encode_base64,
+    extract_meaningful_tokens, parse_ttl_duration, AttachmentInput, AttachmentMetadata,
+    LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories,
+    ScoredMemory, StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
 pub use services::{

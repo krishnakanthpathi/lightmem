@@ -531,6 +531,553 @@ mod infer_tests {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentMetadata {
+    pub id: String,
+    pub memory_id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub media_kind: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f32>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
+impl AttachmentMetadata {
+    pub fn summary_text(&self) -> String {
+        let short_sha = &self.sha256[..self.sha256.len().min(12)];
+        let mut parts = vec![
+            self.media_kind.clone(),
+            self.mime_type.clone(),
+            format!("{} bytes", self.size_bytes),
+        ];
+        if let Some(ref dims) = self.dimensions {
+            parts.push(dims.clone());
+        }
+        if let Some(dur) = self.duration_secs {
+            parts.push(format!("{:.1}s", dur));
+        }
+        parts.push(format!("sha256:{}", short_sha));
+        format!("{} ({})", self.filename, parts.join(", "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentInput {
+    pub metadata: AttachmentMetadata,
+    pub data: Vec<u8>,
+}
+
+impl AttachmentInput {
+    pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {
+        use anyhow::Context;
+        let data = std::fs::read(path)
+            .with_context(|| format!("Failed to read attachment file: {}", path.display()))?;
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment.bin")
+            .to_string();
+        Ok(Self::from_bytes(&filename, data))
+    }
+
+    pub fn from_bytes(filename: &str, data: Vec<u8>) -> Self {
+        let clean_name = std::path::Path::new(filename)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment.bin")
+            .trim();
+        let final_name = if clean_name.is_empty() {
+            "attachment.bin".to_string()
+        } else {
+            clean_name.to_string()
+        };
+        let (mime_type, media_kind) = detect_mime_and_kind(&final_name, &data);
+        let (mp4_dims, mp4_dur) = if media_kind == "video" {
+            parse_mp4_dimensions_and_duration(&data)
+        } else {
+            (None, None)
+        };
+        let dimensions = parse_image_dimensions(&data).or(mp4_dims);
+        let duration_secs = parse_audio_duration_secs(&data).or(mp4_dur);
+        let sha256 = compute_sha256_hex(&data);
+        let size_bytes = data.len() as u64;
+
+        Self {
+            metadata: AttachmentMetadata {
+                id: Uuid::new_v4().to_string(),
+                memory_id: String::new(),
+                filename: final_name,
+                mime_type,
+                media_kind,
+                size_bytes,
+                sha256,
+                dimensions,
+                duration_secs,
+                created_at: Utc::now(),
+                data_base64: None,
+            },
+            data,
+        }
+    }
+}
+
+/// Pure-Rust FIPS 180-4 SHA-256 hex digest implementation
+pub fn compute_sha256_hex(data: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity((data.len() + 72) & !63);
+    padded.extend_from_slice(data);
+    padded.push(0x80);
+    while (padded.len() % 64) != 56 {
+        padded.push(0x00);
+    }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in padded.as_chunks::<64>().0 {
+        let mut w = [0u32; 64];
+        for (i, &word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            w[i] = u32::from_be_bytes(word);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    format!(
+        "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+    )
+}
+
+/// Pure-Rust RFC 4648 Base64 encoder
+pub fn encode_base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(triple & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Pure-Rust RFC 4648 Base64 decoder
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if clean.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !clean.len().is_multiple_of(4) {
+        return Err("Invalid base64 length".to_string());
+    }
+    let val = |b: u8| -> Result<u32, String> {
+        match b {
+            b'A'..=b'Z' => Ok((b - b'A') as u32),
+            b'a'..=b'z' => Ok((b - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((b - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            b'=' => Ok(0),
+            _ => Err(format!("Invalid base64 byte: {}", b)),
+        }
+    };
+    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
+    for chunk in clean.as_chunks::<4>().0 {
+        let triple = (val(chunk[0])? << 18)
+            | (val(chunk[1])? << 12)
+            | (val(chunk[2])? << 6)
+            | val(chunk[3])?;
+        out.push(((triple >> 16) & 0xFF) as u8);
+        if chunk[2] != b'=' {
+            out.push(((triple >> 8) & 0xFF) as u8);
+        }
+        if chunk[3] != b'=' {
+            out.push((triple & 0xFF) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Detect `(mime_type, media_kind)` from magic bytes and filename extension
+pub fn detect_mime_and_kind(filename: &str, data: &[u8]) -> (String, String) {
+    // 1. Magic byte inspection
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return ("image/png".to_string(), "image".to_string());
+    }
+    if data.starts_with(b"\xFF\xD8\xFF") {
+        return ("image/jpeg".to_string(), "image".to_string());
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return ("image/gif".to_string(), "image".to_string());
+    }
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return ("image/webp".to_string(), "image".to_string());
+    }
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {
+        return ("audio/wav".to_string(), "audio".to_string());
+    }
+    if data.starts_with(b"ID3") || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0)
+    {
+        return ("audio/mpeg".to_string(), "audio".to_string());
+    }
+    if data.starts_with(b"OggS") {
+        return ("audio/ogg".to_string(), "audio".to_string());
+    }
+    if data.starts_with(b"fLaC") {
+        return ("audio/flac".to_string(), "audio".to_string());
+    }
+    if data.starts_with(b"%PDF-") {
+        return ("application/pdf".to_string(), "document".to_string());
+    }
+    if data.starts_with(b"PK\x03\x04") {
+        return ("application/zip".to_string(), "archive".to_string());
+    }
+    if data.starts_with(b"\x1F\x8B") {
+        return ("application/gzip".to_string(), "archive".to_string());
+    }
+    if data.len() >= 12 && &data[4..8] == b"ftyp" {
+        let brand = &data[8..12];
+        if brand == b"M4A " {
+            return ("audio/mp4".to_string(), "audio".to_string());
+        }
+        return ("video/mp4".to_string(), "video".to_string());
+    }
+
+    // 2. Extension fallback
+    let ext = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "png" => ("image/png".to_string(), "image".to_string()),
+        "jpg" | "jpeg" => ("image/jpeg".to_string(), "image".to_string()),
+        "gif" => ("image/gif".to_string(), "image".to_string()),
+        "webp" => ("image/webp".to_string(), "image".to_string()),
+        "svg" => ("image/svg+xml".to_string(), "image".to_string()),
+        "bmp" => ("image/bmp".to_string(), "image".to_string()),
+        "ico" => ("image/x-icon".to_string(), "image".to_string()),
+        "mp3" => ("audio/mpeg".to_string(), "audio".to_string()),
+        "wav" => ("audio/wav".to_string(), "audio".to_string()),
+        "ogg" | "opus" => ("audio/ogg".to_string(), "audio".to_string()),
+        "flac" => ("audio/flac".to_string(), "audio".to_string()),
+        "m4a" => ("audio/mp4".to_string(), "audio".to_string()),
+        "aac" => ("audio/aac".to_string(), "audio".to_string()),
+        "mp4" | "m4v" => ("video/mp4".to_string(), "video".to_string()),
+        "webm" => ("video/webm".to_string(), "video".to_string()),
+        "mov" => ("video/quicktime".to_string(), "video".to_string()),
+        "pdf" => ("application/pdf".to_string(), "document".to_string()),
+        "md" | "markdown" => ("text/markdown".to_string(), "document".to_string()),
+        "txt" | "log" => ("text/plain".to_string(), "document".to_string()),
+        "csv" => ("text/csv".to_string(), "document".to_string()),
+        "json" => ("application/json".to_string(), "code".to_string()),
+        "jsonl" => ("application/x-ndjson".to_string(), "code".to_string()),
+        "toml" => ("application/toml".to_string(), "code".to_string()),
+        "yaml" | "yml" => ("application/yaml".to_string(), "code".to_string()),
+        "rs" => ("text/x-rust".to_string(), "code".to_string()),
+        "py" => ("text/x-python".to_string(), "code".to_string()),
+        "js" | "mjs" => ("text/javascript".to_string(), "code".to_string()),
+        "ts" | "tsx" => ("text/typescript".to_string(), "code".to_string()),
+        "go" => ("text/x-go".to_string(), "code".to_string()),
+        "c" | "h" | "cpp" | "hpp" => ("text/x-c".to_string(), "code".to_string()),
+        "java" => ("text/x-java".to_string(), "code".to_string()),
+        "sh" | "zsh" | "bash" => ("text/x-shellscript".to_string(), "code".to_string()),
+        "sql" => ("application/sql".to_string(), "code".to_string()),
+        "html" | "htm" => ("text/html".to_string(), "code".to_string()),
+        "css" => ("text/css".to_string(), "code".to_string()),
+        "zip" => ("application/zip".to_string(), "archive".to_string()),
+        "tar" => ("application/x-tar".to_string(), "archive".to_string()),
+        "gz" | "tgz" => ("application/gzip".to_string(), "archive".to_string()),
+        _ => {
+            if std::str::from_utf8(data).is_ok() && !data.is_empty() {
+                ("text/plain".to_string(), "document".to_string())
+            } else {
+                ("application/octet-stream".to_string(), "binary".to_string())
+            }
+        }
+    }
+}
+
+/// Extract `WxH` dimensions from PNG, GIF, WebP, or JPEG headers
+pub fn parse_image_dimensions(data: &[u8]) -> Option<String> {
+    // PNG: 8-byte signature + 4-byte length + "IHDR" + 4-byte width + 4-byte height
+    if data.len() >= 24 && data.starts_with(b"\x89PNG\r\n\x1a\n") && &data[12..16] == b"IHDR" {
+        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        if w > 0 && h > 0 {
+            return Some(format!("{}x{}", w, h));
+        }
+    }
+    // GIF: "GIF87a" / "GIF89a" + 2-byte LE width + 2-byte LE height
+    if data.len() >= 10 && (data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
+        let w = u16::from_le_bytes([data[6], data[7]]);
+        let h = u16::from_le_bytes([data[8], data[9]]);
+        if w > 0 && h > 0 {
+            return Some(format!("{}x{}", w, h));
+        }
+    }
+    // WebP: RIFF....WEBP followed by VP8X, VP8 , or VP8L chunk
+    if data.len() >= 25 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        let chunk = &data[12..16];
+        if chunk == b"VP8X" && data.len() >= 30 {
+            let w = u32::from_le_bytes([data[24], data[25], data[26], 0]) + 1;
+            let h = u32::from_le_bytes([data[27], data[28], data[29], 0]) + 1;
+            if w > 0 && h > 0 {
+                return Some(format!("{}x{}", w, h));
+            }
+        } else if chunk == b"VP8 " && data.len() >= 30 && data[23..26] == [0x9D, 0x01, 0x2A] {
+            let w = (u16::from_le_bytes([data[26], data[27]]) & 0x3FFF) as u32;
+            let h = (u16::from_le_bytes([data[28], data[29]]) & 0x3FFF) as u32;
+            if w > 0 && h > 0 {
+                return Some(format!("{}x{}", w, h));
+            }
+        } else if chunk == b"VP8L" && data[20] == 0x2F {
+            let bits = u32::from_le_bytes([data[21], data[22], data[23], data[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            if w > 0 && h > 0 {
+                return Some(format!("{}x{}", w, h));
+            }
+        }
+    }
+    // JPEG: scan SOF0..SOF3 markers (0xFF 0xC0..0xC3)
+    if data.len() >= 4 && data.starts_with(b"\xFF\xD8") {
+        let mut i = 2;
+        while i + 9 < data.len() {
+            if data[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            while i < data.len() && data[i] == 0xFF {
+                i += 1;
+            }
+            if i >= data.len() {
+                break;
+            }
+            let marker = data[i];
+            i += 1;
+            if marker == 0xD9 || marker == 0xDA {
+                break;
+            }
+            if i + 2 > data.len() {
+                break;
+            }
+            let seg_len = u16::from_be_bytes([data[i], data[i + 1]]) as usize;
+            if seg_len < 2 || i + seg_len > data.len() {
+                break;
+            }
+            if matches!(marker, 0xC0..=0xC3) && seg_len >= 7 {
+                let h = u16::from_be_bytes([data[i + 3], data[i + 4]]);
+                let w = u16::from_be_bytes([data[i + 5], data[i + 6]]);
+                if w > 0 && h > 0 {
+                    return Some(format!("{}x{}", w, h));
+                }
+            }
+            i += seg_len;
+        }
+    }
+    None
+}
+
+/// Extract audio duration in seconds from WAV RIFF header
+pub fn parse_audio_duration_secs(data: &[u8]) -> Option<f32> {
+    if data.len() < 44 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut pos = 12usize;
+    let mut byte_rate = 0u32;
+    let mut data_bytes = 0u32;
+    while pos + 8 <= data.len() {
+        let chunk_id = &data[pos..pos + 4];
+        let chunk_size =
+            u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
+        let body_start = pos + 8;
+        if chunk_id == b"fmt " && body_start + 12 <= data.len() {
+            byte_rate = u32::from_le_bytes([
+                data[body_start + 8],
+                data[body_start + 9],
+                data[body_start + 10],
+                data[body_start + 11],
+            ]);
+        } else if chunk_id == b"data" {
+            data_bytes = chunk_size;
+            break;
+        }
+        let padded = (chunk_size as usize) + ((chunk_size as usize) & 1);
+        pos = body_start.saturating_add(padded);
+    }
+    if byte_rate > 0 && data_bytes > 0 {
+        Some((data_bytes as f32) / (byte_rate as f32))
+    } else {
+        None
+    }
+}
+
+/// Extract `(dimensions, duration_secs)` from ISO BMFF / MP4 / MOV `moov` -> `mvhd` & `tkhd` boxes
+pub fn parse_mp4_dimensions_and_duration(data: &[u8]) -> (Option<String>, Option<f32>) {
+    fn walk_boxes(slice: &[u8], dims: &mut Option<String>, dur: &mut Option<f32>) {
+        let mut pos = 0usize;
+        while pos + 8 <= slice.len() {
+            let size32 =
+                u32::from_be_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]]);
+            let box_type = &slice[pos + 4..pos + 8];
+            let (box_len, hdr_len) = if size32 == 1 {
+                if pos + 16 > slice.len() {
+                    break;
+                }
+                let size64 = u64::from_be_bytes([
+                    slice[pos + 8],
+                    slice[pos + 9],
+                    slice[pos + 10],
+                    slice[pos + 11],
+                    slice[pos + 12],
+                    slice[pos + 13],
+                    slice[pos + 14],
+                    slice[pos + 15],
+                ]) as usize;
+                (size64, 16usize)
+            } else if size32 == 0 {
+                (slice.len() - pos, 8usize)
+            } else {
+                (size32 as usize, 8usize)
+            };
+            if box_len < hdr_len || pos + box_len > slice.len() {
+                break;
+            }
+            let body = &slice[pos + hdr_len..pos + box_len];
+            if box_type == b"moov" || box_type == b"trak" {
+                walk_boxes(body, dims, dur);
+            } else if box_type == b"mvhd" && dur.is_none() && !body.is_empty() {
+                let version = body[0];
+                if version == 0 && body.len() >= 20 {
+                    let timescale = u32::from_be_bytes([body[12], body[13], body[14], body[15]]);
+                    let duration = u32::from_be_bytes([body[16], body[17], body[18], body[19]]);
+                    if timescale > 0 && duration > 0 {
+                        *dur = Some((duration as f32) / (timescale as f32));
+                    }
+                } else if version == 1 && body.len() >= 32 {
+                    let timescale = u32::from_be_bytes([body[20], body[21], body[22], body[23]]);
+                    let duration = u64::from_be_bytes([
+                        body[24], body[25], body[26], body[27], body[28], body[29], body[30],
+                        body[31],
+                    ]);
+                    if timescale > 0 && duration > 0 {
+                        *dur = Some((duration as f32) / (timescale as f32));
+                    }
+                }
+            } else if box_type == b"tkhd" && dims.is_none() && !body.is_empty() {
+                let version = body[0];
+                let (w, h) = if version == 0 && body.len() >= 84 {
+                    let w = u32::from_be_bytes([body[76], body[77], body[78], body[79]]) >> 16;
+                    let h = u32::from_be_bytes([body[80], body[81], body[82], body[83]]) >> 16;
+                    (w, h)
+                } else if version == 1 && body.len() >= 96 {
+                    let w = u32::from_be_bytes([body[88], body[89], body[90], body[91]]) >> 16;
+                    let h = u32::from_be_bytes([body[92], body[93], body[94], body[95]]) >> 16;
+                    (w, h)
+                } else {
+                    (0, 0)
+                };
+                if w > 0 && h > 0 {
+                    *dims = Some(format!("{}x{}", w, h));
+                }
+            }
+            if dims.is_some() && dur.is_some() {
+                break;
+            }
+            pos += box_len;
+        }
+    }
+
+    let mut dims = None;
+    let mut dur = None;
+    walk_boxes(data, &mut dims, &mut dur);
+    (dims, dur)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: String,
@@ -544,6 +1091,8 @@ pub struct MemoryRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expired_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentMetadata>,
 }
 
 impl MemoryRecord {
@@ -568,6 +1117,7 @@ impl MemoryRecord {
             created_at: now,
             updated_at: now,
             expired_at: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -579,6 +1129,14 @@ impl MemoryRecord {
             self.title,
             self.content
         );
+        if !self.attachments.is_empty() {
+            let summaries: Vec<String> = self
+                .attachments
+                .iter()
+                .map(AttachmentMetadata::summary_text)
+                .collect();
+            out.push_str(&format!("\n\nAttachments: {}", summaries.join("; ")));
+        }
         if !self.tags.is_empty() {
             out.push_str(&format!("\n\nTags: {}", self.tags.join(", ")));
         }

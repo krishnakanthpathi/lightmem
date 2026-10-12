@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
 $Branch = "main"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.8" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.9" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Target = "x86_64-pc-windows-msvc"
 $ArchiveUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/lmem-$Target.zip"
@@ -110,6 +110,13 @@ switch -Wildcard ($LlmChoice) {
         }
     }
 }
+
+# Deploy LightMem skill to detected AI agent platforms
+$PrevErrPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $ExePath connect | Out-Null
+$ErrorActionPreference = $PrevErrPref
+Write-Host "  ✓ Deployed LightMem skill to detected AI agents" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "  ✦ LightMem ($ReleaseTag) is ready! Run: lmem" -ForegroundColor Green

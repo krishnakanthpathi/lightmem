@@ -345,6 +345,28 @@ impl CliView {
             ttl_suffix
         );
 
+        for att in &memory.attachments {
+            let mut details = vec![att.media_kind.clone(), att.mime_type.clone()];
+            if let Some(ref dims) = att.dimensions {
+                details.push(dims.clone());
+            }
+            if let Some(dur) = att.duration_secs {
+                details.push(format!("{:.1}s", dur));
+            }
+            details.push(format!("{} bytes", att.size_bytes));
+            details.push(format!(
+                "sha256:{}",
+                &att.sha256[..att.sha256.len().min(12)]
+            ));
+            println!(
+                "  {} {} {} {}",
+                Self::crimson_bold("📎"),
+                Self::white_bold(&att.filename),
+                Self::slate("·"),
+                Self::slate(&details.join(" · "))
+            );
+        }
+
         for c in conflicts {
             let old_short: String = c.older_memory.id.chars().take(8).collect();
             let old_ts = c
@@ -534,6 +556,19 @@ impl CliView {
                     m.tags.join(", ").truecolor(167, 139, 250)
                 ));
             }
+            if !m.attachments.is_empty() {
+                let att_summary = m
+                    .attachments
+                    .iter()
+                    .map(|a| format!("{} [{}]", a.filename, a.media_kind))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                meta.push(format!(
+                    "{} {}",
+                    Self::slate("Attachments:"),
+                    Self::emerald_bold(&att_summary)
+                ));
+            }
             println!(
                 "     {} {}",
                 Self::slate("╰─▸"),
@@ -601,11 +636,20 @@ impl CliView {
             } else {
                 first_line.to_string()
             };
+            let att_badge = if m.attachments.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " {}",
+                    Self::emerald_bold(&format!("[📎 {}]", m.attachments.len()))
+                )
+            };
             println!(
-                "  {} [{}] {} {} {} {}",
+                "  {} [{}] {}{} {} {} {}",
                 Self::crimson_bold("▪"),
                 Self::violet_bold(m.category.as_str()),
                 Self::white_bold(&m.title),
+                att_badge,
                 Self::gold(&format!("({})", short_id)),
                 Self::slate("─"),
                 Self::slate(&snippet)
@@ -738,6 +782,33 @@ impl CliView {
                 Self::slate("╰─ Updated:    "),
                 Self::slate(&memory.updated_at.to_rfc3339())
             );
+        }
+
+        if !memory.attachments.is_empty() {
+            println!(
+                "\n  {} Attachments ({}):",
+                Self::crimson_bold("📎"),
+                memory.attachments.len()
+            );
+            for att in &memory.attachments {
+                let mut extra = vec![att.media_kind.clone(), att.mime_type.clone()];
+                if let Some(ref dims) = att.dimensions {
+                    extra.push(dims.clone());
+                }
+                if let Some(dur) = att.duration_secs {
+                    extra.push(format!("{:.1}s", dur));
+                }
+                extra.push(format!("{} bytes", att.size_bytes));
+                println!(
+                    "    ├─ {} {} {}",
+                    Self::white_bold(&att.filename),
+                    Self::slate(&format!("({})", extra.join(" · "))),
+                    Self::gold(&format!(
+                        "[sha256:{}]",
+                        &att.sha256[..att.sha256.len().min(16)]
+                    ))
+                );
+            }
         }
 
         if !links.is_empty() {

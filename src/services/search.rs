@@ -41,7 +41,25 @@ impl HybridSearchEngine {
             return 0.0;
         }
 
-        let combined_orig = format!("{} {}", mem.title, mem.content);
+        let att_text = if mem.attachments.is_empty() {
+            String::new()
+        } else {
+            mem.attachments
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{} {} {} {} {}",
+                        a.filename,
+                        a.media_kind,
+                        a.mime_type,
+                        a.dimensions.as_deref().unwrap_or(""),
+                        a.sha256
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let combined_orig = format!("{} {} {}", mem.title, mem.content, att_text);
         let orig_words: Vec<&str> = combined_orig
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -259,7 +277,7 @@ impl HybridSearchEngine {
         let mut memories = storage.get_memories_exact(&inspect_ids)?;
         for id in inspect_ids {
             if let Some(mem) = memories.remove(&id) {
-                let key = (mem.category, crate::storage::duplicate_key(&mem.content));
+                let key = (mem.category, crate::storage::duplicate_key_for_record(&mem));
                 if !seen_contents.insert(key) {
                     continue;
                 }

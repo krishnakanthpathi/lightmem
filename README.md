@@ -2,7 +2,7 @@
 
 **Local agent memory engine and CLI, written in Rust with SQLite, ONNX Runtime (`fastembed` + SQuAD-2.0 Extractive QA), and swappable Ollama models.**
 
-LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and **multi-format JSON / JSONL / OKF / MCP Knowledge Graph / Memanto Markdown ingestion**.
+LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and **multi-format JSON / JSONL / OKF / MCP Knowledge Graph / Memanto Markdown ingestion**.
 
 ---
 
@@ -57,23 +57,26 @@ lmem uninstall --purge-data
 ```text
 lightmem/
 ├── Cargo.toml
-├── install.sh                      # Universal macOS / Linux installer (v0.2.0)
+├── SKILL.md                        # Embedded AI agent skill reference (deployed via lmem connect)
+├── install.sh                      # Universal macOS / Linux installer
 ├── src/
 │   ├── lib.rs                      # Library root & public re-exports
 │   ├── main.rs                     # CLI router (Clap -> Controller -> View)
 │   ├── models/                     # Domain Entities & Value Objects
 │   │   ├── mod.rs
-│   │   ├── memory.rs               # 14-category MemoryType::infer, MemoryRecord, MemoryConflict
+│   │   ├── memory.rs               # 14-category MemoryType::infer, MemoryRecord, AttachmentMetadata, SHA-256/MIME/MP4/WAV parsers
 │   │   ├── config.rs               # LightMemConfig & reranker/embedding identities
 │   │   └── stats.rs                # StorageStats telemetry model
 │   ├── repositories/               # Data Access Layer
 │   │   ├── mod.rs
-│   │   └── sqlite_repo.rs          # SQLite WAL + FTS5 + vector blob persistence
+│   │   └── sqlite_repo.rs          # SQLite WAL + FTS5 + vector blobs + immutable memory_attachments BLOB vault
 │   ├── services/                   # Business & Domain Engines
 │   │   ├── mod.rs
 │   │   ├── embeddings.rs           # FastEmbed ONNX (bge-small, minilm, nomic), Ollama, & Hash
 │   │   ├── search.rs               # Hybrid RRF (BM25 + Cosine) + acronym/lexical boosts
 │   │   ├── reranker.rs             # OnnxQaReranker (SQuAD-2.0), OllamaReranker, & Top1Reranker
+│   │   ├── observer.rs             # Conversational extraction & opt-in single-LLM attachment extraction
+│   │   ├── connect.rs              # Cross-platform AI agent skill deployer (Antigravity, Codex, Hermes, Cursor, Claude)
 │   │   ├── importer.rs             # JSON / JSONL / OKF / MCP Graph / Memanto Markdown importer
 │   │   └── exporter.rs             # Open Knowledge Format (OKF v2) & JSON backup exporter
 │   ├── controllers/                # Application Orchestration
@@ -84,6 +87,7 @@ lightmem/
 │       └── cli_view.rs             # 24-bit TrueColor Crimson Cloud HUD, vector icons, & JSON output
 └── tests/
     ├── integration_test.rs
+    ├── attachments_test.rs
     ├── integrity_and_migration.rs
     ├── cli_migration.rs
     └── review_regressions.rs
@@ -100,6 +104,12 @@ lmem
 # Store a memory (category is auto-inferred across 14 types if -t is omitted)
 lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
 
+# Store files, images, audio, or 4K videos in the isolated SQLite BLOB vault (0600 owner-only, SHA-256 verified)
+lmem remember "Kubernetes ingress diagram" -f ./ingress.png             # Metadata-only default (MIME, dimensions, duration, SHA-256)
+lmem remember "Itachi 4K live wallpaper" -f ./itachi-4k.mp4 --extract   # Opt-in: extract visual/file summary via configured LLM
+lmem inspect <ID> --save-to ./exported/                                 # Export verified binary attachment(s) back to disk
+lmem inspect <ID1> <ID2> --paths                                        # Materialize & print ONLY absolute file path(s) (one per line)
+
 # Ingest dialogue, chat transcripts, or notes, extract atomic candidate memories, and review/confirm before saving
 lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive confirmation [y/n/a/q]
 lmem observe conversation.txt --yes                   # Auto-confirm and save all extracted memories
@@ -110,11 +120,18 @@ lmem observe conversation.txt -r ollama:qwen2.5:3b    # LLM-assisted semantic ex
 # Store a memory and automatically merge/supersede any conflicting older memory
 lmem remember "PostgreSQL 16 runs on port 6432" --title "Postgres Port" --supersede
 
-
-# Hybrid semantic + keyword recall (with optional --as-of or single-day --date filter)
+# Hybrid semantic + keyword recall (with optional --media, --path, --as-of, or single-day --date filter)
 lmem recall "postgres port" --limit 5
+lmem recall "sharingan crimson eyes" -m video         # Filter recall by attachment media kind (image|audio|video|document|any)
+lmem recall "sharingan" -m video -l 1 --path          # Materialize & print ONLY the verified file path(s) on disk
 lmem recall "who is kk" --date 2026-09-21
 lmem recall "postgres port" --as-of 2026-09-21
+
+# Knowledge graph linking, multi-hop traversal & visualization
+lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0
+lmem related <ID> --hops 2
+lmem autolink --min-similarity 0.75
+lmem graph --focus <ID> --hops 2
 
 # Extractive Question Answering (uses local ONNX minilm-squad2 by default)
 lmem answer "what is my pan card no"
@@ -122,8 +139,9 @@ lmem answer "what is my father name" -r tinyroberta-squad2
 lmem answer "who is kk" -r ollama:gemma4:31b-cloud
 lmem answer "what port does postgres use?" -r top1
 
-# Paginated chronological list (supports --date and --as-of)
+# Paginated chronological list (supports --media, --paths, --date, and --as-of)
 lmem list --page 1 --limit 20
+lmem list -m video --paths                            # Print all stored video attachment paths
 lmem list --date 2026-09-21
 lmem list --offset 20 --limit 20 -t decision
 
@@ -140,6 +158,9 @@ lmem import ~/.memanto/on-prem/exports/memory.md
 # Export to Open Knowledge Format (OKF v2) or lossless JSON backup
 lmem export --okf -o backup.okf
 lmem export --json -o backup.json
+
+# Deploy LightMem skill to AI agents (Antigravity, Codex, Hermes, Cursor, Claude, Universal Agents)
+lmem connect all
 
 # Vault storage statistics & category distribution
 lmem stats

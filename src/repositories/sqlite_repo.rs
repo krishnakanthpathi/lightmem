@@ -1,6 +1,7 @@
 use crate::models::{
-    extract_wikilinks, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus,
-    MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
+    compute_sha256_hex, extract_wikilinks, AttachmentInput, AttachmentMetadata, GraphEdge,
+    GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
+    PaginatedMemories, RelatedMemory, StorageStats,
 };
 use crate::services::embeddings::{cosine_similarity, validate_vector, EmbeddingProvider};
 use anyhow::{Context, Result};
@@ -24,6 +25,12 @@ impl Storage {
 
         let conn = Connection::open(&path_buf)
             .with_context(|| format!("Failed to open SQLite database at {:?}", path_buf))?;
+
+        #[cfg(unix)]
+        if path_buf != Path::new(":memory:") && path_buf.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o600));
+        }
 
         // Set busy timeout for WAL concurrency (10 seconds)
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
@@ -62,10 +69,10 @@ impl Storage {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 3,
+            version <= 4,
             "Database schema is newer than this version of LightMem"
         );
-        if version == 3 {
+        if version == 4 {
             let needs_tag_or_key_repair: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM memories WHERE tags NOT LIKE '[%' OR (dedup_key = '' AND TRIM(content) != ''))",
@@ -192,7 +199,85 @@ impl Storage {
             CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id);
             "#,
         )?;
-        tx.pragma_update(None, "user_version", 3)?;
+
+        // Schema v4: isolated memory_attachments table with immutable binary BLOBs & FTS metadata sync
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS memory_attachments (
+                id TEXT PRIMARY KEY,
+                memory_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                media_kind TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 TEXT NOT NULL,
+                dimensions TEXT,
+                duration_secs REAL,
+                data BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_memory_id ON memory_attachments(memory_id);
+            CREATE INDEX IF NOT EXISTS idx_attachments_media_kind ON memory_attachments(media_kind);
+            CREATE INDEX IF NOT EXISTS idx_attachments_sha256 ON memory_attachments(sha256);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_mem_sha256 ON memory_attachments(memory_id, sha256);
+
+            CREATE TRIGGER IF NOT EXISTS trg_attachments_immutable
+            BEFORE UPDATE ON memory_attachments
+            BEGIN
+                SELECT RAISE(ABORT, 'Attachment binary payload is immutable; only LightMem may delete and replace attachments');
+            END;
+
+            DROP TRIGGER IF EXISTS trg_memories_ai;
+            DROP TRIGGER IF EXISTS trg_memories_au;
+
+            CREATE TRIGGER trg_memories_ai AFTER INSERT ON memories BEGIN
+                INSERT INTO memories_fts(id, title, content, tags)
+                VALUES (
+                    new.id,
+                    new.title,
+                    new.content || COALESCE(' ' || (SELECT group_concat(filename || ' ' || media_kind || ' ' || mime_type || ' ' || COALESCE(dimensions, '') || ' ' || sha256, ' ') FROM memory_attachments WHERE memory_id = new.id), ''),
+                    new.tags
+                );
+            END;
+
+            CREATE TRIGGER trg_memories_au AFTER UPDATE ON memories BEGIN
+                DELETE FROM memories_fts WHERE id = old.id;
+                INSERT INTO memories_fts(id, title, content, tags)
+                VALUES (
+                    new.id,
+                    new.title,
+                    new.content || COALESCE(' ' || (SELECT group_concat(filename || ' ' || media_kind || ' ' || mime_type || ' ' || COALESCE(dimensions, '') || ' ' || sha256, ' ') FROM memory_attachments WHERE memory_id = new.id), ''),
+                    new.tags
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_attachments_ai AFTER INSERT ON memory_attachments BEGIN
+                DELETE FROM memories_fts WHERE id = new.memory_id;
+                INSERT INTO memories_fts(id, title, content, tags)
+                SELECT
+                    m.id,
+                    m.title,
+                    m.content || COALESCE(' ' || (SELECT group_concat(filename || ' ' || media_kind || ' ' || mime_type || ' ' || COALESCE(dimensions, '') || ' ' || sha256, ' ') FROM memory_attachments WHERE memory_id = m.id), ''),
+                    m.tags
+                FROM memories m WHERE m.id = new.memory_id;
+                UPDATE storage_revision SET revision = revision + 1;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_attachments_ad AFTER DELETE ON memory_attachments BEGIN
+                DELETE FROM memories_fts WHERE id = old.memory_id;
+                INSERT INTO memories_fts(id, title, content, tags)
+                SELECT
+                    m.id,
+                    m.title,
+                    m.content || COALESCE(' ' || (SELECT group_concat(filename || ' ' || media_kind || ' ' || mime_type || ' ' || COALESCE(dimensions, '') || ' ' || sha256, ' ') FROM memory_attachments WHERE memory_id = m.id), ''),
+                    m.tags
+                FROM memories m WHERE m.id = old.memory_id;
+                UPDATE storage_revision SET revision = revision + 1;
+            END;
+            "#,
+        )?;
+        tx.pragma_update(None, "user_version", 4)?;
         tx.commit()?;
         Ok(())
     }
@@ -235,6 +320,33 @@ impl Storage {
         identity: &str,
         merge: bool,
     ) -> Result<Vec<MemoryRecord>> {
+        self.insert_indexed_batch_with_attachments(memories, &[], embedder, identity, merge)
+    }
+
+    pub fn insert_indexed_with_attachments(
+        &self,
+        memory: &MemoryRecord,
+        attachments: &[AttachmentInput],
+        embedder: &dyn EmbeddingProvider,
+        identity: &str,
+        merge: bool,
+    ) -> Result<MemoryRecord> {
+        let mut mem = memory.clone();
+        mem.attachments = attachments.iter().map(|a| a.metadata.clone()).collect();
+        let paired = vec![(mem.id.clone(), attachments.to_vec())];
+        let mut batch =
+            self.insert_indexed_batch_with_attachments(&[mem], &paired, embedder, identity, merge)?;
+        Ok(batch.remove(0))
+    }
+
+    pub fn insert_indexed_batch_with_attachments(
+        &self,
+        memories: &[MemoryRecord],
+        attachments_by_mem: &[(String, Vec<AttachmentInput>)],
+        embedder: &dyn EmbeddingProvider,
+        identity: &str,
+        merge: bool,
+    ) -> Result<Vec<MemoryRecord>> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         check_identity(&tx, identity)?;
@@ -246,17 +358,27 @@ impl Storage {
         }
         let mut records = Vec::with_capacity(memories.len());
         for memory in memories {
-            records.push(write_record(&tx, memory, merge, |_| Ok(None))?);
+            let written = write_record(&tx, memory, merge, |_| Ok(None))?;
+            if let Some((_, att_inputs)) =
+                attachments_by_mem.iter().find(|(id, _)| *id == memory.id)
+            {
+                for att in att_inputs {
+                    write_attachment(&tx, &written.id, att)?;
+                }
+            }
+            records.push(written);
         }
         // Later rows in one import may merge away an earlier survivor. Resolve all
         // returned records to their final survivor before embedding the final cards.
         for record in &mut records {
             let exact = tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1", [&record.id], row_to_memory).optional()?;
-            *record = match exact {
+            let mut resolved = match exact {
                 Some(current) => current,
-                None if merge && record.status == MemoryStatus::Active => tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC LIMIT 1", params![record.category.as_str(), duplicate_key(&record.content)], row_to_memory)?,
+                None if merge && record.status == MemoryStatus::Active => tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC LIMIT 1", params![record.category.as_str(), duplicate_key_for_record(record)], row_to_memory)?,
                 None => anyhow::bail!("An imported record unexpectedly disappeared"),
             };
+            resolved.attachments = load_attachments_for_id(&tx, &resolved.id)?;
+            *record = resolved;
         }
         let mut unique = std::collections::BTreeMap::new();
         for record in &records {
@@ -274,7 +396,8 @@ impl Storage {
                 validate_vector(&vector)?;
                 bind_identity(&tx, identity, vector.len())?;
                 tx.execute(
-                    "INSERT INTO memory_vectors VALUES (?1, ?2, ?3)",
+                    "INSERT INTO memory_vectors VALUES (?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
                     params![memory.id, serialize_f32_slice(&vector), vector.len() as i64],
                 )?;
             }
@@ -359,7 +482,7 @@ impl Storage {
             groups
                 .entry((
                     record.category.as_str().into(),
-                    duplicate_key(&record.content),
+                    duplicate_key_for_record(&record),
                 ))
                 .or_default()
                 .push(record);
@@ -397,7 +520,17 @@ impl Storage {
         let Some(id) = resolve_id(&conn, id)? else {
             return Ok(None);
         };
-        Ok(conn.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1", [id], row_to_memory).optional()?)
+        let mut opt = conn
+            .query_row(
+                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
+                [id],
+                row_to_memory,
+            )
+            .optional()?;
+        if let Some(ref mut rec) = opt {
+            rec.attachments = load_attachments_for_id(&conn, &rec.id)?;
+        }
+        Ok(opt)
     }
 
     pub fn get_memories_exact(
@@ -407,6 +540,11 @@ impl Storage {
         let conn = self.conn.lock().unwrap();
         let _ = expire_due_conn(&conn);
         let mut records = std::collections::HashMap::new();
+        let has_atts: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM memory_attachments)", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(false);
         for chunk in ids.chunks(400) {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
@@ -414,7 +552,10 @@ impl Storage {
             let sql = format!("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id IN ({})", placeholders);
             let mut stmt = conn.prepare(&sql)?;
             for row in stmt.query_map(rusqlite::params_from_iter(chunk), row_to_memory)? {
-                let record = row?;
+                let mut record = row?;
+                if has_atts {
+                    record.attachments = load_attachments_for_id(&conn, &record.id)?;
+                }
                 records.insert(record.id.clone(), record);
             }
         }
@@ -427,13 +568,201 @@ impl Storage {
         let Some(id) = resolve_id_or_title(&conn, term)? else {
             return Ok(None);
         };
-        Ok(conn
+        let mut opt = conn
             .query_row(
                 "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
                 [id],
                 row_to_memory,
             )
-            .optional()?)
+            .optional()?;
+        if let Some(ref mut rec) = opt {
+            rec.attachments = load_attachments_for_id(&conn, &rec.id)?;
+        }
+        Ok(opt)
+    }
+
+    /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
+    pub fn get_memory_attachments_data(
+        &self,
+        memory_term: &str,
+    ) -> Result<Vec<(AttachmentMetadata, Vec<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let id = resolve_id_or_title(&conn, memory_term)?
+            .with_context(|| format!("Memory '{}' not found", memory_term))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at, data
+             FROM memory_attachments
+             WHERE memory_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([&id], |r| {
+            let meta = row_to_attachment_metadata(r)?;
+            let data: Vec<u8> = r.get(10)?;
+            Ok((meta, data))
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            let (meta, data) = item?;
+            let actual_sha = compute_sha256_hex(&data);
+            anyhow::ensure!(
+                actual_sha == meta.sha256 && data.len() as u64 == meta.size_bytes,
+                "Attachment integrity verification failed for '{}' (expected sha256:{}, got sha256:{})",
+                meta.filename,
+                meta.sha256,
+                actual_sha
+            );
+            out.push((meta, data));
+        }
+        Ok(out)
+    }
+
+    /// Export all attachments of a memory to a target directory or file path on disk (verifying SHA-256 integrity)
+    pub fn save_attachments_to(&self, memory_term: &str, target: &Path) -> Result<Vec<PathBuf>> {
+        self.save_memories_attachments_to(&[memory_term.to_string()], target)
+    }
+
+    /// Export all attachments across one or more memories to a target directory or file path on disk (verifying SHA-256 integrity)
+    pub fn save_memories_attachments_to(
+        &self,
+        memory_terms: &[String],
+        target: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        let mut items = Vec::new();
+        for term in memory_terms {
+            let mut mem_items = self.get_memory_attachments_data(term)?;
+            items.append(&mut mem_items);
+        }
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut written_paths = Vec::new();
+        let treat_as_dir = target.is_dir()
+            || target
+                .to_string_lossy()
+                .ends_with(std::path::MAIN_SEPARATOR)
+            || target.to_string_lossy().ends_with('/')
+            || target.extension().is_none();
+
+        if treat_as_dir {
+            std::fs::create_dir_all(target)
+                .with_context(|| format!("Failed to create directory {}", target.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700));
+            }
+            let mut used_in_batch = std::collections::HashSet::new();
+            for (idx, (meta, data)) in items.iter().enumerate() {
+                let mut file_path = target.join(&meta.filename);
+                let mut already_verified_on_disk = false;
+
+                if file_path.exists() && !used_in_batch.contains(&file_path) {
+                    if let Ok(existing_bytes) = std::fs::read(&file_path) {
+                        if existing_bytes.len() as u64 == meta.size_bytes
+                            && compute_sha256_hex(&existing_bytes) == meta.sha256
+                        {
+                            already_verified_on_disk = true;
+                        }
+                    }
+                }
+
+                if !already_verified_on_disk
+                    && (used_in_batch.contains(&file_path) || file_path.exists())
+                {
+                    let stem = Path::new(&meta.filename)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("attachment");
+                    let ext = Path::new(&meta.filename)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    let short_sha = &meta.sha256[..meta.sha256.len().min(8)];
+                    file_path = if ext.is_empty() {
+                        target.join(format!("{}_{}_{}", stem, idx + 1, short_sha))
+                    } else {
+                        target.join(format!("{}_{}_{}.{}", stem, idx + 1, short_sha, ext))
+                    };
+                }
+
+                if !already_verified_on_disk {
+                    std::fs::write(&file_path, data)
+                        .with_context(|| format!("Failed to write {}", file_path.display()))?;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &file_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                used_in_batch.insert(file_path.clone());
+                written_paths.push(file_path);
+            }
+        } else {
+            let parent = target
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(parent)?;
+            let base_stem = target
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("attachment");
+            let base_ext = target.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+            for (idx, (meta, data)) in items.iter().enumerate() {
+                let file_path = if idx == 0 {
+                    target.to_path_buf()
+                } else {
+                    let short_sha = &meta.sha256[..meta.sha256.len().min(8)];
+                    if base_ext.is_empty() {
+                        parent.join(format!("{}_{}_{}", base_stem, idx + 1, short_sha))
+                    } else {
+                        parent.join(format!(
+                            "{}_{}_{}.{}",
+                            base_stem,
+                            idx + 1,
+                            short_sha,
+                            base_ext
+                        ))
+                    }
+                };
+                std::fs::write(&file_path, data)
+                    .with_context(|| format!("Failed to write {}", file_path.display()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &file_path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+                written_paths.push(file_path);
+            }
+        }
+        Ok(written_paths)
+    }
+
+    /// Copy attachment rows from `from_memory_id` to `to_memory_id` (deduplicated by `sha256` per memory)
+    pub fn copy_attachments_between_memories(
+        &self,
+        from_memory_id: &str,
+        to_memory_id: &str,
+    ) -> Result<usize> {
+        if from_memory_id == to_memory_id {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
+             SELECT lower(hex(randomblob(16))), ?1, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at
+             FROM memory_attachments
+             WHERE memory_id = ?2",
+            params![to_memory_id, from_memory_id],
+        )?;
+        Ok(rows)
     }
 
     pub fn add_link(
@@ -580,7 +909,7 @@ impl Storage {
                 next_path.push(relation);
                 let next_score = (score * weight) / (next_hop as f32);
 
-                if let Some(mem) = conn
+                if let Some(mut mem) = conn
                     .query_row(
                         "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
                         [&neighbor_id],
@@ -588,6 +917,7 @@ impl Storage {
                     )
                     .optional()?
                 {
+                    mem.attachments = load_attachments_for_id(&conn, &mem.id)?;
                     results.push(RelatedMemory {
                         memory: mem,
                         distance: next_hop,
@@ -1064,6 +1394,19 @@ impl Storage {
         for r in rows {
             items.push(r?);
         }
+        drop(stmt);
+        if !items.is_empty() {
+            let has_atts: bool = conn
+                .query_row("SELECT EXISTS(SELECT 1 FROM memory_attachments)", [], |r| {
+                    r.get(0)
+                })
+                .unwrap_or(false);
+            if has_atts {
+                for item in &mut items {
+                    item.attachments = load_attachments_for_id(&conn, &item.id)?;
+                }
+            }
+        }
 
         let effective_limit = if limit == 0 { total.max(1) } else { limit };
         let page = (offset / effective_limit) + 1;
@@ -1343,11 +1686,31 @@ fn repair_legacy_tags_and_dedup_keys(tx: &Transaction) -> Result<()> {
         let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         mapped.collect::<rusqlite::Result<_>>()?
     };
+    let has_attachments_table: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_attachments')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
     for (id, tags, content) in rows_to_fix {
         let values = parse_tags_column(&tags);
+        let dedup = if has_attachments_table {
+            let atts = load_attachments_for_id(tx, &id).unwrap_or_default();
+            if atts.is_empty() {
+                duplicate_key(&content)
+            } else {
+                let mut hashes: Vec<&str> = atts.iter().map(|a| a.sha256.as_str()).collect();
+                hashes.sort_unstable();
+                hashes.dedup();
+                format!("{}\0att:{}", duplicate_key(&content), hashes.join(","))
+            }
+        } else {
+            duplicate_key(&content)
+        };
         tx.execute(
             "UPDATE memories SET tags=?1, dedup_key=?2 WHERE id=?3",
-            params![serde_json::to_string(&values)?, duplicate_key(&content), id],
+            params![serde_json::to_string(&values)?, dedup, id],
         )?;
     }
     Ok(())
@@ -1401,6 +1764,7 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
         created_at,
         updated_at,
         expired_at,
+        attachments: Vec::new(),
     })
 }
 
@@ -1468,10 +1832,38 @@ pub fn duplicate_key(content: &str) -> String {
     content.trim().to_string()
 }
 
+/// Compute deduplication key including attachment SHA-256 hashes when attachments are present.
+pub fn duplicate_key_for_record(record: &MemoryRecord) -> String {
+    let base = duplicate_key(&record.content);
+    if record.attachments.is_empty() {
+        return base;
+    }
+    let mut hashes: Vec<&str> = record
+        .attachments
+        .iter()
+        .map(|a| a.sha256.as_str())
+        .collect();
+    hashes.sort_unstable();
+    hashes.dedup();
+    format!("{}\0att:{}", base, hashes.join(","))
+}
+
 fn all_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
     let mut stmt = conn.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories ORDER BY created_at ASC, id ASC")?;
     let rows = stmt.query_map([], row_to_memory)?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut records: Vec<MemoryRecord> = rows.collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    let has_atts: bool = conn
+        .query_row("SELECT EXISTS(SELECT 1 FROM memory_attachments)", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(false);
+    if has_atts {
+        for rec in &mut records {
+            rec.attachments = load_attachments_for_id(conn, &rec.id)?;
+        }
+    }
+    Ok(records)
 }
 
 fn resolve_id(conn: &Connection, id: &str) -> Result<Option<String>> {
@@ -1579,13 +1971,16 @@ where
         "Confidence must be between 0 and 1"
     );
     let mut merged = memory.clone();
+    let dedup_key = duplicate_key_for_record(memory);
     let duplicates: Vec<MemoryRecord> = if merge && memory.status == MemoryStatus::Active {
         let mut stmt = tx.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC")?;
-        let rows = stmt.query_map(
-            params![memory.category.as_str(), duplicate_key(&memory.content)],
-            row_to_memory,
-        )?;
-        rows.collect::<rusqlite::Result<_>>()?
+        let rows = stmt.query_map(params![memory.category.as_str(), &dedup_key], row_to_memory)?;
+        let mut dups: Vec<MemoryRecord> = rows.collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for d in &mut dups {
+            d.attachments = load_attachments_for_id(tx, &d.id)?;
+        }
+        dups
     } else {
         Vec::new()
     };
@@ -1624,12 +2019,18 @@ where
                 merged.tags.push(tag.clone());
             }
         }
+        for att in &existing.attachments {
+            if !merged.attachments.iter().any(|a| a.sha256 == att.sha256) {
+                merged.attachments.push(att.clone());
+            }
+        }
     }
+    let final_dedup_key = duplicate_key_for_record(&merged);
     let vector = embed(&merged)?;
     tx.execute("INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, dedup_key)
         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
         ON CONFLICT(id) DO UPDATE SET category=excluded.category, title=excluded.title, content=excluded.content, tags=excluded.tags, confidence=excluded.confidence, status=excluded.status, provenance=excluded.provenance, created_at=excluded.created_at, updated_at=excluded.updated_at, expired_at=excluded.expired_at, dedup_key=excluded.dedup_key",
-        params![merged.id, merged.category.as_str(), merged.title, merged.content, serde_json::to_string(&merged.tags)?, merged.confidence, merged.status.as_str(), merged.provenance, merged.created_at.to_rfc3339(), merged.updated_at.to_rfc3339(), merged.expired_at.map(|t| t.to_rfc3339()), duplicate_key(&merged.content)])?;
+        params![merged.id, merged.category.as_str(), merged.title, merged.content, serde_json::to_string(&merged.tags)?, merged.confidence, merged.status.as_str(), merged.provenance, merged.created_at.to_rfc3339(), merged.updated_at.to_rfc3339(), merged.expired_at.map(|t| t.to_rfc3339()), final_dedup_key])?;
     tx.execute("DELETE FROM memory_vectors WHERE id=?1", [&merged.id])?;
     if let Some(vector) = vector {
         validate_vector(&vector)?;
@@ -1640,10 +2041,86 @@ where
     }
     for duplicate in duplicates {
         if duplicate.id != merged.id {
+            // Copy any unique attachment blobs from duplicate to merged before deleting duplicate
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
+                 SELECT lower(hex(randomblob(16))), ?1, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at
+                 FROM memory_attachments
+                 WHERE memory_id = ?2",
+                params![merged.id, duplicate.id],
+            )?;
             tx.execute("DELETE FROM memories WHERE id=?1", [duplicate.id])?;
         }
     }
     Ok(merged)
+}
+
+fn write_attachment(tx: &Transaction<'_>, memory_id: &str, att: &AttachmentInput) -> Result<()> {
+    let m = &att.metadata;
+    let id = if m.id.trim().is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        m.id.clone()
+    };
+    tx.execute(
+        "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            id,
+            memory_id,
+            m.filename,
+            m.mime_type,
+            m.media_kind,
+            m.size_bytes as i64,
+            m.sha256,
+            m.dimensions,
+            m.duration_secs.map(|d| d as f64),
+            att.data,
+            m.created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn load_attachments_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<AttachmentMetadata>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at
+         FROM memory_attachments
+         WHERE memory_id = ?1
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map([memory_id], row_to_attachment_metadata)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn row_to_attachment_metadata(row: &rusqlite::Row) -> rusqlite::Result<AttachmentMetadata> {
+    let id: String = row.get(0)?;
+    let memory_id: String = row.get(1)?;
+    let filename: String = row.get(2)?;
+    let mime_type: String = row.get(3)?;
+    let media_kind: String = row.get(4)?;
+    let size_bytes: i64 = row.get(5)?;
+    let sha256: String = row.get(6)?;
+    let dimensions: Option<String> = row.get(7)?;
+    let duration_secs: Option<f64> = row.get(8)?;
+    let created_at_str: String = row.get(9)?;
+    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+
+    Ok(AttachmentMetadata {
+        id,
+        memory_id,
+        filename,
+        mime_type,
+        media_kind,
+        size_bytes: size_bytes.max(0) as u64,
+        sha256,
+        dimensions,
+        duration_secs: duration_secs.map(|d| d as f32),
+        created_at,
+        data_base64: None,
+    })
 }
 
 #[cfg(test)]

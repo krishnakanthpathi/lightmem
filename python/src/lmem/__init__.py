@@ -5,6 +5,7 @@ with Neural Extractive QA & Knowledge Graph.
 
 from .client import LightMem
 from .models import (
+    AttachmentMetadata,
     Memory,
     ScoredMemory,
     AnswerResult,
@@ -16,9 +17,10 @@ from .models import (
 )
 from .binary import get_binary_path
 
-__version__ = "0.2.8"
+__version__ = "0.2.9"
 __all__ = [
     "LightMem",
+    "AttachmentMetadata",
     "Memory",
     "ScoredMemory",
     "AnswerResult",

@@ -4,6 +4,7 @@ LightMem alias package re-exporting lmem.
 
 from lmem import (
     LightMem,
+    AttachmentMetadata,
     Memory,
     ScoredMemory,
     AnswerResult,
@@ -17,6 +18,7 @@ from lmem import (
 
 __all__ = [
     "LightMem",
+    "AttachmentMetadata",
     "Memory",
     "ScoredMemory",
     "AnswerResult",

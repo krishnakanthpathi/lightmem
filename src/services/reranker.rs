@@ -579,6 +579,7 @@ impl OllamaReranker {
             "qwen2.5:1.5b",
             "llama3.2:3b",
             "llama3.2:1b",
+            "gemma4:31b-cloud",
             "gemma4:31b",
             "gpt-4o-mini",
             "qwen2.5:7b",
@@ -928,6 +929,18 @@ pub fn build_merged_record(
     for tag in &older.tags {
         if seen.insert(tag.to_lowercase()) {
             merged.tags.push(tag.clone());
+        }
+    }
+    let mut seen_sha: HashSet<String> = merged
+        .attachments
+        .iter()
+        .map(|a| a.sha256.clone())
+        .collect();
+    for att in &older.attachments {
+        if seen_sha.insert(att.sha256.clone()) {
+            let mut carried = att.clone();
+            carried.memory_id = merged.id.clone();
+            merged.attachments.push(carried);
         }
     }
     merged

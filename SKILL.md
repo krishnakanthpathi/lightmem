@@ -1,11 +1,11 @@
 ---
 name: lightmem
-description: Ultra-fast local AI agent persistent memory engine (`lmem`). Use this skill to store, search, answer questions from, deduplicate/merge conflicts in, and export/import persistent memories across sessions using SQLite WAL + FTS5 BM25 + ONNX/Ollama vector embeddings and Extractive QA reranking.
+description: Ultra-fast local AI agent persistent memory engine (`lmem`). Use this skill to store, search, answer questions from, attach/retrieve multimodal files (images, audio, video, documents) with `--path`/`--paths`, deduplicate/merge conflicts in, and export/import persistent memories across sessions using SQLite WAL + FTS5 BM25 + ONNX/Ollama vector embeddings and Extractive QA reranking.
 ---
 
 # LightMem (`lmem`) Skill
 
-Complete operational reference for using the `lmem` CLI to persist, retrieve, query, and maintain long-term agent memories across sessions.
+Complete operational reference for using the `lmem` CLI to persist, retrieve, query, attach binary media/files, and maintain long-term agent memories across sessions.
 
 ---
 
@@ -48,6 +48,14 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
   --provenance validated \
   --supersede
 
+# 1a. Store Files, Images, Audio & Documents (Isolated SQLite BLOBs + Metadata Indexing)
+lmem remember "Kubernetes ingress diagram" -f ./ingress.png       # Metadata-only default (filename, MIME, 1920x1080, SHA-256)
+lmem remember -f ./standup_note.wav -f ./spec.pdf                 # Attach multiple files (caption auto-generated if omitted)
+lmem remember "Architecture diagram" -f ./diagram.png --extract   # Opt-in: extract text/description via single configured LLM
+lmem inspect <MEMORY_ID> --save-to ./exported_files/              # Export SHA-256 verified binary attachment(s) back to disk
+lmem inspect <MEMORY_ID> --path                                   # Materialize verified attachment(s) and print ONLY absolute path(s) (alias: --paths, -p)
+lmem inspect <ID1> <ID2> --paths                                  # Print verified file paths across multiple memories (one path per line)
+
 # 1b. Conversational Ingestion & Observation (Extract candidate memories with confirmation)
 lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive review [y/n/a/q]
 lmem observe transcript.txt                            # Ingest transcript file with interactive review
@@ -60,6 +68,10 @@ lmem observe chat.txt -r ollama:qwen2.5:3b             # Use LLM-assisted semant
 # 2. Hybrid Search & Similarity Filtering (SQLite FTS5 BM25 + Vector Cosine RRF + Acronym Boost)
 
 lmem recall "postgres port" -l 5
+lmem recall "ingress.png" --media image                # Filter recall by attachment media kind (image|audio|video|document|code|any)
+lmem recall "itachi sharingan" -m video -l 1 --path    # Recall and print ONLY the verified file path(s) on disk
+lmem list --media video --paths                        # List all video attachments and print ONLY their absolute file paths
+lmem list --media audio                                # List memories with audio attachments
 lmem recall "postgres port" -t fact --min-similarity 0.5 --json
 lmem recall "new architectural idea" --min-similarity 0.70 -l 50 --json # Count & find semantically similar existing memories
 lmem recall "service gateway" --multi-hop          # Expands recall hits with 1-hop graph neighbors
@@ -164,6 +176,8 @@ If `--type` (`-t`) is omitted on `lmem remember`, LightMem automatically infers 
 - `corrected`: Recorded after fixing a bug or user correction.
 - `inferred`: Derived logically from codebase patterns.
 - `imported`: Ingested from external files (`lmem import`).
+- `attachment_metadata`: Automatically assigned when storing file attachments (`-f`) using metadata-only indexing.
+- `attachment_llm_extracted`: Automatically assigned when storing file attachments (`-f`) with explicit LLM extraction (`--extract` / `-e`).
 
 ### Confidence (`--confidence <0.0-1.0>`)
 - `1.0`: Explicit user rule, identity fact, or verified test assertion.
@@ -209,11 +223,29 @@ LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ index
 
 ---
 
-## 5. Choosing Between `recall`, `answer`, `related`, and `conflicts`
+## 4b. Multimodal File, Image, Audio & Video Attachments
+
+LightMem stores raw files directly inside an isolated SQLite `memory_attachments` table (Schema v4) with strict integrity and access guarantees:
+
+1. **Isolated Immutable BLOB Vault**:
+   - Raw bytes are stored in `memory_attachments` (never bloating the `memories` table), protected by a `BEFORE UPDATE` SQLite trigger (`trg_attachments_immutable`) that blocks in-place tampering, verified by SHA-256 on every read/export, and enforced with `0600` owner-only file permissions.
+   - Deleting a memory via `lmem forget <ID> --hard` cascades and purges its attachment BLOBs automatically.
+2. **Metadata-First by Default, Opt-In Single-Model LLM Extraction (`--extract` / `-e`)**:
+   - By default (`lmem remember "caption" -f <file>`), no LLM or vision model is called: LightMem parses magic bytes, MIME type, media kind (`image`, `audio`, `video`, `document`, `code`, `archive`, `binary`), image/MP4 dimensions (`WxH`), WAV/MP4 duration (`s`), byte size, and SHA-256, and indexes all metadata into both FTS5 BM25 and the vector embedding.
+   - Only when `--extract` (`-e`) is explicitly passed (`lmem remember -f <file> --extract`), LightMem sends the attachment (or an automatically extracted JPEG keyframe for `.mp4`/`.mov`/`.mkv` videos via `ffmpeg`) to the single configured main LLM (`ollama:<model>` / OpenAI `/v1/chat/completions`) and appends the extracted description to the memory.
+3. **Printing Only Verified File Paths (`--path` / `--paths` / `-p`)**:
+   - Pass `--path` or `--paths` (`-p`) to `lmem inspect`, `lmem recall`, or `lmem list` to materialize SHA-256-verified attachment(s) into `~/.lightmem/attachments/` (or custom `-o <dir>`) and print **only** the absolute file path(s) (one per line, or JSON array with `--json`) — ideal for command substitution (`wallpaper "$(lmem -g recall 'itachi' -m video -l 1 --path)"`).
+
+---
+
+## 5. Choosing Between `recall`, `answer`, `inspect`, `related`, and `conflicts`
 
 | Command | Output | When to Use |
 | :--- | :--- | :--- |
 | `lmem recall "<query>"` | Top-$K$ full memory cards with RRF score (`BM25 + Vector + Acronym Boost`), ID, category, and tags | When gathering broad context before planning, coding, or debugging |
+| `lmem recall "<query>" -m <kind>` | Top-$K$ memories filtered by attachment media kind (`image`, `audio`, `video`, `document`, `code`, `any`) | When searching specifically for stored wallpapers, diagrams, audio notes, or documents |
+| `lmem recall "<query>" -l 1 --path` | Raw absolute path(s) of verified attachment(s) on disk (one per line) | When piping a recalled media/file path directly into another CLI or script (`--paths` for multiple) |
+| `lmem inspect <id...> --paths` | Raw absolute path(s) of all attachments for one or more memory IDs | When resolving memory ID(s) directly to verified file paths on disk |
 | `lmem recall "<query>" --min-similarity 0.70` | Top-$K$ memories filtered by minimum cosine similarity threshold | When checking how many existing memories are semantically similar to a new query or statement |
 | `lmem recall "<query>" --multi-hop` | Recall results expanded with 1-hop connected graph neighbors | When context requires knowing dependencies and adjacent architectural relationships |
 | `lmem autolink [--min-similarity 0.75]` | Summary of newly discovered graph edges, total nodes, and edges | When auto-connecting the vault by embedding similarity, title mentions, and shared tags |
@@ -232,7 +264,7 @@ LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ index
    - **Good**: `"Windows PowerShell $ErrorActionPreference='Stop' treats native command stderr progress bars as terminating errors; wrap stderr-emitting CLI calls with 'Continue'."`
 2. **Use `--supersede` When Updating a Fact**:
    - Passing `--supersede` on `lmem remember` automatically checks for conflicting active memories and retires the outdated record in the same transaction.
-3. **Pass `--json` for Programmatic Parsing**:
-   - `lmem recall`, `lmem answer`, `lmem list`, `lmem get`, `lmem stats`, and `lmem conflicts` all support `--json` with clean, deterministic schemas.
+3. **Pass `--json` or `--path` for Programmatic Parsing**:
+   - `lmem recall`, `lmem answer`, `lmem list`, `lmem inspect`, `lmem stats`, and `lmem conflicts` all support `--json` with clean, deterministic schemas, and `inspect`/`recall`/`list` support `--path` (`--paths`) for raw file path output.
 4. **Scope Project vs Global Memories**:
    - By default, `lmem` uses `./.lightmem.db` if present in the current directory or git root, falling back to `~/.lightmem/memories.db`. Pass `-g` (`--global`) to force the global vault or `--db <PATH>` for an isolated vault.

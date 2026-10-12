@@ -64,7 +64,10 @@ The `pip install lmem` package also installs the standalone CLI:
 
 ```bash
 lmem remember "Redis cache runs on port 6379" -t fact
+lmem remember "Itachi 4K wallpaper" -f ./itachi-4k.mp4 --extract
 lmem recall "redis port" -l 5
+lmem recall "itachi" -m video -l 1 --path
+lmem inspect <ID> --paths
 lmem answer "what is my pan card no"
 lmem autolink
 lmem graph

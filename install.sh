@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.2.8"
+VERSION="v0.2.9"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Support --uninstall / -u flag
@@ -468,5 +468,9 @@ EOF
     fi
 fi
 printf "  \033[1;32m◈\033[0m Configured shell completions (Tab + Arrow keys)... \033[1;32m100%%\033[0m\n"
+
+# 7. Auto-deploy LightMem skill to detected AI agent platforms
+"$INSTALL_DIR/lmem" connect >/dev/null 2>&1 || true
+printf "  \033[1;32m◈\033[0m Deployed LightMem skill to detected AI agents... \033[1;32m100%%\033[0m\n"
 
 printf "\n  \033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n\n"

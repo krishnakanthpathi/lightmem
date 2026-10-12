@@ -29,16 +29,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Store a memory principle or fact
+    /// Store a memory principle, fact, or attached file/image/audio/document
     Remember {
-        /// Content of the memory
-        content: String,
+        /// Content of the memory (optional when attaching files via -f/--file)
+        content: Option<String>,
+
+        /// Attach one or more files, images, audio clips, or documents as isolated SQLite BLOBs with metadata
+        #[arg(short = 'f', long = "file", visible_alias = "attach")]
+        files: Vec<PathBuf>,
+
+        /// Explicitly invoke the configured LLM to extract text/descriptions from attached files (off by default; metadata-only unless specified)
+        #[arg(short = 'e', long = "extract")]
+        extract: bool,
+
+        /// Optional LLM model override when --extract is enabled (e.g. 'ollama:gemma4:31b-cloud')
+        #[arg(short = 'r', long = "reranker")]
+        reranker: Option<String>,
 
         /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password)
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
 
-        /// Short title (defaults to first line)
+        /// Short title (defaults to first line or filename)
         #[arg(long)]
         title: Option<String>,
 
@@ -58,7 +70,7 @@ enum Commands {
         #[arg(short = 's', long)]
         supersede: bool,
 
-        /// Origin or verification level (explicit_statement, validated, observed, corrected, inferred, imported)
+        /// Origin or verification level (explicit_statement, validated, observed, corrected, inferred, imported, attachment)
         #[arg(short = 'p', long)]
         provenance: Option<String>,
 
@@ -75,6 +87,10 @@ enum Commands {
         /// Filter by category
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
+
+        /// Filter by attachment media kind (image, audio, video, document, code, archive, binary, or any)
+        #[arg(short = 'm', long = "media")]
+        media: Option<String>,
 
         /// Point-in-time recall: what was active as of date (YYYY-MM-DD or RFC3339)
         #[arg(long, value_parser = parse_as_of_date)]
@@ -100,6 +116,14 @@ enum Commands {
         #[arg(long)]
         multi_hop: bool,
 
+        /// Export verified attachment binary file(s) of recalled memories to a target directory or file path
+        #[arg(short = 'o', long = "save-to")]
+        save_to: Option<PathBuf>,
+
+        /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
+        #[arg(short = 'p', long = "path", visible_alias = "paths")]
+        path: bool,
+
         /// Output results as JSON for agent consumption
         #[arg(long)]
         json: bool,
@@ -110,6 +134,10 @@ enum Commands {
         /// Filter by category
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
+
+        /// Filter by attachment media kind (image, audio, video, document, code, archive, binary, or any)
+        #[arg(short = 'm', long = "media")]
+        media: Option<String>,
 
         /// Filter by status (active | expired)
         #[arg(long, default_value = "active")]
@@ -135,16 +163,33 @@ enum Commands {
         #[arg(short = 'p', long)]
         page: Option<usize>,
 
+        /// Export verified attachment binary file(s) of listed memories to a target directory or file path
+        #[arg(short = 'o', long = "save-to")]
+        save_to: Option<PathBuf>,
+
+        /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
+        #[arg(long = "path", visible_alias = "paths")]
+        path: bool,
+
         /// Output paginated result as JSON (includes total, limit, offset, page, total_pages, has_more, items)
         #[arg(long)]
         json: bool,
     },
 
-    /// Deeply inspect a memory record, its metadata, and knowledge graph links
+    /// Deeply inspect one or more memory records, their metadata, attachments, and knowledge graph links
     #[command(alias = "get", alias = "show")]
     Inspect {
-        /// Memory ID (UUID) or title
-        term: String,
+        /// Memory ID(s) (UUID or prefix) or title(s)
+        #[arg(required = true, num_args = 1..)]
+        terms: Vec<String>,
+
+        /// Export verified attachment binary file(s) from the SQLite vault to a target file or directory path on disk
+        #[arg(short = 'o', long = "save-to", visible_alias = "export-attachments")]
+        save_to: Option<PathBuf>,
+
+        /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
+        #[arg(short = 'p', long = "path", visible_alias = "paths")]
+        path: bool,
 
         /// Output memory details as JSON
         #[arg(long)]
@@ -601,6 +646,9 @@ fn main() -> Result<()> {
     match command {
         Commands::Remember {
             content,
+            files,
+            extract,
+            reranker,
             category,
             title,
             tags,
@@ -610,6 +658,15 @@ fn main() -> Result<()> {
             provenance,
             json,
         } => {
+            let has_text = content
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some();
+            anyhow::ensure!(
+                has_text || !files.is_empty(),
+                "Provide memory content or attach at least one file via --file / -f"
+            );
             let lm = open_controller(effective_db, global)?;
             let cat = category;
             let tag_vec = tags
@@ -624,8 +681,11 @@ fn main() -> Result<()> {
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
-            let (memory, conflicts) = lm.remember_with_options(
-                &content,
+            let (memory, conflicts) = lm.remember_with_attachments(
+                content.as_deref(),
+                &files,
+                extract,
+                reranker.as_deref(),
                 cat,
                 title,
                 tag_vec,
@@ -646,74 +706,362 @@ fn main() -> Result<()> {
         Commands::Recall {
             query,
             category,
+            media,
             as_of,
             date,
             limit,
             min_similarity,
             precision,
             multi_hop,
+            save_to,
+            path,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
             let cat = category;
             let as_of_dt = as_of;
 
-            if !migrate_embeddings(&lm, false, json, false)? {
+            if !migrate_embeddings(&lm, false, json || path, false)? {
                 return Ok(());
             }
-            if precision {
+            if precision && !path {
                 let result =
                     lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
                 CliView::render_answer(&result, json)?;
             } else {
-                let results = lm.recall_expanded(
+                let filter_attachments = media.is_some() || path || save_to.is_some();
+                let fetch_limit = if filter_attachments {
+                    limit.max(100)
+                } else {
+                    limit
+                };
+                let mut results = lm.recall_expanded(
                     &query,
                     cat,
                     as_of_dt,
                     date,
-                    limit,
+                    fetch_limit,
                     min_similarity,
                     multi_hop,
                 )?;
-                CliView::render_recall(&query, &results, lm.db_path(), json)?;
+                if filter_attachments {
+                    let k = media.as_deref().unwrap_or("any").trim().to_lowercase();
+                    results.retain(|r| {
+                        !r.memory.attachments.is_empty()
+                            && (k == "any"
+                                || k == "all"
+                                || r.memory.attachments.iter().any(|a| {
+                                    a.media_kind.eq_ignore_ascii_case(&k)
+                                        || a.mime_type.to_lowercase().contains(&k)
+                                }))
+                    });
+                    results.truncate(limit);
+                }
+                let ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
+                if path {
+                    let all_paths =
+                        lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                    } else {
+                        for p in all_paths {
+                            println!("{}", p.display());
+                        }
+                    }
+                } else if let Some(ref target) = save_to {
+                    let all_saved = lm.save_memories_attachments_to(&ids, target)?;
+                    if json {
+                        let mut offset = 0usize;
+                        let json_items: Vec<serde_json::Value> = results
+                            .iter()
+                            .map(|r| {
+                                let count = r.memory.attachments.len();
+                                let end = (offset + count).min(all_saved.len());
+                                let saved_slice = &all_saved[offset..end];
+                                offset = end;
+                                let mut val = serde_json::to_value(r).unwrap_or_default();
+                                if let Some(obj) = val.as_object_mut() {
+                                    obj.insert(
+                                        "saved_attachments".to_string(),
+                                        serde_json::json!(saved_slice),
+                                    );
+                                }
+                                val
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&json_items)?);
+                    } else {
+                        CliView::render_recall(&query, &results, lm.db_path(), false)?;
+                        if !all_saved.is_empty() {
+                            println!();
+                            for p in &all_saved {
+                                println!(
+                                    "  {} {} {}",
+                                    CliView::emerald_bold("✓ Saved verified attachment to"),
+                                    CliView::white_bold(&p.display().to_string()),
+                                    CliView::slate("(SHA-256 verified)")
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    CliView::render_recall(&query, &results, lm.db_path(), json)?;
+                }
             }
         }
 
         Commands::List {
             category,
+            media,
             status,
             as_of,
             date,
             limit,
             offset,
             page,
+            save_to,
+            path,
             json,
         } => {
             let lm = open_controller(effective_db, global)?;
             let cat = category;
             let st = Some(status);
             let as_of_dt = as_of;
+            let filter_attachments = media.is_some() || path || save_to.is_some();
 
-            let paginated = if let Some(p) = page {
+            let paginated = if filter_attachments {
+                let effective_offset = if let Some(p) = page {
+                    anyhow::ensure!(p > 0 && limit > 0, "Page and limit must be positive");
+                    (p - 1).saturating_mul(limit)
+                } else {
+                    offset
+                };
+                let mut all_page =
+                    lm.list_paginated_with_date(cat, st, as_of_dt, date, 100_000, 0)?;
+                let k = media.as_deref().unwrap_or("any").trim().to_lowercase();
+                all_page.items.retain(|m| {
+                    !m.attachments.is_empty()
+                        && (k == "any"
+                            || k == "all"
+                            || m.attachments.iter().any(|a| {
+                                a.media_kind.eq_ignore_ascii_case(&k)
+                                    || a.mime_type.to_lowercase().contains(&k)
+                            }))
+                });
+                let total = all_page.items.len();
+                let items: Vec<_> = all_page
+                    .items
+                    .into_iter()
+                    .skip(effective_offset)
+                    .take(limit)
+                    .collect();
+                let cur_page = effective_offset.checked_div(limit).unwrap_or(0) + 1;
+                let total_pages = if limit > 0 { total.div_ceil(limit) } else { 1 };
+                let has_more = effective_offset.saturating_add(items.len()) < total;
+                lightmem::models::memory::PaginatedMemories {
+                    items,
+                    total,
+                    limit,
+                    offset: effective_offset,
+                    page: cur_page,
+                    total_pages,
+                    has_more,
+                }
+            } else if let Some(p) = page {
                 lm.list_page_with_date(cat, st, as_of_dt, date, p, limit)?
             } else {
                 lm.list_paginated_with_date(cat, st, as_of_dt, date, limit, offset)?
             };
-            CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
+
+            let ids: Vec<String> = paginated.items.iter().map(|m| m.id.clone()).collect();
+            if path {
+                let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                } else {
+                    for p in all_paths {
+                        println!("{}", p.display());
+                    }
+                }
+            } else if let Some(ref target) = save_to {
+                let all_saved = lm.save_memories_attachments_to(&ids, target)?;
+                if json {
+                    let mut val = serde_json::to_value(&paginated)?;
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert(
+                            "saved_attachments".to_string(),
+                            serde_json::json!(&all_saved),
+                        );
+                        if let Some(items_arr) = obj.get_mut("items").and_then(|v| v.as_array_mut())
+                        {
+                            let mut offset_idx = 0usize;
+                            for (item_val, m) in items_arr.iter_mut().zip(paginated.items.iter()) {
+                                let count = m.attachments.len();
+                                let end = (offset_idx + count).min(all_saved.len());
+                                let saved_slice = &all_saved[offset_idx..end];
+                                offset_idx = end;
+                                if let Some(item_obj) = item_val.as_object_mut() {
+                                    item_obj.insert(
+                                        "saved_attachments".to_string(),
+                                        serde_json::json!(saved_slice),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    println!("{}", serde_json::to_string_pretty(&val)?);
+                } else {
+                    CliView::render_paginated_list(&paginated, lm.db_path(), false)?;
+                    if !all_saved.is_empty() {
+                        println!();
+                        for p in &all_saved {
+                            println!(
+                                "  {} {} {}",
+                                CliView::emerald_bold("✓ Saved verified attachment to"),
+                                CliView::white_bold(&p.display().to_string()),
+                                CliView::slate("(SHA-256 verified)")
+                            );
+                        }
+                    }
+                }
+            } else {
+                CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
+            }
         }
 
-        Commands::Inspect { term, json } => {
+        Commands::Inspect {
+            terms,
+            save_to,
+            path,
+            json,
+        } => {
             let lm = open_controller(effective_db, global)?;
-            if let Some(record) = lm.get(&term)? {
-                let links = lm.get_links(&record.id).unwrap_or_default();
-                CliView::render_inspect(&record, &links, lm.db_path(), json)?;
-            } else {
-                if json {
-                    println!("null");
-                } else {
-                    eprintln!("Memory not found: {}", term);
+            if path {
+                let mut ids = Vec::new();
+                for term in &terms {
+                    let Some(record) = lm.get(term)? else {
+                        if !json {
+                            eprintln!("Memory not found: {}", term);
+                        }
+                        std::process::exit(1);
+                    };
+                    ids.push(record.id);
                 }
-                std::process::exit(1);
+                let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
+                if all_paths.is_empty() {
+                    if json {
+                        println!("[]");
+                    } else {
+                        eprintln!("No attachments found for: {}", terms.join(", "));
+                    }
+                    std::process::exit(1);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                } else {
+                    for p in all_paths {
+                        println!("{}", p.display());
+                    }
+                }
+            } else if terms.len() == 1 {
+                let term = &terms[0];
+                if let Some(record) = lm.get(term)? {
+                    let links = lm.get_links(&record.id).unwrap_or_default();
+                    let saved_paths = if let Some(ref target) = save_to {
+                        lm.save_attachments_to(&record.id, target)?
+                    } else {
+                        Vec::new()
+                    };
+                    if json && save_to.is_some() {
+                        let obj = serde_json::json!({
+                            "memory": record,
+                            "links": links,
+                            "saved_attachments": saved_paths,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&obj)?);
+                    } else {
+                        CliView::render_inspect(&record, &links, lm.db_path(), json)?;
+                        if !saved_paths.is_empty() && !json {
+                            for p in &saved_paths {
+                                println!(
+                                    "  {} {} {}",
+                                    CliView::emerald_bold("✓ Saved verified attachment to"),
+                                    CliView::white_bold(&p.display().to_string()),
+                                    CliView::slate("(SHA-256 verified)")
+                                );
+                            }
+                            println!();
+                        }
+                    }
+                } else {
+                    if json {
+                        println!("null");
+                    } else {
+                        eprintln!("Memory not found: {}", term);
+                    }
+                    std::process::exit(1);
+                }
+            } else {
+                let mut records = Vec::new();
+                for term in &terms {
+                    let Some(record) = lm.get(term)? else {
+                        if !json {
+                            eprintln!("Memory not found: {}", term);
+                        }
+                        std::process::exit(1);
+                    };
+                    records.push(record);
+                }
+                let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
+                let all_saved = if let Some(ref target) = save_to {
+                    lm.save_memories_attachments_to(&ids, target)?
+                } else {
+                    Vec::new()
+                };
+                let mut offset_idx = 0usize;
+                let mut json_items = Vec::new();
+                for record in records {
+                    let links = lm.get_links(&record.id).unwrap_or_default();
+                    let saved_paths = if save_to.is_some() {
+                        let count = record.attachments.len();
+                        let end = (offset_idx + count).min(all_saved.len());
+                        let slice = all_saved[offset_idx..end].to_vec();
+                        offset_idx = end;
+                        slice
+                    } else {
+                        Vec::new()
+                    };
+                    if json {
+                        if save_to.is_some() {
+                            json_items.push(serde_json::json!({
+                                "memory": record,
+                                "links": links,
+                                "saved_attachments": saved_paths,
+                            }));
+                        } else {
+                            json_items.push(serde_json::json!({
+                                "memory": record,
+                                "links": links,
+                            }));
+                        }
+                    } else {
+                        CliView::render_inspect(&record, &links, lm.db_path(), false)?;
+                        if !saved_paths.is_empty() {
+                            for p in &saved_paths {
+                                println!(
+                                    "  {} {} {}",
+                                    CliView::emerald_bold("✓ Saved verified attachment to"),
+                                    CliView::white_bold(&p.display().to_string()),
+                                    CliView::slate("(SHA-256 verified)")
+                                );
+                            }
+                            println!();
+                        }
+                    }
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&json_items)?);
+                }
             }
         }
 

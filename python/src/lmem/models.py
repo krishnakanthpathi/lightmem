@@ -4,6 +4,40 @@ from typing import List, Optional, Any, Dict
 
 
 @dataclass
+class AttachmentMetadata:
+    id: str
+    memory_id: str
+    filename: str
+    mime_type: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    dimensions: Optional[str] = None
+    duration_secs: Optional[float] = None
+    created_at: str = ""
+
+    @property
+    def media_kind(self) -> str:
+        return self.media_type
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> AttachmentMetadata:
+        dur = data.get("duration_secs")
+        return cls(
+            id=data.get("id", ""),
+            memory_id=data.get("memory_id", ""),
+            filename=data.get("filename", ""),
+            mime_type=data.get("mime_type", "application/octet-stream"),
+            media_type=data.get("media_type") or data.get("media_kind", "binary"),
+            size_bytes=int(data.get("size_bytes", 0)),
+            sha256=data.get("sha256", ""),
+            dimensions=data.get("dimensions"),
+            duration_secs=float(dur) if dur is not None else None,
+            created_at=data.get("created_at", ""),
+        )
+
+
+@dataclass
 class Memory:
     id: str
     category: str
@@ -16,10 +50,14 @@ class Memory:
     created_at: str = ""
     updated_at: str = ""
     expired_at: Optional[str] = None
+    attachments: List[AttachmentMetadata] = field(default_factory=list)
+    saved_attachments: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Memory:
         mem_data = data.get("memory", data)
+        raw_atts = mem_data.get("attachments", [])
+        saved_atts = mem_data.get("saved_attachments", data.get("saved_attachments", []))
         return cls(
             id=mem_data.get("id", ""),
             category=mem_data.get("category", "fact"),
@@ -32,6 +70,8 @@ class Memory:
             created_at=mem_data.get("created_at", ""),
             updated_at=mem_data.get("updated_at", ""),
             expired_at=mem_data.get("expired_at"),
+            attachments=[AttachmentMetadata.from_dict(a) for a in raw_atts],
+            saved_attachments=[str(p) for p in saved_atts],
         )
 
 
@@ -39,12 +79,18 @@ class Memory:
 class MemoryInspection:
     memory: Memory
     links: List[Dict[str, Any]]
+    saved_attachments: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> MemoryInspection:
+        saved = data.get("saved_attachments", [])
+        mem = Memory.from_dict(data.get("memory", data))
+        if saved and not mem.saved_attachments:
+            mem.saved_attachments = [str(p) for p in saved]
         return cls(
-            memory=Memory.from_dict(data.get("memory", data)),
+            memory=mem,
             links=data.get("links", []),
+            saved_attachments=[str(p) for p in saved],
         )
 
 
@@ -54,15 +100,21 @@ class ScoredMemory:
     score: float
     vector_rank: Optional[int] = None
     bm25_rank: Optional[int] = None
+    saved_attachments: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ScoredMemory:
         mem_data = data.get("memory", data)
+        saved = data.get("saved_attachments", [])
+        mem = Memory.from_dict(mem_data)
+        if saved and not mem.saved_attachments:
+            mem.saved_attachments = [str(p) for p in saved]
         return cls(
-            memory=Memory.from_dict(mem_data),
+            memory=mem,
             score=float(data.get("score", 0.0)),
             vector_rank=data.get("vector_rank"),
             bm25_rank=data.get("bm25_rank"),
+            saved_attachments=[str(p) for p in saved],
         )
 
 
@@ -146,6 +198,7 @@ class PaginatedList(list):
         page: int = 1,
         total_pages: int = 1,
         has_more: bool = False,
+        saved_attachments: Optional[List[str]] = None,
     ):
         super().__init__(items)
         self.total = total
@@ -154,6 +207,7 @@ class PaginatedList(list):
         self.page = page
         self.total_pages = total_pages
         self.has_more = has_more
+        self.saved_attachments = saved_attachments or []
 
     @property
     def items(self) -> List[Memory]:

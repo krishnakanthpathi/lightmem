@@ -1,4 +1,4 @@
-use crate::models::{MemoryRecord, MemoryStatus, MemoryType};
+use crate::models::{encode_base64, MemoryRecord, MemoryStatus, MemoryType};
 use crate::storage::Storage;
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -8,9 +8,26 @@ use std::path::{Path, PathBuf};
 pub struct Exporter;
 
 impl Exporter {
-    /// Lossless versioned backup, including expired records and all metadata (vectors are rebuilt).
+    fn attach_blobs(storage: &Storage, memories: &mut [MemoryRecord]) {
+        for m in memories.iter_mut() {
+            if !m.attachments.is_empty() {
+                if let Ok(att_blobs) = storage.get_memory_attachments_data(&m.id) {
+                    m.attachments = att_blobs
+                        .into_iter()
+                        .map(|(mut meta, data)| {
+                            meta.data_base64 = Some(encode_base64(&data));
+                            meta
+                        })
+                        .collect();
+                }
+            }
+        }
+    }
+
+    /// Lossless versioned backup, including expired records, all metadata, and binary attachment BLOBs (vectors are rebuilt).
     pub fn export_json(storage: &Storage, output_path: &Path) -> Result<PathBuf> {
-        let (_, memories) = storage.index_snapshot()?;
+        let (_, mut memories) = storage.index_snapshot()?;
+        Self::attach_blobs(storage, &mut memories);
         let backup = serde_json::json!({"format": "lightmem-backup-v1", "memories": memories});
         if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -21,7 +38,8 @@ impl Exporter {
 
     /// Export memories to an Open Knowledge Format (OKF) markdown document
     pub fn export_okf(storage: &Storage, output_path: Option<&Path>) -> Result<PathBuf> {
-        let memories = storage.list_memories(None, Some(MemoryStatus::Active), None, 0)?;
+        let mut memories = storage.list_memories(None, Some(MemoryStatus::Active), None, 0)?;
+        Self::attach_blobs(storage, &mut memories);
 
         let mut grouped: BTreeMap<String, Vec<MemoryRecord>> = BTreeMap::new();
         for m in memories {
