@@ -227,6 +227,140 @@ impl ConnectService {
 
         Ok((is_new, msg))
     }
+
+    pub fn resolve_mcp_target(
+        platform_key: &str,
+        workspace: bool,
+    ) -> Option<(&'static str, PathBuf)> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let key_lower = platform_key.trim().to_lowercase();
+        match key_lower.as_str() {
+            "antigravity" | "gemini" | "agy" => {
+                let base = if workspace {
+                    PathBuf::from(".gemini/mcp_config.json")
+                } else {
+                    home.join(".gemini/config/mcp_config.json")
+                };
+                Some(("Antigravity", base))
+            }
+            "claude" | "anthropic" => {
+                let path = if cfg!(target_os = "macos") {
+                    home.join("Library/Application Support/Claude/claude_desktop_config.json")
+                } else if cfg!(target_os = "windows") {
+                    if let Ok(appdata) = std::env::var("APPDATA") {
+                        PathBuf::from(appdata).join("Claude/claude_desktop_config.json")
+                    } else {
+                        home.join("AppData/Roaming/Claude/claude_desktop_config.json")
+                    }
+                } else {
+                    home.join(".config/Claude/claude_desktop_config.json")
+                };
+                Some(("Claude Desktop", path))
+            }
+            "cursor" => {
+                let path = if workspace {
+                    PathBuf::from(".cursor/mcp.json")
+                } else {
+                    home.join(".cursor/mcp.json")
+                };
+                Some(("Cursor", path))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn connect_mcp(platform: Option<&str>, workspace: bool) -> Result<Vec<ConnectResult>> {
+        let mut results = Vec::new();
+        let target_keys: Vec<&str> = match platform {
+            Some("all") => vec!["antigravity", "claude", "cursor"],
+            Some(single) => {
+                if Self::resolve_mcp_target(single, workspace).is_some() {
+                    vec![single]
+                } else {
+                    anyhow::bail!(
+                        "Unknown MCP platform '{}'. Available platforms: antigravity, claude, cursor, all",
+                        single
+                    );
+                }
+            }
+            None => {
+                let mut detected = Vec::new();
+                if Self::is_platform_detected("antigravity") {
+                    detected.push("antigravity");
+                }
+                if Self::is_platform_detected("claude") {
+                    detected.push("claude");
+                }
+                if Self::is_platform_detected("cursor") {
+                    detected.push("cursor");
+                }
+                if detected.is_empty() {
+                    vec!["antigravity", "claude"]
+                } else {
+                    detected
+                }
+            }
+        };
+
+        for key in target_keys {
+            if let Some((name, target_file)) = Self::resolve_mcp_target(key, workspace) {
+                let (created, msg) = Self::write_mcp_config_file(&target_file)?;
+                results.push(ConnectResult {
+                    platform: name.to_string(),
+                    target_file,
+                    created,
+                    message: msg,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    fn write_mcp_config_file(target: &Path) -> Result<(bool, String)> {
+        let is_new = !target.exists();
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory {:?}", parent))?;
+        }
+
+        let mut root: serde_json::Value = if target.exists() {
+            let content = std::fs::read_to_string(target).unwrap_or_default();
+            serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+
+        if !root.is_object() {
+            root = serde_json::json!({});
+        }
+
+        let obj = root.as_object_mut().unwrap();
+        if !obj.contains_key("mcpServers") || !obj["mcpServers"].is_object() {
+            obj.insert("mcpServers".to_string(), serde_json::json!({}));
+        }
+
+        let mcp_servers = obj.get_mut("mcpServers").unwrap().as_object_mut().unwrap();
+        mcp_servers.insert(
+            "lightmem".to_string(),
+            serde_json::json!({
+                "command": "lmem",
+                "args": ["mcp"]
+            }),
+        );
+
+        let formatted = serde_json::to_string_pretty(&root)?;
+        std::fs::write(target, formatted)
+            .with_context(|| format!("Failed to write MCP config to {:?}", target))?;
+
+        let msg = if is_new {
+            "Created new MCP config with LightMem".to_string()
+        } else {
+            "Updated MCP config with LightMem".to_string()
+        };
+
+        Ok((is_new, msg))
+    }
 }
 
 #[cfg(test)]
@@ -241,7 +375,8 @@ mod tests {
         assert!(SKILL_MD_CONTENT.contains("lmem recall"));
         assert!(SKILL_MD_CONTENT.contains("lmem answer"));
         assert!(SKILL_MD_CONTENT.contains("lmem graph"));
-        assert!(SKILL_MD_CONTENT.contains("lmem autolink"));
+        assert!(SKILL_MD_CONTENT.contains("lmem link"));
+        assert!(SKILL_MD_CONTENT.contains("lmem related"));
     }
 
     #[test]

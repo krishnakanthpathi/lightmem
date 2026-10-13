@@ -1,14 +1,14 @@
 use crate::models::{
-    detect_memory_conflict_with_similarity, AttachmentInput, AttachmentMetadata, GraphSnapshot,
-    LightMemConfig, MemoryConflict, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
-    PaginatedMemories, RelatedMemory, ScoredMemory, StorageStats,
+    compute_sha256_hex, detect_memory_conflict_with_similarity, AttachmentInput,
+    AttachmentMetadata, GraphSnapshot, LightMemConfig, MemoryConflict, MemoryLink, MemoryRecord,
+    MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory, ScoredMemory, StorageStats,
 };
 use crate::repositories::Storage;
 use crate::services::{
-    cosine_similarity, AnswerResult, EmbeddingProvider, Exporter, HashEmbeddingProvider,
-    HybridSearchEngine, JsonMemoryImporter, MemoryImporter, ObservedCandidate, ObserverService,
-    OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider,
-    OnnxQaReranker, Reranker, Top1Reranker,
+    cosine_similarity, extract_imported_links, AnswerResult, EmbeddingProvider, Exporter,
+    HashEmbeddingProvider, HybridSearchEngine, JsonMemoryImporter, MemoryImporter,
+    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
+    OnnxEmbeddingProvider, OnnxQaReranker, Reranker, Top1Reranker,
 };
 
 use anyhow::{Context, Result};
@@ -382,7 +382,7 @@ impl LightMem {
                 if extract_llm {
                     "attachment_llm_extracted".to_string()
                 } else {
-                    "attachment".to_string()
+                    "attachment_metadata".to_string()
                 }
             });
 
@@ -577,6 +577,9 @@ impl LightMem {
         let _ = self
             .storage
             .copy_attachments_between_memories(&older.id, &merged.id)?;
+        let _ = self
+            .storage
+            .copy_links_between_memories(&older.id, &merged.id)?;
         let mut updated = self.storage.insert_indexed_batch(
             &[merged],
             self.embedder()?.as_ref(),
@@ -848,12 +851,55 @@ impl LightMem {
 
     /// Forget (soft-delete or hard delete) a memory
     pub fn forget(&self, id: &str, hard_delete: bool) -> Result<bool> {
-        self.storage.forget_memory(id, hard_delete)
+        let old_atts = if hard_delete {
+            self.storage
+                .get_memory(id)?
+                .map(|m| m.attachments)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let ok = self.storage.forget_memory(id, hard_delete)?;
+        if ok && hard_delete && !old_atts.is_empty() {
+            let att_dir = self.default_attachments_dir();
+            if att_dir.is_dir() {
+                for att in &old_atts {
+                    if !self
+                        .storage
+                        .is_attachment_sha_referenced(&att.sha256)
+                        .unwrap_or(true)
+                    {
+                        if let Ok(entries) = std::fs::read_dir(&att_dir) {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                if p.is_file() {
+                                    if let Ok(bytes) = std::fs::read(&p) {
+                                        if bytes.len() as u64 == att.size_bytes
+                                            && compute_sha256_hex(&bytes) == att.sha256
+                                        {
+                                            let _ = std::fs::remove_file(&p);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(ok)
     }
 
     /// Clear (soft-retire or permanently delete) all memories in the database
     pub fn clear_all(&self, hard_delete: bool) -> Result<usize> {
-        self.storage.clear_all(hard_delete)
+        let removed = self.storage.clear_all(hard_delete)?;
+        if hard_delete {
+            let att_dir = self.default_attachments_dir();
+            if att_dir.is_dir() {
+                let _ = std::fs::remove_dir_all(&att_dir);
+            }
+        }
+        Ok(removed)
     }
 
     /// Scan active memories, smart-merge duplicate content (union tags, max confidence, best title, earliest created_at), and delete redundant rows
@@ -931,6 +977,7 @@ impl LightMem {
         }
         let mut records = Vec::new();
         let mut attachments_by_mem = Vec::new();
+        let mut imported_links = Vec::new();
         let mut restore = false;
         for file in files {
             let raw = std::fs::read_to_string(&file)
@@ -944,6 +991,7 @@ impl LightMem {
             } else {
                 OkfMemoryImporter.parse(&raw)?
             };
+            imported_links.extend(extract_imported_links(&raw, json));
             restore |= candidates.iter().any(|c| c.status.is_some());
             for candidate in candidates {
                 anyhow::ensure!(
@@ -962,13 +1010,23 @@ impl LightMem {
         }
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        self.storage.insert_indexed_batch_with_attachments(
+        let stored_records = self.storage.insert_indexed_batch_with_attachments(
             &records,
             &attachments_by_mem,
             self.embedder()?.as_ref(),
             &self.embedding_identity,
             !restore,
         )?;
+        if !imported_links.is_empty() {
+            let _ = self.storage.restore_links(&imported_links);
+        }
+        for rec in &stored_records {
+            if rec.status == MemoryStatus::Active {
+                let _ = self
+                    .storage
+                    .auto_link_memory(&rec.id, &format!("{}\n{}", rec.title, rec.content));
+            }
+        }
         Ok(records.len())
     }
 
@@ -1153,7 +1211,11 @@ impl LightMem {
             &self.embedding_identity,
             true,
         )?;
-        Ok(stored_batch.remove(0))
+        let stored = stored_batch.remove(0);
+        let _ = self
+            .storage
+            .auto_link_memory(&stored.id, &format!("{}\n{}", stored.title, stored.content));
+        Ok(stored)
     }
 
     /// Batch save multiple observed candidate memories into SQLite and index them.
@@ -1173,6 +1235,11 @@ impl LightMem {
             &self.embedding_identity,
             true,
         )?;
+        for rec in &stored_batch {
+            let _ = self
+                .storage
+                .auto_link_memory(&rec.id, &format!("{}\n{}", rec.title, rec.content));
+        }
         Ok(stored_batch)
     }
 }

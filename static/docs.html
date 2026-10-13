@@ -156,7 +156,7 @@
   </header>
 
   <aside class="sidebar" aria-label="Documentation navigation">
-    <div class="side-meta"><span class="branch"><i></i> main</span><div class="commit">v0.2.9<br/>commit verified · source verified</div></div>
+    <div class="side-meta"><span class="branch"><i></i> main</span><div class="commit">v0.3.0<br/>commit verified · source verified</div></div>
     <div class="nav-group"><div class="nav-label">Start</div><nav class="side-nav">
       <a href="#overview">Overview</a><a href="#quickstart">Quick start</a><a href="#architecture">Architecture</a><a href="#data-model">Data model</a>
     </nav></div>
@@ -176,7 +176,7 @@
       <span class="kicker">Technical reference / source of truth</span>
       <h1>LightMem, from storage layer to agent interface.</h1>
       <p>Complete implementation-focused documentation for the <strong>main</strong> branch. Every behavior below is grounded in the latest release, not inferred from marketing copy.</p>
-      <div class="hero-badges"><span class="badge red">v0.2.9</span><span class="badge">Rust 2021</span><span class="badge">SQLite WAL + FTS5</span><span class="badge">Local ONNX</span><span class="badge">Python ≥ 3.8</span><span class="badge">MIT</span></div>
+      <div class="hero-badges"><span class="badge red">v0.3.0</span><span class="badge">Rust 2021</span><span class="badge">SQLite WAL + FTS5</span><span class="badge">Local ONNX</span><span class="badge">Python ≥ 3.8</span><span class="badge">MIT</span></div>
       <div class="notice"><strong>Branch scope:</strong> Canonical <code>main</code> branch; this page documents the official release. The source contains pure-Rust ONNX QA, Ollama, and Top‑1 rerankers.</div>
     </section>
 
@@ -419,14 +419,14 @@ print(answer.answer, answer.confidence, paths)</pre></div>
     </section>
 
     <section class="doc-section searchable" id="distribution" data-search="distribution packaging wheels pypi release platforms mac linux windows installer cargo version license">
-      <div class="section-title"><span class="section-index">13</span><div><h2>Distribution and platform support</h2><p class="lead">Version 0.2.9 ships as a Rust release binary and a Python package that bundles native executables into platform-tagged wheels.</p></div></div>
+      <div class="section-title"><span class="section-index">13</span><div><h2>Distribution and platform support</h2><p class="lead">Version 0.3.0 ships as a Rust release binary and a Python package that bundles native executables into platform-tagged wheels.</p></div></div>
       <div class="table-scroll"><table><thead><tr><th>Channel</th><th>Targets</th><th>Mechanism</th></tr></thead><tbody>
         <tr><td>GitHub release</td><td>macOS arm64<br/>Linux x86_64 glibc<br/>Windows x86_64 MSVC<br/>Android aarch64 (Termux)</td><td>Tag <code>v*</code> or manual workflow; release archives with generated notes.</td></tr>
         <tr><td>PyPI wheels</td><td>macOS 11 arm64<br/>manylinux2014 x86_64<br/>Windows amd64</td><td>Compile <code>lmem</code>, bundle under <code>lmem/bin</code>, retag Hatch wheel.</td></tr>
         <tr><td>Source distribution</td><td>Python ≥3.8</td><td>No bundled native binary; launcher resolves or downloads one.</td></tr>
         <tr><td>Cargo</td><td>Rust toolchains supported by dependencies</td><td><code>cargo install --path . --force</code> or installer source fallback.</td></tr>
       </tbody></table></div>
-      <div class="facts"><div class="fact"><div class="metric">VERSION</div><b>0.2.9</b><p>Consistent across Cargo, Python metadata/runtime, installers, and downloader.</p></div><div class="fact"><div class="metric">LICENSE</div><b>MIT</b><p>Copyright 2026 Pathi Krishna Kanth. Cargo package metadata itself lacks a license field.</p></div></div>
+      <div class="facts"><div class="fact"><div class="metric">VERSION</div><b>0.3.0</b><p>Consistent across Cargo, Python metadata/runtime, installers, and downloader.</p></div><div class="fact"><div class="metric">LICENSE</div><b>MIT</b><p>Copyright 2026 Pathi Krishna Kanth. Cargo package metadata itself lacks a license field.</p></div></div>
       <div class="warning"><strong>Coverage limitation:</strong> installers and Python downloader construct macOS x86_64 and Linux arm64 release URLs, but the current release workflow does not build those artifacts; affected systems rely on source fallback or another available release.</div>
     </section>
 
@@ -468,12 +468,12 @@ print(answer.answer, answer.confidence, paths)</pre></div>
         <div class="caveat"><div><b>Performance tables disagree</b><p>Root README and Python/SKILL documents report materially different reranker latency. Treat those values as environment/cold-start dependent until one benchmark methodology is published.</p></div></div>
         <div class="caveat"><div><b>Python tests are not in current CI workflows</b><p>The SDK tests pass in local audit but CI/PyPI workflows currently execute Rust gates and packaging without running <code>python/tests/test_sdk.py</code>.</p></div></div>
         <div class="caveat"><div><b>Manylinux wheel is retagged, not repaired</b><p>The Linux wheel is compiled on ubuntu-latest and its tag is rewritten without an auditwheel/manylinux compatibility pass.</p></div></div>
-        <div class="caveat"><div><b>Manual release fallback tag is stale</b><p>The release workflow manual path defaults to v0.2.0 while source/package version is v0.2.9.</p></div></div>
+        <div class="caveat"><div><b>Manual release fallback tag is stale</b><p>The release workflow manual path defaults to v0.2.0 while source/package version is v0.3.0.</p></div></div>
       </div>
     </section>
 
     <div class="empty" id="emptyState"><strong>No documentation matched.</strong>Try a command, model name, environment variable, or subsystem.</div>
-    <footer class="footer"><span>LightMem Documentation · v0.2.9 main</span><span>Generated from repository source · 2026</span></footer>
+    <footer class="footer"><span>LightMem Documentation · v0.3.0 main</span><span>Generated from repository source · 2026</span></footer>
   </div></main>
 
   <script>

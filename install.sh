@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.2.9"
+VERSION="v0.3.0"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Support --uninstall / -u flag
@@ -472,5 +472,30 @@ printf "  \033[1;32m◈\033[0m Configured shell completions (Tab + Arrow keys)..
 # 7. Auto-deploy LightMem skill to detected AI agent platforms
 "$INSTALL_DIR/lmem" connect >/dev/null 2>&1 || true
 printf "  \033[1;32m◈\033[0m Deployed LightMem skill to detected AI agents... \033[1;32m100%%\033[0m\n"
+
+# 8. Interactive Model Context Protocol (MCP) Setup (Optional)
+select_mcp_interactive() {
+    printf "\n  \033[1;31m❖\033[0m \033[1;37mConfigure Model Context Protocol (MCP) for AI Clients?\033[0m\n" >/dev/tty
+    printf "    \033[38;2;148;163;184mEnables Claude Desktop, Cursor, and Antigravity to use LightMem tools natively.\033[0m\n" >/dev/tty
+    printf "  \033[1;31m▸\033[0m Configure MCP in detected client configs? \033[38;2;148;163;184m[y/N, default=N]\033[0m: " >/dev/tty
+    read -r MCP_CHOICE </dev/tty || MCP_CHOICE="N"
+    printf "\n" >/dev/tty
+}
+
+MCP_CHOICE="${LIGHTMEM_MCP:-}"
+if [ -z "$MCP_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    select_mcp_interactive || MCP_CHOICE="N"
+fi
+[ -z "$MCP_CHOICE" ] && MCP_CHOICE="N"
+
+case "$MCP_CHOICE" in
+    y|Y|yes|YES)
+        "$INSTALL_DIR/lmem" connect --mcp >/dev/null 2>&1 || true
+        printf "  \033[1;32m◈\033[0m Configured LightMem MCP in detected client configs... \033[1;32m100%%\033[0m\n"
+        ;;
+    *)
+        printf "  \033[38;2;113;113;122m↷ Skipped MCP configuration (run 'lmem connect --mcp' anytime to enable)\033[0m\n"
+        ;;
+esac
 
 printf "\n  \033[1;31m❖\033[0m \033[1;37mLightMem installation complete!\033[0m Run: \033[1;31mlmem\033[0m\n\n"

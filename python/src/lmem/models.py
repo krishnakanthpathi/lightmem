@@ -171,14 +171,36 @@ class StorageStats:
     embedding_model: Optional[str] = None
     reranker: Optional[str] = None
 
+    @property
+    def total_vectors(self) -> int:
+        return self.vector_count
+
+    @property
+    def by_category(self) -> List[ Any ]:
+        return list(self.categories.items())
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StorageStats:
+        vec_cnt = data.get("vector_count")
+        if vec_cnt is None:
+            vec_cnt = data.get("total_vectors", 0)
+        raw_cats = data.get("categories")
+        if isinstance(raw_cats, dict):
+            cats = {str(k): int(v) for k, v in raw_cats.items()}
+        elif isinstance(data.get("by_category"), list):
+            cats = {
+                str(item[0]): int(item[1])
+                for item in data["by_category"]
+                if isinstance(item, (list, tuple)) and len(item) >= 2
+            }
+        else:
+            cats = {}
         return cls(
             total_memories=int(data.get("total_memories", 0)),
             active_memories=int(data.get("active_memories", 0)),
             expired_memories=int(data.get("expired_memories", 0)),
-            vector_count=int(data.get("vector_count", 0)),
-            categories=data.get("categories", {}),
+            vector_count=int(vec_cnt),
+            categories=cats,
             storage_size_bytes=int(data.get("storage_size_bytes", 0)),
             db_path=data.get("db_path", ""),
             backend=data.get("backend"),

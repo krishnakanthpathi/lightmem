@@ -70,7 +70,7 @@ enum Commands {
         #[arg(short = 's', long)]
         supersede: bool,
 
-        /// Origin or verification level (explicit_statement, validated, observed, corrected, inferred, imported, attachment)
+        /// Origin or verification level (explicit_statement, validated, observed, corrected, inferred, imported, attachment_metadata, attachment_llm_extracted)
         #[arg(short = 'p', long)]
         provenance: Option<String>,
 
@@ -160,7 +160,7 @@ enum Commands {
         offset: usize,
 
         /// Page number (1-indexed; overrides --offset if specified)
-        #[arg(short = 'p', long)]
+        #[arg(long)]
         page: Option<usize>,
 
         /// Export verified attachment binary file(s) of listed memories to a target directory or file path
@@ -168,7 +168,7 @@ enum Commands {
         save_to: Option<PathBuf>,
 
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
-        #[arg(long = "path", visible_alias = "paths")]
+        #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
 
         /// Output paginated result as JSON (includes total, limit, offset, page, total_pages, has_more, items)
@@ -526,7 +526,15 @@ enum Commands {
         /// Output results as JSON
         #[arg(long)]
         json: bool,
+
+        /// Configure Model Context Protocol (MCP) server across detected client configs (Claude, Cursor, Antigravity)
+        #[arg(long)]
+        mcp: bool,
     },
+
+    #[cfg(feature = "mcp")]
+    /// Run the native Model Context Protocol (MCP) stdio JSON-RPC 2.0 server
+    Mcp,
 
     /// Generate shell completion scripts (zsh, bash, fish) with interactive tab/arrow navigation
     Completions {
@@ -582,6 +590,14 @@ fn remove_db_files(db_path: &Path) {
     if let Some(s) = db_path.to_str() {
         let _ = std::fs::remove_file(format!("{}-wal", s));
         let _ = std::fs::remove_file(format!("{}-shm", s));
+    }
+    let att_dir = db_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments");
+    if att_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&att_dir);
     }
 }
 
@@ -1733,8 +1749,15 @@ fn main() -> Result<()> {
             path,
             list,
             json,
+            mcp,
         } => {
-            if list {
+            if mcp {
+                let results = lightmem::ConnectService::connect_mcp(
+                    platform.as_deref(),
+                    workspace,
+                )?;
+                CliView::render_connect(&results, json)?;
+            } else if list {
                 let platforms = lightmem::ConnectService::list_platforms(workspace);
                 CliView::render_platforms_list(&platforms, workspace, json)?;
             } else {
@@ -1745,6 +1768,12 @@ fn main() -> Result<()> {
                 )?;
                 CliView::render_connect(&results, json)?;
             }
+        }
+
+        #[cfg(feature = "mcp")]
+        Commands::Mcp => {
+            let server = lightmem::McpServer::new(global, effective_db.map(Path::to_path_buf));
+            server.run_stdio()?;
         }
 
         Commands::Completions { shell } => {
@@ -1763,6 +1792,8 @@ fn main() -> Result<()> {
                         "corrected",
                         "inferred",
                         "imported",
+                        "attachment_metadata",
+                        "attachment_llm_extracted",
                     ]))
                 })
             });

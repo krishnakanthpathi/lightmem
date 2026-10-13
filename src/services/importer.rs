@@ -1,6 +1,6 @@
 use crate::models::{
-    compute_sha256_hex, decode_base64, AttachmentInput, AttachmentMetadata, MemoryRecord,
-    MemoryStatus, MemoryType,
+    compute_sha256_hex, decode_base64, AttachmentInput, AttachmentMetadata, MemoryLink,
+    MemoryRecord, MemoryStatus, MemoryType,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -555,6 +555,52 @@ impl MemoryImporter for JsonMemoryImporter {
     fn parse(&self, raw: &str) -> Result<Vec<ImportCandidate>> {
         self.parse_flexible(raw)
     }
+}
+
+/// Extract knowledge graph links embedded in a JSON backup, MCP graph export, or OKF v2 markdown bundle
+pub fn extract_imported_links(raw: &str, is_json: bool) -> Vec<MemoryLink> {
+    let mut out = Vec::new();
+    if is_json {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Some(links_val) = val.get("links") {
+                if let Ok(links) = serde_json::from_value::<Vec<MemoryLink>>(links_val.clone()) {
+                    out.extend(links);
+                }
+            }
+            if let Some(relations) = val.get("relations").and_then(|v| v.as_array()) {
+                for rel in relations {
+                    if let (Some(from), Some(to)) = (
+                        get_str_field(rel, &["from", "source", "source_id"]),
+                        get_str_field(rel, &["to", "target", "target_id"]),
+                    ) {
+                        let relation = get_str_field(rel, &["relationType", "relation_type", "relation"])
+                            .unwrap_or_else(|| "relates_to".to_string());
+                        let weight = get_str_field(rel, &["weight"])
+                            .and_then(|s| s.parse::<f32>().ok())
+                            .unwrap_or(1.0);
+                        out.push(MemoryLink {
+                            source_id: from,
+                            target_id: to,
+                            relation,
+                            weight,
+                            created_at: Utc::now(),
+                        });
+                    }
+                }
+            }
+        }
+    } else {
+        for line in raw.lines() {
+            if let Some(rest) = line.trim().strip_prefix("<!-- lightmem-links ") {
+                if let Some(json_str) = rest.strip_suffix(" -->") {
+                    if let Ok(links) = serde_json::from_str::<Vec<MemoryLink>>(json_str) {
+                        out.extend(links);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Ingests OKF (Open Knowledge Format) markdown bundles, Memanto `memory.md` exports, and YAML-frontmatter `.md` files

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lmem"
-version = "0.2.9"
-description = "Ultra-Fast Local AI Agent Persistent Memory Engine with Neural Extractive QA & Knowledge Graph"
+version = "0.3.0"
+description = "Ultra-Fast Local AI Agent Persistent Memory Engine with Neural Extractive QA, Multimodal BLOB Vault & Knowledge Graph"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -18,6 +18,8 @@ keywords = [
     "ai",
     "llm",
     "rag",
+    "multimodal",
+    "attachments",
     "knowledge-graph",
     "extractive-qa",
     "sqlite",

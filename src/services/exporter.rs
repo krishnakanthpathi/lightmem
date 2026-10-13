@@ -24,11 +24,16 @@ impl Exporter {
         }
     }
 
-    /// Lossless versioned backup, including expired records, all metadata, and binary attachment BLOBs (vectors are rebuilt).
+    /// Lossless versioned backup, including expired records, all metadata, knowledge graph links, and binary attachment BLOBs (vectors are rebuilt).
     pub fn export_json(storage: &Storage, output_path: &Path) -> Result<PathBuf> {
         let (_, mut memories) = storage.index_snapshot()?;
+        let links = storage.all_links().unwrap_or_default();
         Self::attach_blobs(storage, &mut memories);
-        let backup = serde_json::json!({"format": "lightmem-backup-v1", "memories": memories});
+        let backup = serde_json::json!({
+            "format": "lightmem-backup-v1",
+            "memories": memories,
+            "links": links
+        });
         if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
@@ -39,6 +44,14 @@ impl Exporter {
     /// Export memories to an Open Knowledge Format (OKF) markdown document
     pub fn export_okf(storage: &Storage, output_path: Option<&Path>) -> Result<PathBuf> {
         let mut memories = storage.list_memories(None, Some(MemoryStatus::Active), None, 0)?;
+        let active_ids: std::collections::HashSet<String> =
+            memories.iter().map(|m| m.id.clone()).collect();
+        let links: Vec<_> = storage
+            .all_links()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| active_ids.contains(&l.source_id) && active_ids.contains(&l.target_id))
+            .collect();
         Self::attach_blobs(storage, &mut memories);
 
         let mut grouped: BTreeMap<String, Vec<MemoryRecord>> = BTreeMap::new();
@@ -102,6 +115,15 @@ impl Exporter {
                     md.push_str("---\n\n");
                 }
             }
+        }
+
+        if !links.is_empty() {
+            md.push_str(&format!(
+                "<!-- lightmem-links {} -->\n",
+                serde_json::to_string(&links)?
+                    .replace('<', "\\u003c")
+                    .replace('>', "\\u003e")
+            ));
         }
 
         let target = if let Some(p) = output_path {

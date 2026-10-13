@@ -26,5 +26,7 @@ pub use services::{
     OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker,
     Reranker, Top1Reranker,
 };
+#[cfg(feature = "mcp")]
+pub use services::McpServer;
 
 pub use views::CliView;

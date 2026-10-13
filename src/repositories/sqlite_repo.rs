@@ -765,6 +765,102 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Copy directional graph links from `from_memory_id` to `to_memory_id` (excluding self-loops)
+    pub fn copy_links_between_memories(
+        &self,
+        from_memory_id: &str,
+        to_memory_id: &str,
+    ) -> Result<usize> {
+        if from_memory_id == to_memory_id {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let out_rows = conn.execute(
+            "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+             SELECT ?1, target_id, relation, weight, created_at
+             FROM memory_links
+             WHERE source_id = ?2 AND target_id != ?1",
+            params![to_memory_id, from_memory_id],
+        )?;
+        let in_rows = conn.execute(
+            "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+             SELECT source_id, ?1, relation, weight, created_at
+             FROM memory_links
+             WHERE target_id = ?2 AND source_id != ?1",
+            params![to_memory_id, from_memory_id],
+        )?;
+        Ok(out_rows + in_rows)
+    }
+
+    /// Retrieve all knowledge graph links in the database for backup/export
+    pub fn all_links(&self) -> Result<Vec<MemoryLink>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT source_id, target_id, relation, weight, created_at
+             FROM memory_links
+             ORDER BY created_at ASC, source_id ASC, target_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let created_at_str: String = r.get(4)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            Ok(MemoryLink {
+                source_id: r.get(0)?,
+                target_id: r.get(1)?,
+                relation: r.get(2)?,
+                weight: r.get::<_, f64>(3)? as f32,
+                created_at,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Restore a batch of knowledge graph links (resolving IDs/titles if needed and skipping missing endpoints)
+    pub fn restore_links(&self, links: &[MemoryLink]) -> Result<usize> {
+        if links.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut count = 0;
+        for link in links {
+            let src = resolve_id_or_title(&tx, &link.source_id)?;
+            let dst = resolve_id_or_title(&tx, &link.target_id)?;
+            if let (Some(s), Some(d)) = (src, dst) {
+                if s != d {
+                    let rel = if link.relation.trim().is_empty() {
+                        "relates_to"
+                    } else {
+                        link.relation.trim()
+                    };
+                    let w = link.weight.clamp(0.01, 10.0);
+                    count += tx.execute(
+                        "INSERT INTO memory_links (source_id, target_id, relation, weight, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(source_id, target_id, relation) DO UPDATE SET weight=?4",
+                        params![s, d, rel, w, link.created_at.to_rfc3339()],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Check whether any attachment row in the database still references a given SHA-256 digest
+    pub fn is_attachment_sha_referenced(&self, sha256: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_attachments WHERE sha256 = ?1)",
+                [sha256],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        Ok(exists)
+    }
+
     pub fn add_link(
         &self,
         source_term: &str,
@@ -2041,12 +2137,26 @@ where
     }
     for duplicate in duplicates {
         if duplicate.id != merged.id {
-            // Copy any unique attachment blobs from duplicate to merged before deleting duplicate
+            // Copy any unique attachment blobs and graph links from duplicate to merged before deleting duplicate
             tx.execute(
                 "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
                  SELECT lower(hex(randomblob(16))), ?1, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at
                  FROM memory_attachments
                  WHERE memory_id = ?2",
+                params![merged.id, duplicate.id],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+                 SELECT ?1, target_id, relation, weight, created_at
+                 FROM memory_links
+                 WHERE source_id = ?2 AND target_id != ?1",
+                params![merged.id, duplicate.id],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+                 SELECT source_id, ?1, relation, weight, created_at
+                 FROM memory_links
+                 WHERE target_id = ?2 AND source_id != ?1",
                 params![merged.id, duplicate.id],
             )?;
             tx.execute("DELETE FROM memories WHERE id=?1", [duplicate.id])?;

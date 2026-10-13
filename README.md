@@ -128,9 +128,10 @@ lmem recall "who is kk" --date 2026-09-21
 lmem recall "postgres port" --as-of 2026-09-21
 
 # Knowledge graph linking, multi-hop traversal & visualization
+lmem remember "API Gateway routes to [[Postgres Port]]"
 lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0
+lmem recall "gateway" --multi-hop
 lmem related <ID> --hops 2
-lmem autolink --min-similarity 0.75
 lmem graph --focus <ID> --hops 2
 
 # Extractive Question Answering (uses local ONNX minilm-squad2 by default)
@@ -161,6 +162,11 @@ lmem export --json -o backup.json
 
 # Deploy LightMem skill to AI agents (Antigravity, Codex, Hermes, Cursor, Claude, Universal Agents)
 lmem connect all
+lmem connect --mcp                        # Auto-configure Model Context Protocol (MCP) in Claude Desktop, Cursor, & Antigravity
+lmem connect claude --mcp                 # Configure MCP in Claude Desktop only
+
+# Native Model Context Protocol (MCP) Server (JSON-RPC 2.0 stdio, on-demand, 0% idle CPU)
+lmem mcp
 
 # Vault storage statistics & category distribution
 lmem stats

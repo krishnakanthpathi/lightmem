@@ -1099,7 +1099,39 @@ impl CliView {
 
     pub fn render_stats(stats: &StorageStats, db_path: &Path, json: bool) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(stats)?);
+            let mut val = serde_json::to_value(stats)?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "vector_count".into(),
+                    serde_json::json!(stats.total_vectors),
+                );
+                let categories_map: serde_json::Map<String, serde_json::Value> = stats
+                    .by_category
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
+                    .collect();
+                obj.insert(
+                    "categories".into(),
+                    serde_json::Value::Object(categories_map),
+                );
+                let size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+                obj.insert("storage_size_bytes".into(), serde_json::json!(size_bytes));
+                obj.insert(
+                    "db_path".into(),
+                    serde_json::Value::String(db_path.to_string_lossy().to_string()),
+                );
+                if let Ok(cfg) = LightMemConfig::try_load() {
+                    obj.insert("backend".into(), serde_json::Value::String(cfg.backend.clone()));
+                    let emb_model = if cfg.backend == "onnx" {
+                        cfg.onnx_model.clone().unwrap_or_else(|| "bge-small".to_string())
+                    } else {
+                        cfg.embedding_model.clone()
+                    };
+                    obj.insert("embedding_model".into(), serde_json::Value::String(emb_model));
+                    obj.insert("reranker".into(), serde_json::Value::String(cfg.reranker));
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&val)?);
             return Ok(());
         }
 

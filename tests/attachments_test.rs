@@ -2,6 +2,7 @@ use lightmem::{compute_sha256_hex, LightMem, LightMemConfig, MemoryType};
 use rusqlite::Connection;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn make_fake_png(width: u32, height: u32) -> Vec<u8> {
@@ -710,5 +711,176 @@ fn test_qa_regressions_attachments_webp_dedup_export_conflict_and_cli() {
         sup_json["attachments"].as_array().unwrap().len(),
         1,
         "Superseded survivor must retain older memory's attachment"
+    );
+
+    // 7. Verify default metadata-only attachment provenance is 'attachment_metadata'
+    assert_eq!(sup_json["provenance"], "explicit_statement");
+    let prov_out = Command::new(bin)
+        .env("HOME", &home_dir)
+        .args([
+            "--db",
+            conflict_db.to_str().unwrap(),
+            "remember",
+            "-f",
+            png1_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let prov_json: serde_json::Value = serde_json::from_slice(&prov_out.stdout).unwrap();
+    assert_eq!(prov_json["provenance"], "attachment_metadata");
+
+    // 8. Verify `lmem list -p` short flag works as --path (consistent with recall -p / inspect -p)
+    let list_p_out = Command::new(bin)
+        .env("HOME", &home_dir)
+        .args(["--db", conflict_db.to_str().unwrap(), "list", "-p"])
+        .output()
+        .unwrap();
+    assert!(list_p_out.status.success());
+    let list_p_str = std::str::from_utf8(&list_p_out.stdout).unwrap().trim();
+    assert!(
+        Path::new(list_p_str.lines().next().unwrap()).exists(),
+        "lmem list -p must materialize and print verified attachment path"
+    );
+
+    // 9. Verify hard forget removes unreferenced materialized attachment from <db_parent>/attachments
+    let clean_db = dir.path().join("clean_sub").join("clean.db");
+    let rem_clean = Command::new(bin)
+        .env("HOME", &home_dir)
+        .args([
+            "--db",
+            clean_db.to_str().unwrap(),
+            "remember",
+            "Temp wallpaper",
+            "-f",
+            png2_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    let clean_id = serde_json::from_slice::<serde_json::Value>(&rem_clean.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mat_clean = Command::new(bin)
+        .env("HOME", &home_dir)
+        .args([
+            "--db",
+            clean_db.to_str().unwrap(),
+            "inspect",
+            &clean_id,
+            "-p",
+        ])
+        .output()
+        .unwrap();
+    let mat_clean_path = PathBuf::from(std::str::from_utf8(&mat_clean.stdout).unwrap().trim());
+    assert!(mat_clean_path.exists());
+    let fgt_clean = Command::new(bin)
+        .env("HOME", &home_dir)
+        .args([
+            "--db",
+            clean_db.to_str().unwrap(),
+            "forget",
+            &clean_id,
+            "--hard",
+        ])
+        .output()
+        .unwrap();
+    assert!(fgt_clean.status.success());
+    assert!(
+        !mat_clean_path.exists(),
+        "Hard forget must clean up unreferenced materialized file in default attachments dir"
+    );
+
+    // 10. Verify graph links survive conflict merge, deduplication, JSON/OKF export+import, and observe wikilinks
+    let graph_db = dir.path().join("graph_consistency.db");
+    let lm_g = LightMem::open_at(&graph_db, hash_config()).unwrap();
+    let anchor = lm_g
+        .remember(
+            "PostgreSQL primary database runs on port 5432",
+            Some(MemoryType::Fact),
+            Some("PostgreSQL DB".to_string()),
+            vec!["db".to_string()],
+            Some(0.95),
+        )
+        .unwrap();
+    let old_svc = lm_g
+        .remember(
+            "Auth service runs on port 4000",
+            Some(MemoryType::Fact),
+            Some("Auth Service".to_string()),
+            vec!["auth".to_string(), "port".to_string()],
+            Some(0.9),
+        )
+        .unwrap();
+    lm_g.link(&old_svc.id, &anchor.id, Some("depends_on"), Some(1.0))
+        .unwrap();
+
+    // Supersede old_svc and verify survivor keeps link to anchor
+    let (new_svc, sup_conflicts) = lm_g
+        .remember_with_options(
+            "Auth service runs on port 4001",
+            Some(MemoryType::Fact),
+            Some("Auth Service".to_string()),
+            vec!["auth".to_string(), "port".to_string()],
+            Some(0.95),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+    assert!(
+        !sup_conflicts.is_empty(),
+        "Expected conflict detection between port 4000 and port 4001"
+    );
+    let links_after_sup = lm_g.get_links(&new_svc.id).unwrap();
+    assert!(
+        links_after_sup
+            .iter()
+            .any(|l| l.target_id == anchor.id && l.relation == "depends_on"),
+        "Conflict merge must preserve graph links from older memory"
+    );
+
+    // Observe with [[wikilinks]] and verify auto-linking
+    let obs_cand = lightmem::ObservedCandidate::new(
+        "Gateway Route",
+        "API Gateway routes traffic to [[PostgreSQL DB]]",
+        MemoryType::Relationship,
+        vec!["gateway".to_string()],
+        0.92,
+    );
+    let obs_rec = lm_g.save_observed_candidate(&obs_cand).unwrap();
+    let obs_links = lm_g.get_links(&obs_rec.id).unwrap();
+    assert!(
+        obs_links.iter().any(|l| l.target_id == anchor.id),
+        "save_observed_candidate must auto-link [[wikilinks]]"
+    );
+
+    // Export JSON + Import into fresh DB and verify graph links are preserved
+    let g_backup = dir.path().join("g_backup.json");
+    lm_g.export_json(&g_backup).unwrap();
+    let g_restored_db = dir.path().join("g_restored.db");
+    let lm_restored = LightMem::open_at(&g_restored_db, hash_config()).unwrap();
+    lm_restored.import_file(&g_backup).unwrap();
+    let restored_links = lm_restored.get_links(&new_svc.id).unwrap();
+    assert!(
+        restored_links
+            .iter()
+            .any(|l| l.target_id == anchor.id && l.relation == "depends_on"),
+        "JSON export/import must preserve explicit memory_links"
+    );
+
+    // Export OKF + Import into fresh DB and verify graph links are preserved
+    let g_okf = dir.path().join("g_backup.md");
+    lm_g.export_okf(Some(&g_okf)).unwrap();
+    let g_okf_db = dir.path().join("g_okf_restored.db");
+    let lm_okf = LightMem::open_at(&g_okf_db, hash_config()).unwrap();
+    lm_okf.import_file(&g_okf).unwrap();
+    let okf_links = lm_okf.get_links(&new_svc.id).unwrap();
+    assert!(
+        okf_links
+            .iter()
+            .any(|l| l.target_id == anchor.id && l.relation == "depends_on"),
+        "OKF v2 export/import must preserve explicit memory_links"
     );
 }

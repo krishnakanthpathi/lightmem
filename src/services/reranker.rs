@@ -212,7 +212,7 @@ impl OnnxQaReranker {
             .map(|m| m.len() > 1_000)
             .unwrap_or(false);
         if !tokenizer_valid {
-            println!("◈ Downloading ONNX QA tokenizer ({})...", preset.slug);
+            eprintln!("◈ Downloading ONNX QA tokenizer ({})...", preset.slug);
             download_file_atomic(preset.tokenizer_url, &tokenizer_path)?;
         }
         let model_valid = model_path
@@ -220,7 +220,7 @@ impl OnnxQaReranker {
             .map(|m| m.len() > 1_000_000)
             .unwrap_or(false);
         if !model_valid {
-            println!("◈ Downloading ONNX QA model ({})...", preset.slug);
+            eprintln!("◈ Downloading ONNX QA model ({})...", preset.slug);
             download_file_atomic(preset.model_url, &model_path)?;
         }
 

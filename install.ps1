@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
 $Branch = "main"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.2.9" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.3.0" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Target = "x86_64-pc-windows-msvc"
 $ArchiveUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/lmem-$Target.zip"
@@ -117,6 +117,17 @@ $ErrorActionPreference = "Continue"
 & $ExePath connect | Out-Null
 $ErrorActionPreference = $PrevErrPref
 Write-Host "  ✓ Deployed LightMem skill to detected AI agents" -ForegroundColor Green
+
+# Optional MCP Server configuration
+$McpPrompt = Read-Host "  ▸ Configure Model Context Protocol (MCP) in AI clients (Claude Desktop, Cursor, Antigravity)? [y/N, default: N]"
+if ($McpPrompt -match "^[yY]") {
+    $ErrorActionPreference = "Continue"
+    & $ExePath connect --mcp | Out-Null
+    $ErrorActionPreference = $PrevErrPref
+    Write-Host "  ✓ Configured LightMem MCP in detected client configs" -ForegroundColor Green
+} else {
+    Write-Host "  ↷ Skipped MCP configuration (run 'lmem connect --mcp' anytime to enable)" -ForegroundColor DarkGray
+}
 
 Write-Host ""
 Write-Host "  ✦ LightMem ($ReleaseTag) is ready! Run: lmem" -ForegroundColor Green

@@ -76,13 +76,11 @@ lmem recall "postgres port" -t fact --min-similarity 0.5 --json
 lmem recall "new architectural idea" --min-similarity 0.70 -l 50 --json # Count & find semantically similar existing memories
 lmem recall "service gateway" --multi-hop          # Expands recall hits with 1-hop graph neighbors
 
-# 3. Knowledge Graph, Linking & Multi-Hop Traversal
-lmem autolink                                      # Auto-link vault via title mentions, shared tags, and vector similarity
-lmem autolink --min-similarity 0.75 --json         # Configure cosine similarity threshold (creates weighted relates_to edges)
+# 3. Knowledge Graph, Intentional Linking & Multi-Hop Traversal
 lmem remember "API Gateway routes to [[PostgreSQL DB]]" # Auto-links via [[wikilinks]]
 lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0  # Explicit directional relation
 lmem unlink <SRC_ID> <DST_ID>                       # Remove link
-lmem related <MEMORY_ID> -n 1 --json               # List & count direct 1-hop similar/connected memories
+lmem related <MEMORY_ID> -n 1 --json               # List & count direct 1-hop connected memories
 lmem related <MEMORY_ID> --hops 2                  # Multi-hop graph traversal with hop-decay scoring
 lmem graph                                         # ASCII/Unicode network tree in terminal
 lmem graph --focus <MEMORY_ID> --hops 2            # Neighborhood subgraph view
@@ -132,14 +130,17 @@ lmem config --download all                         # Pre-cache ONNX embedding + 
 lmem answer "test question" -r minilm-squad2       # Per-query local ONNX override
 lmem answer "test question" -r ollama:gemma4:31b-cloud # Per-query Ollama override
 
-# 10. AI Agent Platform Connection (dumps LightMem SKILL.md folder)
+# 10. AI Agent Platform Connection & Model Context Protocol (MCP)
 lmem connect                                       # Auto-detect all installed agent platforms and deploy skill
+lmem connect --mcp                                 # Auto-configure Model Context Protocol (MCP) in Claude, Cursor, Antigravity
+lmem connect claude --mcp                          # Configure MCP in Claude Desktop only
 lmem connect antigravity                           # Deploy to Google Antigravity (~/.gemini/config/skills/lightmem/SKILL.md)
 lmem connect codex                                 # Deploy to OpenAI Codex (~/.codex/skills/lightmem/SKILL.md)
 lmem connect hermes                                # Deploy to Hermes Agent (~/.hermes/skills/productivity/lightmem/SKILL.md)
 lmem connect cursor                                # Deploy to Cursor (.cursor/rules/lightmem.mdc)
 lmem connect all                                   # Deploy to all supported agent platforms
 lmem connect --list                                # Inspect detected agent platforms on the system
+lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
 ```
 
 ---
@@ -206,20 +207,14 @@ LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ index
 4. **Interactive Force-Directed Visualizer & Topology (`lmem graph`)**:
    - Terminal network tree or JSON export.
    - CLI flags: `lmem graph` (terminal Unicode tree), `lmem graph --focus <id> --hops 2` (neighborhood subgraph), `lmem graph --json` (export nodes and edges array).
-5. **Graph Similarity Search & Counting Similar Memories**:
+5. **Graph Similarity Search & Counting Connected Memories**:
    - **Pre-Insert / Query Similarity Count**:
-     Use `lmem recall "<query_or_text>" --min-similarity <0.1-1.0> -l <N> --json` to inspect and count existing memories with high cosine similarity before deciding whether to store, link, or supersede.
-   - **Vault-Wide Semantic Auto-Linking (`lmem autolink`)**:
-     LightMem scans all active memories across three similarity dimensions:
-     1. *Semantic Vector Cosine Similarity*: Memory pairs with $\text{sim} \ge \text{min\_similarity}$ (default `0.75`) automatically receive bidirectional `relates_to` edges with edge weight equal to their cosine similarity ($0.10 - 1.00$).
-     2. *Title Mentions*: Content mentioning another active memory's exact non-generic title receives a `mentions` edge ($w = 1.0$).
-     3. *Shared Topics*: Memories sharing $\ge 2$ non-generic tags receive bidirectional `shared_topic` edges ($w = 0.8$).
-     Output reports: `New links created: X | Total nodes: Y | Total edges: Z`.
-   - **Counting Connected Similar Neighbors for an Existing Node**:
-     - `lmem related <ID> -n 1 --json` outputs all direct 1-hop connected memories, their relation types (`relates_to`, `mentions`, `shared_topic`, custom), and similarity weights.
+     Use `lmem recall "<query_or_text>" --min-similarity <0.1-1.0> -l <N> --json` to inspect and count existing memories with high cosine similarity before deciding whether to store, link via `[[wikilinks]]` / `lmem link`, or supersede.
+   - **Counting Connected Neighbors for an Existing Node**:
+     - `lmem related <ID> -n 1 --json` outputs all direct 1-hop connected memories, their relation types (`depends_on`, `references`, `implements`, etc.), and edge weights.
      - `lmem graph --focus <ID> -n 1 --json` returns the exact subgraph `{ nodes: [...], edges: [...] }` to inspect neighborhood cluster size.
    - **Graph-Expanded Recall (`--multi-hop`)**:
-     `lmem recall "<query>" --multi-hop` executes hybrid search and automatically traverses graph edges to pull in similar connected neighbors.
+     `lmem recall "<query>" --multi-hop` executes hybrid search and automatically traverses graph edges to pull in connected neighbors.
 
 ---
 
@@ -229,7 +224,7 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 
 1. **Isolated Immutable BLOB Vault**:
    - Raw bytes are stored in `memory_attachments` (never bloating the `memories` table), protected by a `BEFORE UPDATE` SQLite trigger (`trg_attachments_immutable`) that blocks in-place tampering, verified by SHA-256 on every read/export, and enforced with `0600` owner-only file permissions.
-   - Deleting a memory via `lmem forget <ID> --hard` cascades and purges its attachment BLOBs automatically.
+   - Deleting a memory via `lmem forget <ID> --hard` cascades and purges its attachment BLOBs and materialized cache files automatically.
 2. **Metadata-First by Default, Opt-In Single-Model LLM Extraction (`--extract` / `-e`)**:
    - By default (`lmem remember "caption" -f <file>`), no LLM or vision model is called: LightMem parses magic bytes, MIME type, media kind (`image`, `audio`, `video`, `document`, `code`, `archive`, `binary`), image/MP4 dimensions (`WxH`), WAV/MP4 duration (`s`), byte size, and SHA-256, and indexes all metadata into both FTS5 BM25 and the vector embedding.
    - Only when `--extract` (`-e`) is explicitly passed (`lmem remember -f <file> --extract`), LightMem sends the attachment (or an automatically extracted JPEG keyframe for `.mp4`/`.mov`/`.mkv` videos via `ffmpeg`) to the single configured main LLM (`ollama:<model>` / OpenAI `/v1/chat/completions`) and appends the extracted description to the memory.
@@ -248,7 +243,7 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 | `lmem inspect <id...> --paths` | Raw absolute path(s) of all attachments for one or more memory IDs | When resolving memory ID(s) directly to verified file paths on disk |
 | `lmem recall "<query>" --min-similarity 0.70` | Top-$K$ memories filtered by minimum cosine similarity threshold | When checking how many existing memories are semantically similar to a new query or statement |
 | `lmem recall "<query>" --multi-hop` | Recall results expanded with 1-hop connected graph neighbors | When context requires knowing dependencies and adjacent architectural relationships |
-| `lmem autolink [--min-similarity 0.75]` | Summary of newly discovered graph edges, total nodes, and edges | When auto-connecting the vault by embedding similarity, title mentions, and shared tags |
+| `lmem link <src> <dst> -r <rel>` | Directional link confirmation between two memories | When explicitly connecting related concepts, dependencies, or causal chains |
 | `lmem related "<id>" -n 1` | Direct 1-hop connected neighbors, relation types, and similarity weights | When counting or inspecting memories directly linked/similar to a specific node |
 | `lmem related "<id>" --hops 2` | Breadth-first connected memories along relation paths with hop-decay scores | When investigating causal chains, dependencies, or downstream impacts of a specific memory |
 | `lmem graph --focus <id> -n 1` | Focused network tree or JSON subgraph for a node's immediate neighborhood | When inspecting node/edge cluster counts and topology around a concept |
