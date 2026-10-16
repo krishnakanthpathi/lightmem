@@ -1,8 +1,59 @@
 # ❖ LightMem (`lmem`)
 
-**Local agent memory engine and CLI, written in Rust with SQLite, ONNX Runtime (`fastembed` + SQuAD-2.0 Extractive QA), and swappable Ollama models.**
+**Ultra-fast, local AI agent persistent memory engine and native Model Context Protocol (MCP) server, written in Rust with SQLite WAL, ONNX Runtime (`fastembed` + SQuAD-2.0 Extractive QA), and swappable Ollama models.**
 
-LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and **multi-format JSON / JSONL / OKF / MCP Knowledge Graph / Memanto Markdown ingestion**.
+[![GitHub Release](https://img.shields.io/github/v/release/krishnakanthpathi/lightmem?color=crimson&logo=github)](https://github.com/krishnakanthpathi/lightmem/releases)
+[![PyPI version](https://img.shields.io/pypi/v/lmem.svg?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/lmem/)
+[![Crates.io](https://img.shields.io/crates/v/lightmem.svg?color=orange&logo=rust)](https://crates.io/crates/lightmem)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/krishnakanthpathi/lightmem)
+[![Privacy](https://img.shields.io/badge/privacy-100%25%20local-success.svg)](https://github.com/krishnakanthpathi/lightmem)
+
+LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and a **zero-overhead Model Context Protocol (MCP) server** for AI agent IDEs.
+
+---
+
+## ◈ Table of Contents
+
+- [Why LightMem?](#-why-lightmem)
+- [Performance & Comparison](#-performance--comparison)
+- [Quick Install](#-quick-install-macos-linux--windows)
+- [Python SDK Quickstart](#-python-sdk-quickstart)
+- [Model Context Protocol (MCP) Server](#-model-context-protocol-mcp-server)
+- [Core CLI Reference](#-core-cli-reference)
+- [Switching Rerankers & Embedding Models](#-switching-rerankers--embedding-models)
+- [Nearest-Neighbor Conflict Resolution](#-nearest-neighbor-conflict--duplicate-resolution-lmem-conflicts)
+- [Temporal Filtering](#-temporal-filtering---as-of-vs---date)
+- [Clean Uninstall](#-clean-uninstall)
+- [Development & Testing](#-development--testing)
+- [License](#-license)
+
+---
+
+## ⚡ Why LightMem?
+
+- **Sub-10ms Startup & Sub-Millisecond Retrieval**: Pure compiled Rust binary with direct SQLite C-bindings and memory-mapped indices.
+- **Zero Background Daemons**: 0% idle CPU and 0% idle RAM. Activates only when invoked by shell, Python SDK, or MCP JSON-RPC.
+- **100% Private & Offline**: No telemetry, no external database dependencies, and no cloud sync required.
+- **Neural Extractive QA**: Extracts pinpoint answers (under 20 tokens) directly from stored memories instead of flooding LLM context windows.
+- **Multimodal BLOB Vault**: Secure `0600` file storage for images, diagrams, audio, and 4K video with SHA-256 integrity checks and instant path materialization (`--path`).
+- **Graph Multi-Hop Traversal**: Connect memories with Obsidian-style `[[wikilinks]]` or explicit directional edges and navigate relationship trees.
+- **Smart Conflict Merging**: Nearest-neighbor cosine similarity and token overlap scanner that finds and synthesizes conflicting facts into updated records.
+
+---
+
+## 📊 Performance & Comparison
+
+| Feature / Metric | **LightMem (`lmem`)** | **Traditional Cloud / Daemon Memory** | **Standard Vector Databases** |
+| :--- | :--- | :--- | :--- |
+| **Runtime Language** | **Compiled Rust** | Python / Node.js | Python / Go / Java |
+| **Idle Memory (RAM)** | **0 MB** (no persistent daemon) | 250 MB – 1.2 GB | 500 MB – 2 GB |
+| **CLI Startup Latency** | **~8 ms** | 450 ms – 1.8 s | N/A (requires daemon) |
+| **Exact Fact Extraction** | **Local ONNX QA (`minilm-squad2`)** | LLM Re-prompting | None (returns raw chunks) |
+| **Multimodal Storage** | **Built-in SHA-256 BLOB Vault** | Separate S3 / MinIO | Separate Object Store |
+| **Knowledge Graph** | **`[[wikilinks]]` + Multi-hop BFS** | Often None or Extra Graph DB | Vector-only |
+| **Protocol Support** | **Native MCP stdio + Python SDK + CLI** | Custom REST API | Custom REST / gRPC |
+| **Privacy / Cloud Sync** | **100% Local (Air-gapped ready)** | Cloud-bound / External Server | Self-hosted or Cloud |
 
 ---
 
@@ -10,7 +61,7 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 
 ### Python (Precompiled Native Wheel — Instant sub-10ms startup)
 ```bash
-pip install lmem
+pip install -U lmem
 ```
 
 ### Universal Shell Installer (macOS & Linux)
@@ -29,6 +80,288 @@ git clone https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
 ```
+
+---
+
+## 🐍 Python SDK Quickstart
+
+Install the official Python package with precompiled native wheels:
+
+```bash
+pip install -U lmem
+```
+
+Use `LightMem` directly in your AI agent pipelines with zero external dependencies:
+
+```python
+from lmem import LightMem
+
+# Initialize vault (defaults to ~/.lightmem/memories.db)
+lm = LightMem()
+
+# 1. Store a memory (category auto-infers across 14 types if omitted)
+memory = lm.remember(
+    "PostgreSQL primary runs on port 5432 with WAL archiving enabled",
+    category="fact",
+    title="PostgreSQL Primary Config",
+    tags=["postgres", "database", "production"],
+    confidence=0.95,
+)
+print(f"Stored memory ID: {memory.id}")
+
+# 2. Store Multimodal Attachments (images, audio, video, PDFs in 0600 BLOB vault)
+diagram = lm.remember(
+    "API Gateway routes to [[PostgreSQL Primary Config]]",
+    files=["./architecture-diagram.png"],
+    tags=["architecture", "gateway"],
+    extract=False,  # Set True to extract visual summary via configured LLM
+)
+
+# 3. Hybrid Recall (FTS5 BM25 + Vector Cosine RRF + Graph Multi-Hop)
+results = lm.recall("postgres port", limit=5, multi_hop=True)
+for r in results:
+    print(f"[{r.score:.2f}] {r.memory.title}: {r.memory.content}")
+
+# Materialize verified attachment file paths directly on disk
+image_paths = lm.recall("gateway", media="image", limit=1, path=True)
+
+# 4. Neural Extractive QA (extracts exact fact span via local ONNX SQuAD-2.0 or Ollama)
+answer = lm.answer("what port does postgresql use?")
+print(f"Extracted Answer: {answer.answer}")      # e.g. "5432"
+print(f"Confidence: {answer.confidence:.2f}")
+
+# 5. Conversational Observation & Candidate Extraction
+candidates = lm.observe(
+    "User: We switched Redis to port 6380.\nAssistant: Updated!",
+    dry_run=True,
+)
+for c in candidates:
+    print(f"Candidate: [{c.category}] {c.title}: {c.content}")
+
+# 6. Intentional Knowledge Graph Linking & Multi-Hop Traversal
+lm.link(diagram.id, memory.id, relation="depends_on", weight=1.0)
+related = lm.related(memory.id, hops=2)
+
+# 7. Conflict Detection & Telemetry
+conflicts = lm.conflicts(min_similarity=0.80)
+stats = lm.stats()
+print(f"Vault: {stats.active_memories} memories, {stats.vector_count} indexed vectors.")
+```
+
+---
+
+## 🔌 Model Context Protocol (MCP) Server
+
+LightMem features a native, zero-dependency **Model Context Protocol (MCP)** stdio server (JSON-RPC 2.0). It operates on-demand without background daemons and consumes 0% idle CPU.
+
+### 1. One-Click Auto-Configuration
+Configure MCP automatically across Claude Desktop, Cursor, and Antigravity:
+
+```bash
+lmem connect --mcp          # Auto-detects and writes config for all installed agent IDEs
+lmem connect claude --mcp   # Configure Claude Desktop only
+lmem connect cursor --mcp   # Configure Cursor only
+```
+
+### 2. Manual Configuration (`mcpServers`)
+Add the following snippet to your editor's MCP configuration file (e.g., `claude_desktop_config.json` or `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "lightmem": {
+      "command": "lmem",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### 3. Exposed MCP Tools
+
+| Tool | Description |
+| :--- | :--- |
+| `remember` | Store persistent facts, preferences, decisions, or architectural notes with tags and optional files. |
+| `recall` | Hybrid semantic + keyword retrieval with optional category, media kind, and multi-hop expansion. |
+| `answer` | Neural Extractive QA: returns precise answer spans from vault memories. |
+| `link` | Connect two memories intentionally in the knowledge graph with custom relations and weights. |
+| `graph_related`| Multi-hop relationship traversal around a given memory node. |
+| `conflicts` | Detect and review contradictory or duplicate memories. |
+| `forget` | Deactivate or archive outdated memories safely. |
+| `stats` | Inspect total memory count, vector distribution, and vault disk footprint. |
+
+---
+
+## ✦ Core CLI Reference
+
+### 1. Remembering & Multimodal BLOB Storage
+```bash
+# Display Crimson Cloud HUD & live vault telemetry
+lmem
+
+# Store a memory (category is auto-inferred across 14 types if -t is omitted)
+lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
+
+# Store with explicit category and confidence
+lmem remember "Use AES-GCM-256 for vault encryption" -t decision --confidence 0.98
+
+# Store files, images, audio, or 4K videos in the isolated SQLite BLOB vault (0600 owner-only, SHA-256 verified)
+lmem remember "Kubernetes ingress diagram" -f ./ingress.png             # Metadata-only default (dimensions, MIME, SHA-256)
+lmem remember "Live wallpaper" -f ./wallpaper.mp4 --extract              # Opt-in: extract visual/file summary via configured LLM
+
+# Export verified binary attachment(s) back to disk
+lmem inspect <ID> --save-to ./exported/
+
+# Materialize & print ONLY absolute file path(s) on disk (one per line)
+lmem inspect <ID1> <ID2> --paths
+```
+
+### 2. Conversational Observation & Ingestion (`lmem observe`)
+```bash
+# Ingest dialogue or chat transcripts, extract atomic candidate memories, and review/confirm interactively
+lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive confirmation [y/n/a/q]
+
+# Pipe conversation transcripts via stdin or file
+cat chat_transcript.txt | lmem observe
+lmem observe conversation.txt --yes                   # Auto-confirm and save all extracted candidates
+lmem observe conversation.txt --dry-run               # Preview extracted candidates without saving
+lmem observe conversation.txt --dry-run --json        # Export candidates as JSON for agent inspection
+lmem observe conversation.txt -r ollama:qwen2.5:3b    # LLM-assisted semantic extraction (aliases: observed, extract)
+```
+
+### 3. Hybrid Recall & Search
+```bash
+# Hybrid semantic + BM25 keyword recall
+lmem recall "postgres port" --limit 5
+
+# Recall with media filter (image | audio | video | document | any)
+lmem recall "architecture diagram" -m image
+lmem recall "sharingan" -m video -l 1 --path          # Materialize & print ONLY verified file path(s)
+
+# Point-in-time and single-day temporal recall
+lmem recall "who is kk" --date 2026-09-21              # Created or updated on that exact UTC date
+lmem recall "postgres port" --as-of 2026-09-21         # Active state on or before that timestamp
+```
+
+### 4. Neural Extractive QA (`lmem answer`)
+```bash
+# Local ONNX extractive QA (minilm-squad2 by default, sub-600ms latency, zero API costs)
+lmem answer "what is my pan card no"
+lmem answer "what is my father name" -r tinyroberta-squad2
+
+# Swappable Ollama cloud or local LLM reranker
+lmem answer "who is kk" -r ollama:gemma4:31b-cloud
+lmem answer "summarize sprint goals" -r ollama:qwen2.5:3b
+
+# Instant zero-overhead rank-1 vector answer
+lmem answer "what port does postgres use?" -r top1
+```
+
+### 5. Knowledge Graph & Multi-Hop Traversal
+```bash
+# Obsidian-style wikilinks automatically link related memories
+lmem remember "API Gateway routes to [[Postgres Port]]"
+
+# Explicit directional knowledge graph edge with weight
+lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0
+
+# Recall with 1-hop neighbor expansion
+lmem recall "gateway" --multi-hop
+
+# Multi-hop breadth-first graph traversal with hop-decay scoring
+lmem related <ID> --hops 2
+
+# Render ASCII/Unicode graph visualization centered on a node
+lmem graph --focus <ID> --hops 2
+```
+
+### 6. Conflict Detection & Deduplication (`lmem conflicts`)
+```bash
+# Detect contradictory or duplicate memories via vector similarity + token overlap
+lmem conflicts                        # Interactive step-by-step [y]es / [n]o / [a]ll / [q]uit
+lmem conflicts --yes                  # Force-merge all detected conflicts automatically
+lmem conflicts --min-similarity 0.85  # Adjust similarity threshold
+lmem conflicts --yes -r ollama:qwen2.5:3b # Synthesize merged memory using LLM
+```
+
+### 7. Import, Export & Agent Skills
+```bash
+# Import structured JSON, JSONL, OKF directory, MCP Graph, or Memanto memory.md
+lmem import memories.json
+lmem import ~/.memanto/on-prem/exports/memory.md
+
+# Lossless backup export (Open Knowledge Format v2 or JSON)
+lmem export --okf -o backup.okf
+lmem export --json -o backup.json
+
+# Deploy LightMem skill to AI agent frameworks
+lmem connect all                      # Antigravity, Codex, Hermes, Cursor, Claude
+lmem connect --mcp                    # Auto-configure MCP in Claude Desktop, Cursor, Antigravity
+
+# Vault telemetry & disk storage statistics
+lmem stats
+```
+
+---
+
+## ⇄ Switching Rerankers & Embedding Models
+
+LightMem supports three swappable reranker backends for `lmem answer`, `lmem recall --precision`, and `lmem conflicts`:
+
+| Reranker | Command to Set Default | Per-Query Flag (`-r`) | Peak RAM | Typical Latency |
+| :--- | :--- | :--- | :--- | :--- |
+| **`minilm-squad2`** *(default)* | `lmem config --reranker minilm-squad2` | `-r minilm-squad2` | ~358 MB | ~600 ms |
+| **`tinyroberta-squad2`** | `lmem config --reranker tinyroberta-squad2` | `-r tinyroberta-squad2` | ~669 MB | ~1.2 s |
+| **`ollama:<model>`** *(local or cloud)* | `lmem config --reranker ollama:qwen2.5:3b` | `-r ollama:gemma4:31b-cloud` | ~207 MB (`lmem`) | ~1–11 s |
+| **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
+
+```bash
+# 1. Interactive Setup Wizard (prompted automatically during install)
+lmem setup                       # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
+lmem setup --preset ollama-local # One-shot preset configuration
+
+# 2. Inspect active configuration and presets
+lmem config                      # Formatted tree of settings
+lmem config --json               # Machine-readable JSON output
+
+# 3. Preset: 100% Offline Local Mode (ONNX bge-small + minilm-squad2 QA)
+lmem config --preset local
+lmem config --download all       # Pre-cache ONNX models locally for offline operation
+
+# 4. Preset: Local Embeddings + Ollama Cloud Model Reranker
+lmem config --preset ollama-cloud
+
+# 5. Preset: Local Embeddings + Ollama Localhost LLM Reranker
+lmem config --preset ollama-local
+
+# 6. Custom Ollama Host or Model
+lmem config --url http://localhost:11434 --reranker ollama:qwen2.5:3b
+
+# 7. Dynamic Per-Query Override (without changing persistent config)
+lmem answer "what is my api token" -r minilm-squad2
+lmem answer "summarize sprint goals" -r ollama:gemma4:31b-cloud
+```
+
+---
+
+## ⇄ Nearest-Neighbor Conflict & Duplicate Resolution (`lmem conflicts`)
+
+Instead of brittle hardcoded slot regexes, `lmem conflicts` scans active memories by finding each memory's **closest vector neighbor** (`cosine_similarity`) combined with **meaningful token overlap**:
+
+1. **Exact & Near-Duplicate Detection**: Memories with high vector similarity and token overlap are paired and sorted by similarity descending.
+2. **Timestamp Transparency**: Every pair displays exact UTC creation timestamps (`[OLDER · YYYY-MM-DD HH:MM:SS UTC]` vs `[NEWER · YYYY-MM-DD HH:MM:SS UTC]`) alongside similarity `%` and overlap `%`.
+3. **Interactive or Batch Resolution**:
+   - In an interactive terminal, `lmem conflicts` prompts on each pair:
+     `Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit`
+   - Passing `--yes` (`-y`, alias `--resolve`) merges all pairs automatically.
+4. **Reranker-Guided Merging**: When merging, the active reranker (`OnnxQaReranker`, `OllamaReranker`, or `Top1Reranker`) synthesizes the merged record: prioritizing the `NEWER` memory's updated facts while preserving non-conflicting clauses from `OLDER`, unioning tags case-insensitively, keeping max confidence, re-embedding the survivor, and expiring the `OLDER` record.
+
+---
+
+## ◷ Temporal Filtering (`--as-of` vs `--date`)
+
+- **`--as-of <YYYY-MM-DD|RFC3339>`**: Cumulative point-in-time snapshot — returns memories created on or before that timestamp that were still active at that moment.
+- **`--date <YYYY-MM-DD>`**: Single-day filter — returns memories created or updated on that exact UTC calendar day (supported in `lmem recall`, `lmem list`, and `lmem answer`).
 
 ---
 
@@ -52,191 +385,7 @@ lmem uninstall --purge-data
 
 ---
 
-## ◫ Architecture (MVC / MVP)
-
-```text
-lightmem/
-├── Cargo.toml
-├── SKILL.md                        # Embedded AI agent skill reference (deployed via lmem connect)
-├── install.sh                      # Universal macOS / Linux installer
-├── src/
-│   ├── lib.rs                      # Library root & public re-exports
-│   ├── main.rs                     # CLI router (Clap -> Controller -> View)
-│   ├── models/                     # Domain Entities & Value Objects
-│   │   ├── mod.rs
-│   │   ├── memory.rs               # 14-category MemoryType::infer, MemoryRecord, AttachmentMetadata, SHA-256/MIME/MP4/WAV parsers
-│   │   ├── config.rs               # LightMemConfig & reranker/embedding identities
-│   │   └── stats.rs                # StorageStats telemetry model
-│   ├── repositories/               # Data Access Layer
-│   │   ├── mod.rs
-│   │   └── sqlite_repo.rs          # SQLite WAL + FTS5 + vector blobs + immutable memory_attachments BLOB vault
-│   ├── services/                   # Business & Domain Engines
-│   │   ├── mod.rs
-│   │   ├── embeddings.rs           # FastEmbed ONNX (bge-small, minilm, nomic), Ollama, & Hash
-│   │   ├── search.rs               # Hybrid RRF (BM25 + Cosine) + acronym/lexical boosts
-│   │   ├── reranker.rs             # OnnxQaReranker (SQuAD-2.0), OllamaReranker, & Top1Reranker
-│   │   ├── observer.rs             # Conversational extraction & opt-in single-LLM attachment extraction
-│   │   ├── connect.rs              # Cross-platform AI agent skill deployer (Antigravity, Codex, Hermes, Cursor, Claude)
-│   │   ├── importer.rs             # JSON / JSONL / OKF / MCP Graph / Memanto Markdown importer
-│   │   └── exporter.rs             # Open Knowledge Format (OKF v2) & JSON backup exporter
-│   ├── controllers/                # Application Orchestration
-│   │   ├── mod.rs
-│   │   └── memory_controller.rs    # MemoryController (LightMem) with OnceLock lazy ONNX init
-│   └── views/                      # Presentation Layer
-│       ├── mod.rs
-│       └── cli_view.rs             # 24-bit TrueColor Crimson Cloud HUD, vector icons, & JSON output
-└── tests/
-    ├── integration_test.rs
-    ├── attachments_test.rs
-    ├── integrity_and_migration.rs
-    ├── cli_migration.rs
-    └── review_regressions.rs
-```
-
----
-
-## ✦ Core CLI Usage
-
-```bash
-# Display Crimson Cloud HUD & live vault telemetry
-lmem
-
-# Store a memory (category is auto-inferred across 14 types if -t is omitted)
-lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
-
-# Store files, images, audio, or 4K videos in the isolated SQLite BLOB vault (0600 owner-only, SHA-256 verified)
-lmem remember "Kubernetes ingress diagram" -f ./ingress.png             # Metadata-only default (MIME, dimensions, duration, SHA-256)
-lmem remember "Itachi 4K live wallpaper" -f ./itachi-4k.mp4 --extract   # Opt-in: extract visual/file summary via configured LLM
-lmem inspect <ID> --save-to ./exported/                                 # Export verified binary attachment(s) back to disk
-lmem inspect <ID1> <ID2> --paths                                        # Materialize & print ONLY absolute file path(s) (one per line)
-
-# Ingest dialogue, chat transcripts, or notes, extract atomic candidate memories, and review/confirm before saving
-lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive confirmation [y/n/a/q]
-lmem observe conversation.txt --yes                   # Auto-confirm and save all extracted memories
-lmem observe conversation.txt --dry-run               # Preview extracted candidates without saving
-lmem observe conversation.txt --dry-run --json        # Export candidates as JSON for agent inspection
-lmem observe conversation.txt -r ollama:qwen2.5:3b    # LLM-assisted semantic extraction (aliases: observed, extract)
-
-# Store a memory and automatically merge/supersede any conflicting older memory
-lmem remember "PostgreSQL 16 runs on port 6432" --title "Postgres Port" --supersede
-
-# Hybrid semantic + keyword recall (with optional --media, --path, --as-of, or single-day --date filter)
-lmem recall "postgres port" --limit 5
-lmem recall "sharingan crimson eyes" -m video         # Filter recall by attachment media kind (image|audio|video|document|any)
-lmem recall "sharingan" -m video -l 1 --path          # Materialize & print ONLY the verified file path(s) on disk
-lmem recall "who is kk" --date 2026-09-21
-lmem recall "postgres port" --as-of 2026-09-21
-
-# Knowledge graph linking, multi-hop traversal & visualization
-lmem remember "API Gateway routes to [[Postgres Port]]"
-lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0
-lmem recall "gateway" --multi-hop
-lmem related <ID> --hops 2
-lmem graph --focus <ID> --hops 2
-
-# Extractive Question Answering (uses local ONNX minilm-squad2 by default)
-lmem answer "what is my pan card no"
-lmem answer "what is my father name" -r tinyroberta-squad2
-lmem answer "who is kk" -r ollama:gemma4:31b-cloud
-lmem answer "what port does postgres use?" -r top1
-
-# Paginated chronological list (supports --media, --paths, --date, and --as-of)
-lmem list --page 1 --limit 20
-lmem list -m video --paths                            # Print all stored video attachment paths
-lmem list --date 2026-09-21
-lmem list --offset 20 --limit 20 -t decision
-
-# Detect and merge duplicate or conflicting memories using vector similarity + reranker
-lmem conflicts                        # Interactive step-by-step [y]es / [n]o / [a]ll / [q]uit
-lmem conflicts --yes                  # Force-merge all detected conflicts
-lmem conflicts --yes -r ollama:qwen2.5:3b
-lmem conflicts --min-similarity 0.85
-
-# Import structured or unstructured JSON, JSONL, OKF directory, MCP Graph, or Memanto memory.md
-lmem import memories.json
-lmem import ~/.memanto/on-prem/exports/memory.md
-
-# Export to Open Knowledge Format (OKF v2) or lossless JSON backup
-lmem export --okf -o backup.okf
-lmem export --json -o backup.json
-
-# Deploy LightMem skill to AI agents (Antigravity, Codex, Hermes, Cursor, Claude, Universal Agents)
-lmem connect all
-lmem connect --mcp                        # Auto-configure Model Context Protocol (MCP) in Claude Desktop, Cursor, & Antigravity
-lmem connect claude --mcp                 # Configure MCP in Claude Desktop only
-
-# Native Model Context Protocol (MCP) Server (JSON-RPC 2.0 stdio, on-demand, 0% idle CPU)
-lmem mcp
-
-# Vault storage statistics & category distribution
-lmem stats
-```
-
----
-
-## ⇄ Switching Rerankers & Embedding Models
-
-LightMem supports three swappable reranker backends for `lmem answer`, `lmem recall --precision`, and `lmem conflicts`:
-
-| Reranker | Command to Set Default | Per-Query Flag (`-r`) | Peak RAM | Typical Latency |
-| :--- | :--- | :--- | :--- | :--- |
-| **`minilm-squad2`** *(default)* | `lmem config --reranker minilm-squad2` | `-r minilm-squad2` | ~358 MB | ~600 ms |
-| **`tinyroberta-squad2`** | `lmem config --reranker tinyroberta-squad2` | `-r tinyroberta-squad2` | ~669 MB | ~1.2 s |
-| **`ollama:<model>`** *(local or cloud)* | `lmem config --reranker ollama:qwen2.5:3b` | `-r ollama:gemma4:31b-cloud` | ~207 MB (`lmem`) | ~1–11 s |
-| **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
-
-```bash
-# 1. Interactive Setup Wizard (prompted automatically during install)
-lmem setup                    # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
-lmem setup --preset ollama-local # One-shot preset configuration
-
-# 2. Inspect complete active configuration and available presets
-lmem config                   # Formatted tree of settings and setup presets
-lmem config --json            # Full machine-readable JSON configuration
-
-# 3. Preset 1: 100% Offline Local Mode (ONNX bge-small + minilm-squad2 QA)
-lmem config --preset local
-lmem config --download all    # Pre-cache ONNX models locally for offline operation
-
-# 3. Preset 2: Local Embeddings + Ollama Cloud Model Reranker (gemma4:31b-cloud)
-lmem config --preset ollama-cloud
-
-# 4. Preset 3: Local Embeddings + Ollama Localhost LLM Reranker (auto-detected / qwen2.5:1.5b)
-lmem config --preset ollama-local
-
-# 5. Custom URL or Fine-Grained Configuration
-lmem config --url http://localhost:11434 --reranker ollama:qwen2.5:3b
-
-# 6. Interchanging on the fly without changing persistent config
-# Pass `-r` to answer or conflicts to use local ONNX or Ollama per-query:
-lmem answer "what is my api token" -r minilm-squad2            # Fast local ONNX extractive QA
-lmem answer "summarize sprint goals" -r ollama:gemma4:31b-cloud # Ollama OpenAI-compatible reranker
-```
-
----
-
-## ⇄ Nearest-Neighbor Conflict & Duplicate Resolution (`lmem conflicts`)
-
-Instead of brittle hardcoded slot regexes, `lmem conflicts` scans active memories by finding each memory's **closest vector neighbor** (`cosine_similarity`) combined with **meaningful token overlap**:
-
-1. **Exact & Near-Duplicate Detection**: Memories with high vector similarity and token overlap are paired and sorted by similarity descending.
-2. **Timestamp Transparency**: Every pair displays exact UTC creation timestamps (`[OLDER · YYYY-MM-DD HH:MM:SS UTC]` vs `[NEWER · YYYY-MM-DD HH:MM:SS UTC]`) alongside similarity `%` and overlap `%`.
-3. **Interactive or Batch Resolution**:
-   - In an interactive terminal, `lmem conflicts` prompts on each pair:
-     `Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit`
-   - Passing `--yes` (`-y`, alias `--resolve`) merges all pairs automatically.
-4. **Reranker-Guided Merging**: When merging, the active reranker (`OnnxQaReranker`, `OllamaReranker`, or `Top1Reranker`) synthesizes the merged record (prioritizing the `NEWER` memory's updated facts while preserving non-conflicting clauses from `OLDER`, unioning tags case-insensitively, keeping max confidence, re-embedding the survivor, and expiring the `OLDER` record).
-
----
-
-## ◷ Temporal Filtering (`--as-of` vs `--date`)
-
-- **`--as-of <YYYY-MM-DD|RFC3339>`**: Cumulative point-in-time snapshot — returns memories created on or before that timestamp that were still active at that moment.
-- **`--date <YYYY-MM-DD>`**: Single-day filter — returns memories created or updated on that exact UTC calendar day (supported in `lmem recall`, `lmem list`, and `lmem answer`).
-
----
-
-## ⌖ Run Tests
+## ⌖ Development & Testing
 
 ```bash
 # Fast offline test suite (skips ONNX weight download)
@@ -249,3 +398,9 @@ cargo test --locked
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
+
+---
+
+## 📄 License
+
+LightMem is released under the [MIT License](LICENSE).
