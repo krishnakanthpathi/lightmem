@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
     long_about = None,
     before_help = CliView::banner_string(None, None)
 )]
-#[command(version)]
+#[command(disable_version_flag = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -25,6 +25,14 @@ struct Cli {
     /// Explicit path to SQLite database file
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+
+    /// Print version information (use with --json for machine-readable JSON)
+    #[arg(short = 'V', long = "version")]
+    version: bool,
+
+    /// Output as JSON when used with top-level flags like --version
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -234,19 +242,23 @@ enum Commands {
         json: bool,
     },
 
-    /// Export memories to Open Knowledge Format (OKF)
+    /// Export memories to Open Knowledge Format (OKF) or lossless JSON backup
     Export {
         /// Export to Open Knowledge Format bundle
         #[arg(long)]
         okf: bool,
 
-        /// Lossless JSON backup including expired memories
+        /// Lossless JSON backup format including expired memories and links
         #[arg(long, conflicts_with = "okf")]
         json: bool,
 
         /// Output file path
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
+
+        /// Emit operation summary as machine-readable JSON
+        #[arg(long = "output-json", visible_alias = "print-json")]
+        output_json: bool,
     },
 
     /// Import external memories from file (.json, .jsonl, or .okf/.md) or directory
@@ -261,6 +273,10 @@ enum Commands {
         /// Explicitly allow overwriting/replacing existing memories with matching IDs
         #[arg(long)]
         replace: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Ask a question and synthesize/extract the factual answer (via local ONNX Extractive QA or Ollama)
@@ -357,6 +373,10 @@ enum Commands {
         /// Approve prompts without confirmation
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Output configuration as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Rebuild embeddings for the configured model, with progress
@@ -364,6 +384,10 @@ enum Commands {
         /// Explicitly approve migration without an interactive prompt
         #[arg(long)]
         yes: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Display storage statistics and active database path
@@ -546,6 +570,13 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
+    /// Display version information and build metadata
+    Version {
+        /// Output version information as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Uninstall LightMem binaries, shell completions, and optionally purge data
     Uninstall {
         /// Purge database (~/.lightmem/memories.db) and downloaded models
@@ -555,6 +586,10 @@ enum Commands {
         /// Non-interactive mode (proceed without confirmation)
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -652,11 +687,19 @@ fn main() -> Result<()> {
         let _ = colored::control::set_virtual_terminal(true);
     }
     let cli = Cli::parse();
+    if cli.version {
+        return CliView::render_version(cli.json);
+    }
     let env_db = std::env::var("LIGHTMEM_DB").ok().map(PathBuf::from);
     let effective_db = cli.db.as_deref().or(env_db.as_deref());
     let global = cli.global;
 
     let Some(command) = cli.command else {
+        if cli.json {
+            let lm = open_controller(effective_db, global)?;
+            let stats = lm.stats()?;
+            return CliView::render_stats(&stats, lm.db_path(), true);
+        }
         let lm = open_controller(effective_db, global)?;
         let stats = lm.stats()?;
         CliView::render_intro(lm.db_path(), &stats);
@@ -1130,6 +1173,7 @@ fn main() -> Result<()> {
             okf: _,
             json,
             output,
+            output_json,
         } => {
             let lm = open_controller(effective_db, global)?;
             let exported_path = if json {
@@ -1138,20 +1182,21 @@ fn main() -> Result<()> {
             } else {
                 lm.export_okf(output.as_deref())?
             };
-            CliView::render_export(&exported_path);
+            CliView::render_export(&exported_path, json, output_json)?;
         }
 
         Commands::Import {
             file,
             enrich,
             replace,
+            json,
         } => {
             let lm = open_controller(effective_db, global)?;
-            if !migrate_embeddings(&lm, false, false, false)? {
+            if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
             let count = lm.import_file_with_options(&file, enrich, replace)?;
-            CliView::render_import(count, &file);
+            CliView::render_import(count, &file, json)?;
         }
 
         Commands::Answer {
@@ -1351,6 +1396,7 @@ fn main() -> Result<()> {
             url,
             model,
             yes,
+            json,
         } => {
             let mut cfg = LightMemConfig::try_load()?;
             let previous_identity = cfg.embedding_identity().ok();
@@ -1453,18 +1499,26 @@ fn main() -> Result<()> {
                     .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
                 let lm = LightMem::open_at(&path, cfg.clone())?;
                 if previous_identity.as_deref() != Some(lm.requested_embedding_identity())
-                    && !migrate_embeddings(&lm, yes, false, false)?
+                    && !migrate_embeddings(&lm, yes, json, false)?
                 {
                     return Ok(());
                 }
                 cfg.save()?;
             }
-            CliView::render_config(&cfg, changed, false)?;
+            CliView::render_config(&cfg, changed, json)?;
         }
 
-        Commands::Reindex { yes } => {
+        Commands::Reindex { yes, json } => {
             let lm = open_controller(effective_db, global)?;
-            migrate_embeddings(&lm, yes, false, true)?;
+            let migrated = migrate_embeddings(&lm, yes, json, true)?;
+            if json {
+                let obj = serde_json::json!({
+                    "status": if migrated { "ok" } else { "cancelled" },
+                    "embedding_identity": lm.requested_embedding_identity(),
+                    "db": lm.db_path().display().to_string(),
+                });
+                println!("{}", serde_json::to_string_pretty(&obj)?);
+            }
         }
 
         Commands::Stats { json } => {
@@ -1866,31 +1920,48 @@ fn main() -> Result<()> {
             clap_complete::generate(shell, &mut cmd, "lmem", &mut io::stdout());
         }
 
-        Commands::Uninstall { purge_data, yes } => {
-            handle_uninstall(purge_data, yes)?;
+        Commands::Version { json } => {
+            CliView::render_version(json)?;
+        }
+
+        Commands::Uninstall {
+            purge_data,
+            yes,
+            json,
+        } => {
+            handle_uninstall(purge_data, yes, json)?;
         }
     }
 
     Ok(())
 }
 
-fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
-    println!("\n  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mUninstaller\x1b[0m");
-    println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
-    println!("  \x1b[1;38;2;220;38;38m▸\x1b[0m \x1b[38;2;228;228;231mRemoving LightMem engine, binaries & shell completions\x1b[0m");
-    println!("  \x1b[38;2;113;113;122m────────────────────────────────────────────────\x1b[0m\n");
+fn handle_uninstall(purge_data: bool, yes: bool, json: bool) -> Result<()> {
+    if json {
+        anyhow::ensure!(
+            yes,
+            "Non-interactive uninstallation via --json requires --yes"
+        );
+    } else {
+        println!("\n  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mUninstaller\x1b[0m");
+        println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+        println!("  \x1b[1;38;2;220;38;38m▸\x1b[0m \x1b[38;2;228;228;231mRemoving LightMem engine, binaries & shell completions\x1b[0m");
+        println!(
+            "  \x1b[38;2;113;113;122m────────────────────────────────────────────────\x1b[0m\n"
+        );
 
-    if !yes && std::io::stdin().is_terminal() {
-        print!("  \x1b[1;33m? Proceed with uninstalling LightMem? [y/N]:\x1b[0m ");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let trimmed = input.trim().to_lowercase();
-        if trimmed != "y" && trimmed != "yes" {
-            println!("\n  \x1b[38;2;113;113;122mAborted by user.\x1b[0m\n");
-            return Ok(());
+        if !yes && std::io::stdin().is_terminal() {
+            print!("  \x1b[1;33m? Proceed with uninstalling LightMem? [y/N]:\x1b[0m ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let trimmed = input.trim().to_lowercase();
+            if trimmed != "y" && trimmed != "yes" {
+                println!("\n  \x1b[38;2;113;113;122mAborted by user.\x1b[0m\n");
+                return Ok(());
+            }
+            println!();
         }
-        println!();
     }
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -1990,6 +2061,15 @@ fn handle_uninstall(purge_data: bool, yes: bool) -> Result<()> {
         if current_exe.exists() && !bin_candidates.contains(&current_exe) {
             let _ = std::fs::remove_file(&current_exe);
         }
+    }
+
+    if json {
+        let obj = serde_json::json!({
+            "status": "uninstalled",
+            "purged_data": purge_data,
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+        return Ok(());
     }
 
     println!("\n  \x1b[1;32m✔\x1b[0m LightMem has been successfully uninstalled.");

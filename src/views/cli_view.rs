@@ -316,7 +316,15 @@ impl CliView {
         json: bool,
     ) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(memory)?);
+            let mut val = serde_json::to_value(memory)?;
+            if let serde_json::Value::Object(ref mut map) = val {
+                map.insert("conflicts".to_string(), serde_json::to_value(conflicts)?);
+                map.insert(
+                    "superseded".to_string(),
+                    serde_json::Value::Bool(superseded),
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&val)?);
             return Ok(());
         }
 
@@ -859,14 +867,13 @@ impl CliView {
 
     pub fn render_clear(removed: usize, hard: bool, db_path: &Path, json: bool) -> Result<()> {
         if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "removed": removed,
-                    "hard_deleted": hard,
-                    "database": db_path.display().to_string(),
-                })
-            );
+            let obj = serde_json::json!({
+                "removed": removed,
+                "hard_deleted": hard,
+                "database": db_path.display().to_string(),
+                "attachments_purged": hard,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
             return Ok(());
         }
 
@@ -887,22 +894,70 @@ impl CliView {
         Ok(())
     }
 
-    pub fn render_export(exported_path: &Path) {
+    pub fn render_export(exported_path: &Path, is_json_backup: bool, json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "status": "ok",
+                "path": exported_path.display().to_string(),
+                "format": if is_json_backup { "json" } else { "okf" },
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        let format_label = if is_json_backup {
+            "lossless JSON backup"
+        } else {
+            "OKF bundle"
+        };
         println!(
-            "{} Exported OKF bundle {} {}",
+            "{} Exported {} {} {}",
             Self::crimson_bold("⇄"),
+            Self::violet_bold(format_label),
             Self::slate("▸"),
             Self::white_bold(&exported_path.display().to_string())
         );
+        Ok(())
     }
 
-    pub fn render_import(count: usize, file: &Path) {
+    pub fn render_import(count: usize, file: &Path, json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "status": "ok",
+                "imported": count,
+                "file": file.display().to_string(),
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
         println!(
             "{} Imported {} memories from {}",
             Self::crimson_bold("⇄"),
             Self::crimson_bold(&count.to_string()),
             Self::white_bold(&file.display().to_string())
         );
+        Ok(())
+    }
+
+    pub fn render_version(json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "name": "lightmem",
+                "version": env!("CARGO_PKG_VERSION"),
+                "schema_version": 1,
+                "features": {
+                    "mcp": cfg!(feature = "mcp"),
+                    "onnx": true,
+                    "ollama": true,
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        println!("lmem {}", env!("CARGO_PKG_VERSION"));
+        Ok(())
     }
 
     pub fn render_answer(result: &AnswerResult, json: bool) -> Result<()> {

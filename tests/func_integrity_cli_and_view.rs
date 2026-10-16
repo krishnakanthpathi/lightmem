@@ -210,8 +210,12 @@ fn func_cli_view_all_render_methods_human_and_json() {
         CliView::render_observed_summary(0, 1, true, json).unwrap();
     }
 
-    CliView::render_export(&db_path);
-    CliView::render_import(5, &db_path);
+    CliView::render_export(&db_path, false, false).unwrap();
+    CliView::render_export(&db_path, true, true).unwrap();
+    CliView::render_import(5, &db_path, false).unwrap();
+    CliView::render_import(5, &db_path, true).unwrap();
+    CliView::render_version(false).unwrap();
+    CliView::render_version(true).unwrap();
 }
 
 #[test]
@@ -683,4 +687,100 @@ fn integrity_cli_rejects_invalid_flags_missing_targets_and_non_interactive_migra
         !bad_mig.status.success(),
         "Non-interactive config change requiring migration without --yes must exit non-zero"
     );
+}
+
+#[test]
+fn test_new_cli_json_options_and_version() {
+    let dir = tempdir().unwrap();
+    let cfg_dir = dir.path().join(".lightmem");
+    let db_path = cfg_dir.join("test_json.db");
+    run_lmem(
+        &cfg_dir,
+        &db_path,
+        &["config", "--backend", "hash", "--reranker", "top1"],
+    );
+
+    // 1. --version and --version --json
+    let ver_plain = run_lmem(&cfg_dir, &db_path, &["--version"]);
+    assert!(ver_plain.status.success());
+    let ver_plain_str = String::from_utf8_lossy(&ver_plain.stdout);
+    assert!(ver_plain_str.contains("lmem 0.3.1"));
+
+    let ver_json = run_lmem(&cfg_dir, &db_path, &["--version", "--json"]);
+    assert!(ver_json.status.success());
+    let v_val: serde_json::Value = serde_json::from_slice(&ver_json.stdout).unwrap();
+    assert_eq!(v_val["name"], "lightmem");
+    assert_eq!(v_val["version"], "0.3.1");
+    assert_eq!(v_val["schema_version"], 1);
+
+    // 2. version subcommand and version --json
+    let sub_ver = run_lmem(&cfg_dir, &db_path, &["version"]);
+    assert!(sub_ver.status.success());
+    let sub_ver_json = run_lmem(&cfg_dir, &db_path, &["version", "--json"]);
+    assert!(sub_ver_json.status.success());
+    let sub_val: serde_json::Value = serde_json::from_slice(&sub_ver_json.stdout).unwrap();
+    assert_eq!(sub_val["version"], "0.3.1");
+
+    // 3. Export with --output-json
+    let rem = run_lmem(&cfg_dir, &db_path, &["remember", "Memory to test export"]);
+    assert!(rem.status.success());
+    let backup_file = dir.path().join("backup.json");
+    let exp_json = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &[
+            "export",
+            "--json",
+            "-o",
+            backup_file.to_str().unwrap(),
+            "--output-json",
+        ],
+    );
+    assert!(exp_json.status.success());
+    let exp_val: serde_json::Value = serde_json::from_slice(&exp_json.stdout).unwrap();
+    assert_eq!(exp_val["status"], "ok");
+    assert_eq!(exp_val["format"], "json");
+
+    // 4. Import with --json
+    let db2_path = dir.path().join("import_json.db");
+    let imp_json = run_lmem(
+        &cfg_dir,
+        &db2_path,
+        &["import", backup_file.to_str().unwrap(), "--json"],
+    );
+    assert!(imp_json.status.success());
+    let imp_val: serde_json::Value = serde_json::from_slice(&imp_json.stdout).unwrap();
+    assert_eq!(imp_val["status"], "ok");
+    assert!(imp_val["imported"].as_u64().unwrap() >= 1);
+
+    // 5. Reindex with --json
+    let reindex_json = run_lmem(&cfg_dir, &db_path, &["reindex", "--yes", "--json"]);
+    assert!(reindex_json.status.success());
+    let reindex_val: serde_json::Value = serde_json::from_slice(&reindex_json.stdout).unwrap();
+    assert_eq!(reindex_val["status"], "ok");
+
+    // 6. Setup with --json on empty DB
+    let empty_setup_db = dir.path().join("setup_empty.db");
+    let setup_json = run_lmem(
+        &cfg_dir,
+        &empty_setup_db,
+        &[
+            "setup",
+            "--url",
+            "http://localhost:11434",
+            "--model",
+            "top1",
+            "--yes",
+            "--json",
+        ],
+    );
+    assert!(setup_json.status.success());
+    let setup_val: serde_json::Value = serde_json::from_slice(&setup_json.stdout).unwrap();
+    assert_eq!(setup_val["reranker"], "top1");
+
+    // 7. Root --json without subcommand outputs stats
+    let root_json = run_lmem(&cfg_dir, &db_path, &["--json"]);
+    assert!(root_json.status.success());
+    let root_val: serde_json::Value = serde_json::from_slice(&root_json.stdout).unwrap();
+    assert!(root_val.get("total_memories").is_some());
 }
