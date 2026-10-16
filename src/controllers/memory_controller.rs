@@ -958,11 +958,20 @@ impl LightMem {
 
     /// Import memories from an external file (.json, .jsonl, or .md/.okf) or an OKF bundle directory
     pub fn import_file(&self, file_path: &Path) -> Result<usize> {
-        self.import_file_with_enrichment(file_path, false)
+        self.import_file_with_options(file_path, false, false)
     }
 
     /// Parse every file before changing the database; one failed record rolls back the entire import.
     pub fn import_file_with_enrichment(&self, file_path: &Path, enrich: bool) -> Result<usize> {
+        self.import_file_with_options(file_path, enrich, false)
+    }
+
+    pub fn import_file_with_options(
+        &self,
+        file_path: &Path,
+        enrich: bool,
+        replace: bool,
+    ) -> Result<usize> {
         let mut files = Vec::new();
         if file_path.is_dir() {
             let root = if file_path.join("memories").is_dir() {
@@ -976,6 +985,7 @@ impl LightMem {
             files.push(file_path.to_path_buf());
         }
         let mut records = Vec::new();
+        let mut explicit_ids = Vec::new();
         let mut attachments_by_mem = Vec::new();
         let mut imported_links = Vec::new();
         let mut restore = false;
@@ -998,6 +1008,9 @@ impl LightMem {
                     candidate.confidence.is_finite() && (0.0..=1.0).contains(&candidate.confidence),
                     "Invalid import confidence"
                 );
+                if let Some(ref id) = candidate.id {
+                    explicit_ids.push(id.clone());
+                }
                 let (record, att_inputs) = candidate.into_record_and_attachments()?;
                 if !att_inputs.is_empty() {
                     attachments_by_mem.push((record.id.clone(), att_inputs));
@@ -1007,6 +1020,16 @@ impl LightMem {
         }
         if records.is_empty() {
             return Ok(0);
+        }
+        if !replace && !explicit_ids.is_empty() {
+            let conflicts = self.storage.find_existing_ids(&explicit_ids)?;
+            if !conflicts.is_empty() {
+                anyhow::bail!(
+                    "Import rejected: {} memories have conflicting IDs (e.g. '{}'). Pass --replace to explicitly overwrite existing records.",
+                    conflicts.len(),
+                    conflicts[0]
+                );
+            }
         }
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
@@ -1018,7 +1041,7 @@ impl LightMem {
             !restore,
         )?;
         if !imported_links.is_empty() {
-            let _ = self.storage.restore_links(&imported_links);
+            self.storage.restore_links(&imported_links)?;
         }
         for rec in &stored_records {
             if rec.status == MemoryStatus::Active {

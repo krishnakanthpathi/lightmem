@@ -5,30 +5,63 @@ use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+fn write_secure_file(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("Failed to create secure file {:?}", path))?;
+        std::io::Write::write_all(&mut f, content.as_ref())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content.as_ref())?;
+    }
+    Ok(())
+}
+
 pub struct Exporter;
 
 impl Exporter {
-    fn attach_blobs(storage: &Storage, memories: &mut [MemoryRecord]) {
+    fn attach_blobs(storage: &Storage, memories: &mut [MemoryRecord]) -> Result<()> {
         for m in memories.iter_mut() {
             if !m.attachments.is_empty() {
-                if let Ok(att_blobs) = storage.get_memory_attachments_data(&m.id) {
-                    m.attachments = att_blobs
-                        .into_iter()
-                        .map(|(mut meta, data)| {
-                            meta.data_base64 = Some(encode_base64(&data));
-                            meta
-                        })
-                        .collect();
-                }
+                let att_blobs = storage
+                    .get_memory_attachments_data(&m.id)
+                    .with_context(|| {
+                        format!("Failed to retrieve attachment BLOBs for memory '{}'", m.id)
+                    })?;
+                anyhow::ensure!(
+                    att_blobs.len() == m.attachments.len(),
+                    "Missing attachment BLOBs for memory '{}': expected {}, found {}",
+                    m.id,
+                    m.attachments.len(),
+                    att_blobs.len()
+                );
+                m.attachments = att_blobs
+                    .into_iter()
+                    .map(|(mut meta, data)| {
+                        meta.data_base64 = Some(encode_base64(&data));
+                        meta
+                    })
+                    .collect();
             }
         }
+        Ok(())
     }
 
     /// Lossless versioned backup, including expired records, all metadata, knowledge graph links, and binary attachment BLOBs (vectors are rebuilt).
     pub fn export_json(storage: &Storage, output_path: &Path) -> Result<PathBuf> {
         let (_, mut memories) = storage.index_snapshot()?;
         let links = storage.all_links().unwrap_or_default();
-        Self::attach_blobs(storage, &mut memories);
+        Self::attach_blobs(storage, &mut memories)?;
         let backup = serde_json::json!({
             "format": "lightmem-backup-v1",
             "memories": memories,
@@ -37,7 +70,8 @@ impl Exporter {
         if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(output_path, serde_json::to_string_pretty(&backup)?)?;
+        let pretty = serde_json::to_string_pretty(&backup)?;
+        write_secure_file(output_path, pretty)?;
         Ok(output_path.to_path_buf())
     }
 
@@ -52,7 +86,7 @@ impl Exporter {
             .into_iter()
             .filter(|l| active_ids.contains(&l.source_id) && active_ids.contains(&l.target_id))
             .collect();
-        Self::attach_blobs(storage, &mut memories);
+        Self::attach_blobs(storage, &mut memories)?;
 
         let mut grouped: BTreeMap<String, Vec<MemoryRecord>> = BTreeMap::new();
         for m in memories {
@@ -144,7 +178,7 @@ impl Exporter {
             }
         }
 
-        std::fs::write(&target, md)
+        write_secure_file(&target, md)
             .with_context(|| format!("Failed to write export to {:?}", target))?;
 
         Ok(target)

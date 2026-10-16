@@ -22,7 +22,10 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn func_format_auth_header() {
-    assert_eq!(format_auth_header("secret-token-123"), "Bearer secret-token-123");
+    assert_eq!(
+        format_auth_header("secret-token-123"),
+        "Bearer secret-token-123"
+    );
 }
 
 #[test]
@@ -52,7 +55,9 @@ fn func_config_default() {
 #[test]
 fn integrity_config_default_produces_valid_identity() {
     let cfg = LightMemConfig::default();
-    let id = cfg.embedding_identity().expect("default config must have valid identity");
+    let id = cfg
+        .embedding_identity()
+        .expect("default config must have valid identity");
     assert_eq!(id, "card-v1:fastembed-7.1.0:Xenova/bge-small-en-v1.5");
 }
 
@@ -141,8 +146,10 @@ fn func_normalize_and_effective_ollama_url() {
         LightMemConfig::normalize_ollama_url("https://proxy.example.com/v1"),
         "https://proxy.example.com"
     );
-    let mut cfg = LightMemConfig::default();
-    cfg.ollama_url = "http://127.0.0.1:11434/api/embeddings".to_string();
+    let cfg = LightMemConfig {
+        ollama_url: "http://127.0.0.1:11434/api/embeddings".to_string(),
+        ..Default::default()
+    };
     assert_eq!(cfg.effective_ollama_url(), "http://127.0.0.1:11434");
 }
 
@@ -161,9 +168,14 @@ fn integrity_normalize_ollama_url_empty_and_whitespace() {
 #[test]
 fn func_effective_ollama_api_key() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let mut cfg = LightMemConfig::default();
-    cfg.ollama_api_key = Some(" explicit-key ".to_string());
-    assert_eq!(cfg.effective_ollama_api_key().as_deref(), Some("explicit-key"));
+    let cfg = LightMemConfig {
+        ollama_api_key: Some(" explicit-key ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        cfg.effective_ollama_api_key().as_deref(),
+        Some("explicit-key")
+    );
 }
 
 #[test]
@@ -172,8 +184,10 @@ fn integrity_effective_ollama_api_key_ignores_none_and_blank() {
     std::env::remove_var("OLLAMA_API_KEY");
     std::env::remove_var("LMEM_OLLAMA_API_KEY");
 
-    let mut cfg = LightMemConfig::default();
-    cfg.ollama_api_key = Some("NONE".to_string());
+    let mut cfg = LightMemConfig {
+        ollama_api_key: Some("NONE".to_string()),
+        ..Default::default()
+    };
     assert_eq!(cfg.effective_ollama_api_key(), None);
 
     cfg.ollama_api_key = Some("   ".to_string());
@@ -190,7 +204,9 @@ fn func_embedding_identity_and_summaries() {
         cfg.embedding_identity().unwrap(),
         "card-v1:hash:fnv-bigram-v1"
     );
-    assert!(cfg.active_embedding_summary().contains("deterministic-trigram-hash"));
+    assert!(cfg
+        .active_embedding_summary()
+        .contains("deterministic-trigram-hash"));
 
     cfg.backend = "ollama".to_string();
     cfg.ollama_url = "http://localhost:11434/api".to_string();
@@ -225,7 +241,10 @@ fn integrity_embedding_identity_custom_dir_fingerprints_contents_and_rejects_bad
     // Mutating model weights in-place must alter the FNV-1a fingerprint
     std::fs::write(model_dir.join("model.onnx"), b"weights-v2").unwrap();
     let id2 = cfg.embedding_identity().unwrap();
-    assert_ne!(id1, id2, "Custom ONNX model identity must change when file contents change");
+    assert_ne!(
+        id1, id2,
+        "Custom ONNX model identity must change when file contents change"
+    );
 
     // Missing directory must error
     cfg.onnx_model = Some(dir.path().join("nonexistent").to_string_lossy().to_string());
@@ -243,17 +262,28 @@ fn func_config_save_load_and_resolve_db_path() {
     std::env::set_var("LIGHTMEM_CONFIG_DIR", dir.path());
     std::env::remove_var("LIGHTMEM_DB");
 
-    let mut cfg = LightMemConfig::default();
-    cfg.backend = "hash".to_string();
-    cfg.reranker = "top1".to_string();
+    let cfg = LightMemConfig {
+        backend: "hash".to_string(),
+        reranker: "top1".to_string(),
+        ..Default::default()
+    };
     cfg.save().unwrap();
 
     let loaded = LightMemConfig::try_load().unwrap();
     assert_eq!(loaded.backend, "hash");
     assert_eq!(loaded.reranker, "top1");
-    assert_eq!(LightMemConfig::config_file(), dir.path().join("config.json"));
-    assert_eq!(LightMemConfig::global_db_path(), dir.path().join("memories.db"));
-    assert_eq!(LightMemConfig::resolve_db_path(true), dir.path().join("memories.db"));
+    assert_eq!(
+        LightMemConfig::config_file(),
+        dir.path().join("config.json")
+    );
+    assert_eq!(
+        LightMemConfig::global_db_path(),
+        dir.path().join("memories.db")
+    );
+    assert_eq!(
+        LightMemConfig::resolve_db_path(true),
+        dir.path().join("memories.db")
+    );
 
     std::env::remove_var("LIGHTMEM_CONFIG_DIR");
 }
@@ -283,9 +313,18 @@ fn func_memory_type_and_status_roundtrip() {
         assert_eq!(cat.to_string(), s);
         assert_eq!(MemoryType::from_str(s).unwrap(), cat);
     }
-    assert_eq!(MemoryType::from_str("passwords").unwrap(), MemoryType::Password);
-    assert_eq!(MemoryStatus::from_str("active").unwrap(), MemoryStatus::Active);
-    assert_eq!(MemoryStatus::from_str("expired").unwrap(), MemoryStatus::Expired);
+    assert_eq!(
+        MemoryType::from_str("passwords").unwrap(),
+        MemoryType::Password
+    );
+    assert_eq!(
+        MemoryStatus::from_str("active").unwrap(),
+        MemoryStatus::Active
+    );
+    assert_eq!(
+        MemoryStatus::from_str("expired").unwrap(),
+        MemoryStatus::Expired
+    );
     assert_eq!(MemoryStatus::Active.as_str(), "active");
     assert_eq!(MemoryStatus::Expired.as_str(), "expired");
 }
@@ -298,20 +337,62 @@ fn integrity_memory_type_and_status_reject_invalid_strings() {
 
 #[test]
 fn func_memory_type_infer_all_14_categories() {
-    assert_eq!(MemoryType::infer("password: super-secret"), MemoryType::Password);
-    assert_eq!(MemoryType::infer("panic: worker thread crashed"), MemoryType::Error);
-    assert_eq!(MemoryType::infer("We decided to use SQLite WAL"), MemoryType::Decision);
-    assert_eq!(MemoryType::infer("Never commit .env files"), MemoryType::Instruction);
-    assert_eq!(MemoryType::infer("User prefers dark mode"), MemoryType::Preference);
-    assert_eq!(MemoryType::infer("Our goal is sub-5ms recall"), MemoryType::Goal);
-    assert_eq!(MemoryType::infer("TODO: ship release v0.3"), MemoryType::Commitment);
-    assert_eq!(MemoryType::infer("Learned that FTS5 requires triggers"), MemoryType::Learning);
-    assert_eq!(MemoryType::infer("Deployed v0.2.4 to production"), MemoryType::Event);
-    assert_eq!(MemoryType::infer("Alice is the maintainer of auth"), MemoryType::Relationship);
-    assert_eq!(MemoryType::infer("Profiling shows 0ms idle CPU"), MemoryType::Observation);
-    assert_eq!(MemoryType::infer("OpenAPI schema definition saved"), MemoryType::Artifact);
-    assert_eq!(MemoryType::infer("Currently working on test suite"), MemoryType::Context);
-    assert_eq!(MemoryType::infer("PostgreSQL runs on port 5432"), MemoryType::Fact);
+    assert_eq!(
+        MemoryType::infer("password: super-secret"),
+        MemoryType::Password
+    );
+    assert_eq!(
+        MemoryType::infer("panic: worker thread crashed"),
+        MemoryType::Error
+    );
+    assert_eq!(
+        MemoryType::infer("We decided to use SQLite WAL"),
+        MemoryType::Decision
+    );
+    assert_eq!(
+        MemoryType::infer("Never commit .env files"),
+        MemoryType::Instruction
+    );
+    assert_eq!(
+        MemoryType::infer("User prefers dark mode"),
+        MemoryType::Preference
+    );
+    assert_eq!(
+        MemoryType::infer("Our goal is sub-5ms recall"),
+        MemoryType::Goal
+    );
+    assert_eq!(
+        MemoryType::infer("TODO: ship release v0.3"),
+        MemoryType::Commitment
+    );
+    assert_eq!(
+        MemoryType::infer("Learned that FTS5 requires triggers"),
+        MemoryType::Learning
+    );
+    assert_eq!(
+        MemoryType::infer("Deployed v0.2.4 to production"),
+        MemoryType::Event
+    );
+    assert_eq!(
+        MemoryType::infer("Alice is the maintainer of auth"),
+        MemoryType::Relationship
+    );
+    assert_eq!(
+        MemoryType::infer("Profiling shows 0ms idle CPU"),
+        MemoryType::Observation
+    );
+    assert_eq!(
+        MemoryType::infer("OpenAPI schema definition saved"),
+        MemoryType::Artifact
+    );
+    assert_eq!(
+        MemoryType::infer("Currently working on test suite"),
+        MemoryType::Context
+    );
+    assert_eq!(
+        MemoryType::infer("PostgreSQL runs on port 5432"),
+        MemoryType::Fact
+    );
 }
 
 #[test]
@@ -376,7 +457,10 @@ fn integrity_base64_decode_whitespace_and_invalid_input() {
     let encoded = "SGVs\r\nbG8g\tV29y\nbGQ=";
     assert_eq!(decode_base64(encoded).unwrap(), b"Hello World");
     assert!(decode_base64("abc").is_err(), "Non-multiple of 4 must fail");
-    assert!(decode_base64("ab$=").is_err(), "Invalid character must fail");
+    assert!(
+        decode_base64("ab$=").is_err(),
+        "Invalid character must fail"
+    );
 }
 
 #[test]
@@ -509,7 +593,10 @@ fn integrity_memory_record_clamps_out_of_bounds_confidence() {
 
 #[test]
 fn func_parse_ttl_duration() {
-    assert_eq!(parse_ttl_duration("500ms").unwrap(), Duration::milliseconds(500));
+    assert_eq!(
+        parse_ttl_duration("500ms").unwrap(),
+        Duration::milliseconds(500)
+    );
     assert_eq!(parse_ttl_duration("30s").unwrap(), Duration::seconds(30));
     assert_eq!(parse_ttl_duration("15m").unwrap(), Duration::minutes(15));
     assert_eq!(parse_ttl_duration("24h").unwrap(), Duration::hours(24));

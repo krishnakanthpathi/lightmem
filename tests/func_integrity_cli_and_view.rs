@@ -285,9 +285,20 @@ fn func_cli_subcommands_remember_recall_list_inspect_answer_stats() {
     let out = run_lmem(
         &cfg_dir,
         &db_path,
-        &["config", "--backend", "hash", "--reranker", "top1", "--json"],
+        &[
+            "config",
+            "--backend",
+            "hash",
+            "--reranker",
+            "top1",
+            "--json",
+        ],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let cfg_json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(cfg_json["backend"], "hash");
 
@@ -314,7 +325,11 @@ fn func_cli_subcommands_remember_recall_list_inspect_answer_stats() {
             "--json",
         ],
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let mem_json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let mem_id = mem_json["id"].as_str().unwrap().to_string();
     assert_eq!(mem_json["category"], "decision");
@@ -440,7 +455,16 @@ fn func_cli_subcommands_graph_link_unlink_related_autolink_conflicts_dedup() {
     let link_out = run_lmem(
         &cfg_dir,
         &db_path,
-        &["link", &id1, &id2, "-r", "depends_on", "-w", "0.9", "--json"],
+        &[
+            "link",
+            &id1,
+            &id2,
+            "-r",
+            "depends_on",
+            "-w",
+            "0.9",
+            "--json",
+        ],
     );
     assert!(link_out.status.success());
 
@@ -647,7 +671,13 @@ fn integrity_cli_rejects_invalid_flags_missing_targets_and_non_interactive_migra
     let bad_mig = run_lmem(
         &cfg_dir,
         &db_path,
-        &["config", "--backend", "ollama", "--model", "nomic-embed-text"],
+        &[
+            "config",
+            "--backend",
+            "ollama",
+            "--model",
+            "nomic-embed-text",
+        ],
     );
     assert!(
         !bad_mig.status.success(),

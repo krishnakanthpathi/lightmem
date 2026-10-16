@@ -581,6 +581,21 @@ impl Storage {
         Ok(opt)
     }
 
+    pub fn find_existing_ids(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut conflicts = Vec::new();
+        let mut stmt = conn.prepare("SELECT 1 FROM memories WHERE id=?1")?;
+        for id in ids {
+            if stmt.exists([id])? {
+                conflicts.push(id.clone());
+            }
+        }
+        Ok(conflicts)
+    }
+
     /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
     pub fn get_memory_attachments_data(
         &self,
@@ -652,8 +667,22 @@ impl Storage {
                 let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o700));
             }
             let mut used_in_batch = std::collections::HashSet::new();
+            let _ = target;
             for (idx, (meta, data)) in items.iter().enumerate() {
-                let mut file_path = target.join(&meta.filename);
+                let safe_filename = Path::new(&meta.filename)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .filter(|s| {
+                        !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\')
+                    })
+                    .unwrap_or("attachment.bin");
+                let mut file_path = target.join(safe_filename);
+                anyhow::ensure!(
+                    file_path.starts_with(target)
+                        || file_path.parent().map(|p| p == target).unwrap_or(false),
+                    "Refusing to write attachment outside target directory: {}",
+                    file_path.display()
+                );
                 let mut already_verified_on_disk = false;
 
                 if file_path.exists() && !used_in_batch.contains(&file_path) {
@@ -669,11 +698,11 @@ impl Storage {
                 if !already_verified_on_disk
                     && (used_in_batch.contains(&file_path) || file_path.exists())
                 {
-                    let stem = Path::new(&meta.filename)
+                    let stem = Path::new(safe_filename)
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("attachment");
-                    let ext = Path::new(&meta.filename)
+                    let ext = Path::new(safe_filename)
                         .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("");

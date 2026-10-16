@@ -631,8 +631,10 @@ impl CliView {
         for m in &paginated.items {
             let short_id: String = m.id.chars().take(8).collect();
             let first_line = m.content.lines().next().unwrap_or("").trim();
-            let snippet = if first_line.len() > 64 {
-                format!("{}...", &first_line[..61])
+            let char_count = first_line.chars().count();
+            let snippet = if char_count > 64 {
+                let truncated: String = first_line.chars().take(61).collect();
+                format!("{}...", truncated)
             } else {
                 first_line.to_string()
             };
@@ -818,15 +820,11 @@ impl CliView {
                 links.len()
             );
             for link in links {
-                let target_short = if link.target_id.len() >= 8 {
-                    &link.target_id[..8]
-                } else {
-                    &link.target_id
-                };
+                let target_short: String = link.target_id.chars().take(8).collect();
                 println!(
                     "    ├─ ──{}──▶ ({}) {}",
                     Self::violet_bold(&link.relation),
-                    Self::gold(target_short),
+                    Self::gold(&target_short),
                     Self::slate(&format!("[weight: {:.1}]", link.weight))
                 );
             }
@@ -979,6 +977,13 @@ impl CliView {
                         "ollama-local": "Local ONNX embeddings + Ollama localhost LLM reranker"
                     }),
                 );
+                if let Some(key_val) = obj.get_mut("ollama_api_key") {
+                    if let Some(key_str) = key_val.as_str() {
+                        if !key_str.is_empty() {
+                            *key_val = serde_json::Value::String("[REDACTED]".into());
+                        }
+                    }
+                }
             }
             println!("{}", serde_json::to_string_pretty(&val)?);
             return Ok(());
@@ -1121,13 +1126,21 @@ impl CliView {
                     serde_json::Value::String(db_path.to_string_lossy().to_string()),
                 );
                 if let Ok(cfg) = LightMemConfig::try_load() {
-                    obj.insert("backend".into(), serde_json::Value::String(cfg.backend.clone()));
+                    obj.insert(
+                        "backend".into(),
+                        serde_json::Value::String(cfg.backend.clone()),
+                    );
                     let emb_model = if cfg.backend == "onnx" {
-                        cfg.onnx_model.clone().unwrap_or_else(|| "bge-small".to_string())
+                        cfg.onnx_model
+                            .clone()
+                            .unwrap_or_else(|| "bge-small".to_string())
                     } else {
                         cfg.embedding_model.clone()
                     };
-                    obj.insert("embedding_model".into(), serde_json::Value::String(emb_model));
+                    obj.insert(
+                        "embedding_model".into(),
+                        serde_json::Value::String(emb_model),
+                    );
                     obj.insert("reranker".into(), serde_json::Value::String(cfg.reranker));
                 }
             }
@@ -1218,16 +1231,16 @@ impl CliView {
             return Ok(());
         }
 
-        let short_src = if src.len() >= 8 { &src[..8] } else { src };
-        let short_dst = if dst.len() >= 8 { &dst[..8] } else { dst };
+        let short_src: String = src.chars().take(8).collect();
+        let short_dst: String = dst.chars().take(8).collect();
 
         println!(
             "{} {} ({}) ──{}──▶ ({}) {}",
             Self::crimson_bold("◈"),
             Self::emerald_bold("Linked"),
-            Self::gold(short_src),
+            Self::gold(&short_src),
             Self::violet_bold(relation),
-            Self::gold(short_dst),
+            Self::gold(&short_dst),
             Self::slate(&format!("[weight: {:.1}]", weight))
         );
         Ok(())
@@ -1251,23 +1264,23 @@ impl CliView {
             return Ok(());
         }
 
-        let short_src = if src.len() >= 8 { &src[..8] } else { src };
-        let short_dst = if dst.len() >= 8 { &dst[..8] } else { dst };
+        let short_src: String = src.chars().take(8).collect();
+        let short_dst: String = dst.chars().take(8).collect();
 
         if removed {
             println!(
                 "{} {} connection between ({}) and ({})",
                 Self::crimson_bold("◈"),
                 Self::rose("Removed"),
-                Self::gold(short_src),
-                Self::gold(short_dst)
+                Self::gold(&short_src),
+                Self::gold(&short_dst)
             );
         } else {
             println!(
                 "{} No matching link found between ({}) and ({})",
                 Self::crimson_bold("◈"),
-                Self::gold(short_src),
-                Self::gold(short_dst)
+                Self::gold(&short_src),
+                Self::gold(&short_dst)
             );
         }
         Ok(())

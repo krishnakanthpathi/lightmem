@@ -257,6 +257,10 @@ enum Commands {
         /// Opt in to heuristic title/category enrichment
         #[arg(long)]
         enrich: bool,
+
+        /// Explicitly allow overwriting/replacing existing memories with matching IDs
+        #[arg(long)]
+        replace: bool,
     },
 
     /// Ask a question and synthesize/extract the factual answer (via local ONNX Extractive QA or Ollama)
@@ -1137,12 +1141,16 @@ fn main() -> Result<()> {
             CliView::render_export(&exported_path);
         }
 
-        Commands::Import { file, enrich } => {
+        Commands::Import {
+            file,
+            enrich,
+            replace,
+        } => {
             let lm = open_controller(effective_db, global)?;
             if !migrate_embeddings(&lm, false, false, false)? {
                 return Ok(());
             }
-            let count = lm.import_file_with_enrichment(&file, enrich)?;
+            let count = lm.import_file_with_options(&file, enrich, replace)?;
             CliView::render_import(count, &file);
         }
 
@@ -1752,10 +1760,8 @@ fn main() -> Result<()> {
             mcp,
         } => {
             if mcp {
-                let results = lightmem::ConnectService::connect_mcp(
-                    platform.as_deref(),
-                    workspace,
-                )?;
+                let results =
+                    lightmem::ConnectService::connect_mcp(platform.as_deref(), workspace)?;
                 CliView::render_connect(&results, json)?;
             } else if list {
                 let platforms = lightmem::ConnectService::list_platforms(workspace);

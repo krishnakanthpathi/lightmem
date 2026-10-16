@@ -21,7 +21,14 @@ use std::net::TcpListener;
 use tempfile::tempdir;
 
 fn make_mem(id: &str, title: &str, content: &str, cat: MemoryType) -> MemoryRecord {
-    let mut m = MemoryRecord::new(cat, title.to_string(), content.to_string(), vec![], 0.9, None);
+    let mut m = MemoryRecord::new(
+        cat,
+        title.to_string(),
+        content.to_string(),
+        vec![],
+        0.9,
+        None,
+    );
     m.id = id.to_string();
     m
 }
@@ -85,7 +92,8 @@ fn func_and_integrity_ollama_embedding_provider_fallback_and_empty_error() {
                 let resp = match step {
                     0 => {
                         assert!(req.contains("POST /api/embeddings"));
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_string()
                     }
                     1 => {
                         assert!(req.contains("POST /api/embed"));
@@ -154,7 +162,10 @@ fn func_hybrid_search_rrf_and_acronym_boost() {
     let q_tokens = HybridSearchEngine::extract_query_tokens("Who is KK?");
     assert_eq!(q_tokens, vec!["kk".to_string()]);
     let boost = HybridSearchEngine::compute_acronym_and_lexical_boost(&q_tokens, &m1);
-    assert!(boost >= 0.25, "Proper noun initials KK -> Krishna Kanth must receive >=0.26 boost");
+    assert!(
+        boost >= 0.25,
+        "Proper noun initials KK -> Krishna Kanth must receive >=0.26 boost"
+    );
 
     let hits = HybridSearchEngine::search_with_identity(
         &storage,
@@ -185,9 +196,11 @@ fn integrity_hybrid_search_rejects_blank_query_and_invalid_min_similarity() {
         HybridSearchEngine::search(&storage, &emb, "test", None, None, None, 5, Some(-0.1))
             .is_err()
     );
-    assert!(HybridSearchEngine::search(&storage, &emb, "test", None, None, None, 0, None)
-        .unwrap()
-        .is_empty());
+    assert!(
+        HybridSearchEngine::search(&storage, &emb, "test", None, None, None, 0, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ============================================================================
@@ -196,8 +209,18 @@ fn integrity_hybrid_search_rejects_blank_query_and_invalid_min_similarity() {
 
 #[test]
 fn func_top1_and_ollama_reranker_answer_and_merge() {
-    let m1 = make_mem("m1", "Redis Port", "Redis runs on port 6379", MemoryType::Fact);
-    let m2 = make_mem("m2", "Redis Port New", "Redis runs on port 6380", MemoryType::Fact);
+    let m1 = make_mem(
+        "m1",
+        "Redis Port",
+        "Redis runs on port 6379",
+        MemoryType::Fact,
+    );
+    let m2 = make_mem(
+        "m2",
+        "Redis Port New",
+        "Redis runs on port 6380",
+        MemoryType::Fact,
+    );
     let candidate = ScoredMemory {
         memory: m1.clone(),
         score: 0.85,
@@ -297,7 +320,8 @@ User: Also we decided to standardize on PostgreSQL 16 for production.
     assert_eq!(candidates.len(), 2);
     assert!(candidates
         .iter()
-        .any(|c| c.category == MemoryType::Preference && c.content.contains("User prefers dark mode")));
+        .any(|c| c.category == MemoryType::Preference
+            && c.content.contains("User prefers dark mode")));
     assert!(candidates
         .iter()
         .any(|c| c.category == MemoryType::Decision && c.tags.contains(&"postgresql".to_string())));
@@ -339,7 +363,12 @@ fn func_exporter_and_importer_json_and_okf_roundtrip() {
 
     let att = AttachmentInput::from_bytes("config.json", b"{\"port\":8080}".to_vec());
     let m1 = make_mem("id-1", "App Config", "Port is 8080", MemoryType::Artifact);
-    let m2 = make_mem("id-2", "Auth Rule", "Always validate JWT", MemoryType::Instruction);
+    let m2 = make_mem(
+        "id-2",
+        "Auth Rule",
+        "Always validate JWT",
+        MemoryType::Instruction,
+    );
 
     storage
         .insert_indexed_with_attachments(&m1, &[att], &emb, "hash-id", true)

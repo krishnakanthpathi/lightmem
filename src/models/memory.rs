@@ -533,7 +533,9 @@ mod infer_tests {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttachmentMetadata {
+    #[serde(default = "default_attachment_id")]
     pub id: String,
+    #[serde(default)]
     pub memory_id: String,
     pub filename: String,
     pub mime_type: String,
@@ -544,9 +546,14 @@ pub struct AttachmentMetadata {
     pub dimensions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f32>,
+    #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_base64: Option<String>,
+}
+
+fn default_attachment_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 impl AttachmentMetadata {
@@ -1008,7 +1015,7 @@ pub fn parse_mp4_dimensions_and_duration(data: &[u8]) -> (Option<String>, Option
                 if pos + 16 > slice.len() {
                     break;
                 }
-                let size64 = u64::from_be_bytes([
+                let raw_size = u64::from_be_bytes([
                     slice[pos + 8],
                     slice[pos + 9],
                     slice[pos + 10],
@@ -1017,17 +1024,23 @@ pub fn parse_mp4_dimensions_and_duration(data: &[u8]) -> (Option<String>, Option
                     slice[pos + 13],
                     slice[pos + 14],
                     slice[pos + 15],
-                ]) as usize;
+                ]);
+                let Ok(size64) = usize::try_from(raw_size) else {
+                    break;
+                };
                 (size64, 16usize)
             } else if size32 == 0 {
                 (slice.len() - pos, 8usize)
             } else {
                 (size32 as usize, 8usize)
             };
-            if box_len < hdr_len || pos + box_len > slice.len() {
+            let Some(end) = pos.checked_add(box_len) else {
+                break;
+            };
+            if box_len < hdr_len || end > slice.len() {
                 break;
             }
-            let body = &slice[pos + hdr_len..pos + box_len];
+            let body = &slice[pos + hdr_len..end];
             if box_type == b"moov" || box_type == b"trak" {
                 walk_boxes(body, dims, dur);
             } else if box_type == b"mvhd" && dur.is_none() && !body.is_empty() {
@@ -1068,7 +1081,7 @@ pub fn parse_mp4_dimensions_and_duration(data: &[u8]) -> (Option<String>, Option
             if dims.is_some() && dur.is_some() {
                 break;
             }
-            pos += box_len;
+            pos = end;
         }
     }
 
@@ -1203,15 +1216,22 @@ pub fn parse_ttl_duration(raw: &str) -> Result<chrono::Duration, String> {
         return Err("TTL duration must be greater than 0".to_string());
     }
 
-    match unit {
-        "ms" => Ok(chrono::Duration::milliseconds(val)),
-        "s" => Ok(chrono::Duration::seconds(val)),
-        "m" => Ok(chrono::Duration::minutes(val)),
-        "h" => Ok(chrono::Duration::hours(val)),
-        "d" => Ok(chrono::Duration::days(val)),
-        "w" => Ok(chrono::Duration::weeks(val)),
-        _ => Err(format!("Unsupported TTL unit '{}'", unit)),
-    }
+    let duration = match unit {
+        "ms" => chrono::Duration::try_milliseconds(val),
+        "s" => chrono::Duration::try_seconds(val),
+        "m" => val.checked_mul(60).and_then(chrono::Duration::try_seconds),
+        "h" => val
+            .checked_mul(3600)
+            .and_then(chrono::Duration::try_seconds),
+        "d" => val
+            .checked_mul(86400)
+            .and_then(chrono::Duration::try_seconds),
+        "w" => val
+            .checked_mul(7 * 86400)
+            .and_then(chrono::Duration::try_seconds),
+        _ => return Err(format!("Unsupported TTL unit '{}'", unit)),
+    };
+    duration.ok_or_else(|| format!("TTL duration out of range: {}{}", val, unit))
 }
 
 pub fn extract_meaningful_tokens(

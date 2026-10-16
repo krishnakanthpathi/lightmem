@@ -453,7 +453,12 @@ fn test_qa_regressions_attachments_webp_dedup_export_conflict_and_cli() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("qa_regressions.db");
     let home_dir = dir.path().join("home");
-    std::fs::create_dir_all(&home_dir).unwrap();
+    std::fs::create_dir_all(home_dir.join(".lightmem")).unwrap();
+    std::fs::write(
+        home_dir.join(".lightmem/config.json"),
+        serde_json::to_string(&hash_config()).unwrap(),
+    )
+    .unwrap();
     let bin = env!("CARGO_BIN_EXE_lmem");
 
     // 1. WebP dimensions (VP8X, VP8, VP8L)

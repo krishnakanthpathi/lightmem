@@ -93,7 +93,13 @@ fn test_core_lifecycle() {
     let exported = lm.export_okf(Some(&okf_path)).expect("export failed");
     assert!(exported.exists());
 
-    let imported_count = lm.import_file(&exported).expect("import failed");
+    assert!(
+        lm.import_file(&exported).is_err(),
+        "Importing conflicting IDs into existing DB without --replace must fail"
+    );
+    let imported_count = lm
+        .import_file_with_options(&exported, false, true)
+        .expect("import with replace failed");
     assert!(imported_count >= 1);
 }
 
@@ -160,8 +166,14 @@ fn test_password_category() {
     assert!(okf_content.contains("## PASSWORD"));
     assert!(okf_content.contains("### GitHub Token"));
 
-    // Import OKF back
-    let imported_count = lm.import_file(&exported).expect("import failed");
+    // Import OKF back (conflicting ID rejected without replace; succeeds with replace)
+    assert!(
+        lm.import_file(&exported).is_err(),
+        "Importing conflicting IDs into existing DB without --replace must fail"
+    );
+    let imported_count = lm
+        .import_file_with_options(&exported, false, true)
+        .expect("import with replace failed");
     assert_eq!(imported_count, 1);
 }
 

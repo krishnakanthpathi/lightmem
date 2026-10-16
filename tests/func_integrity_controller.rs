@@ -118,7 +118,13 @@ fn integrity_controller_embedding_migration_guard_and_unknown_backend() {
 
     // Writes and recalls are blocked until reindex is executed
     assert!(mem_mismatch
-        .remember("Should be blocked by identity mismatch", None, None, vec![], None)
+        .remember(
+            "Should be blocked by identity mismatch",
+            None,
+            None,
+            vec![],
+            None
+        )
         .is_err());
     assert!(mem_mismatch.recall("Initial", None, None, 5, None).is_err());
 }
@@ -428,7 +434,10 @@ fn func_controller_recall_expanded_list_pagination_and_get() {
     assert!(expanded_hits.iter().any(|h| h.memory.id == m2.id));
 
     // Count, list, list_paginated, list_page, and get
-    assert_eq!(mem.count(None, Some(MemoryStatus::Active), None).unwrap(), 2);
+    assert_eq!(
+        mem.count(None, Some(MemoryStatus::Active), None).unwrap(),
+        2
+    );
     assert_eq!(mem.list(None, None, None, 10).unwrap().len(), 2);
 
     let p1 = mem
@@ -512,7 +521,7 @@ fn func_controller_attachments_materialize_deduplicate_forget_and_clear() {
     let saved = mem.save_attachments_to(&m1.id, &custom_dir).unwrap();
     assert_eq!(saved.len(), 1);
     let saved_multi = mem
-        .save_memories_attachments_to(&[m1.id.clone()], &custom_dir.join("multi"))
+        .save_memories_attachments_to(std::slice::from_ref(&m1.id), &custom_dir.join("multi"))
         .unwrap();
     assert_eq!(saved_multi.len(), 1);
 
@@ -623,7 +632,13 @@ fn func_controller_graph_export_import_answer_and_observe() {
     // 1. Observe & batch save candidates
     let transcript = "User: I always use 4 spaces for Rust indentation.\nAssistant: Got it.\nDecision: We chose SQLite WAL mode for concurrent reads.";
     let candidates = mem
-        .observe_and_extract(transcript, None, Some(&["obs".to_string()]), Some(0.5), None)
+        .observe_and_extract(
+            transcript,
+            None,
+            Some(&["obs".to_string()]),
+            Some(0.5),
+            None,
+        )
         .unwrap();
     assert!(candidates.len() >= 2);
 
@@ -676,7 +691,7 @@ fn func_controller_graph_export_import_answer_and_observe() {
     let mem2 = LightMem::open_at(&db2_path, hash_config()).unwrap();
     let imported_count = mem2.import_file(&okf_export).unwrap();
     assert_eq!(imported_count, st.total_memories);
-    assert_eq!(mem2. deduplicate().unwrap(), 0);
+    assert_eq!(mem2.deduplicate().unwrap(), 0);
 }
 
 #[test]

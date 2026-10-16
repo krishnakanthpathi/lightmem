@@ -328,21 +328,40 @@ impl LightMemConfig {
         let dir = Self::config_dir();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create config dir {:?}", dir))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
 
         let json = serde_json::to_string_pretty(self)?;
         let temp = dir.join(format!("config-{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&temp, json).with_context(|| "Failed to write config file")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600));
+        }
         if let Err(error) = std::fs::rename(&temp, Self::config_file()) {
             let _ = std::fs::remove_file(temp);
             return Err(error.into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                Self::config_file(),
+                std::fs::Permissions::from_mode(0o600),
+            );
         }
         Ok(())
     }
 
     /// Resolve active database path:
-    /// 1. If force_global: always ~/.lightmem/memories.db
-    /// 2. If ./.lightmem.db exists in current directory or git root: return local project db
-    /// 3. Otherwise: ~/.lightmem/memories.db
+    /// 1. If LIGHTMEM_DB environment variable is set: return custom database path
+    /// 2. If force_global: always ~/.lightmem/memories.db
+    /// 3. If ./.lightmem.db exists in current directory or git root: return local project db
+    /// 4. Otherwise: ~/.lightmem/memories.db
     pub fn resolve_db_path(force_global: bool) -> PathBuf {
         if let Ok(custom_path) = std::env::var("LIGHTMEM_DB") {
             let trimmed = custom_path.trim();

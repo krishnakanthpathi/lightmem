@@ -42,7 +42,14 @@ impl EmbeddingProvider for WrongBatchSizeEmbedder {
 }
 
 fn make_mem(id: &str, title: &str, content: &str, cat: MemoryType) -> MemoryRecord {
-    let mut m = MemoryRecord::new(cat, title.to_string(), content.to_string(), vec![], 0.9, None);
+    let mut m = MemoryRecord::new(
+        cat,
+        title.to_string(),
+        content.to_string(),
+        vec![],
+        0.9,
+        None,
+    );
     m.id = id.to_string();
     m
 }
@@ -76,7 +83,12 @@ fn integrity_storage_open_permissions_future_version_and_legacy_repair() {
         assert_eq!(mode, 0o600, "Database file must be owner-only (0600)");
     }
 
-    let m = make_mem("m1", "Legacy Tag Row", "Content for repair", MemoryType::Fact);
+    let m = make_mem(
+        "m1",
+        "Legacy Tag Row",
+        "Content for repair",
+        MemoryType::Fact,
+    );
     storage.insert_memory(&m, None).unwrap();
     drop(storage);
 
@@ -113,24 +125,26 @@ fn integrity_storage_open_permissions_future_version_and_legacy_repair() {
 #[test]
 fn func_insert_memory_and_indexed_batches() {
     let storage = Storage::open_in_memory().unwrap();
-    let m1 = make_mem("id-11111111", "Redis", "Redis runs on port 6379", MemoryType::Fact);
+    let m1 = make_mem(
+        "id-11111111",
+        "Redis",
+        "Redis runs on port 6379",
+        MemoryType::Fact,
+    );
     storage
         .insert_indexed_batch(&[m1], &FixedEmbedder(vec![1.0, 0.0]), "id-v1", true)
         .unwrap();
 
-    assert_eq!(storage.embedding_identity().unwrap().as_deref(), Some("id-v1"));
+    assert_eq!(
+        storage.embedding_identity().unwrap().as_deref(),
+        Some("id-v1")
+    );
     assert!(storage.check_embedding_identity("id-v1").is_ok());
 
     let att = AttachmentInput::from_bytes("note.txt", b"hello attachment".to_vec());
     let m2 = make_mem("id-22222222", "Note", "Attached note", MemoryType::Artifact);
     let stored = storage
-        .insert_indexed_with_attachments(
-            &m2,
-            &[att],
-            &FixedEmbedder(vec![0.0, 1.0]),
-            "id-v1",
-            true,
-        )
+        .insert_indexed_with_attachments(&m2, &[att], &FixedEmbedder(vec![0.0, 1.0]), "id-v1", true)
         .unwrap();
     assert_eq!(stored.attachments.len(), 1);
 }
@@ -150,7 +164,12 @@ fn integrity_insert_memory_validation_and_batch_rollback() {
     // Failing embedder or wrong batch size must roll back the entire transaction
     let valid = make_mem("id-valid", "Valid", "Valid content", MemoryType::Fact);
     assert!(storage
-        .insert_indexed_batch(&[valid.clone()], &FailingEmbedder, "id-v1", true)
+        .insert_indexed_batch(
+            std::slice::from_ref(&valid),
+            &FailingEmbedder,
+            "id-v1",
+            true
+        )
         .is_err());
     assert!(storage
         .insert_indexed_batch(&[valid], &WrongBatchSizeEmbedder, "id-v1", true)
@@ -172,7 +191,10 @@ fn func_index_snapshot_and_replace_index() {
     storage
         .replace_index(rev, "new-id", &[("m1".to_string(), vec![0.0, 1.0, 0.0])])
         .unwrap();
-    assert_eq!(storage.embedding_identity().unwrap().as_deref(), Some("new-id"));
+    assert_eq!(
+        storage.embedding_identity().unwrap().as_deref(),
+        Some("new-id")
+    );
     let vecs = storage
         .get_candidate_vectors_checked(None, None, None, Some("new-id"))
         .unwrap();
@@ -199,7 +221,10 @@ fn integrity_replace_index_rejects_stale_revision_missing_ids_and_nan() {
         .replace_index(rev, "new-id", &[("m1".to_string(), vec![f32::NAN, 0.0])])
         .is_err());
     // Old index remains intact
-    assert_eq!(storage.embedding_identity().unwrap().as_deref(), Some("old-id"));
+    assert_eq!(
+        storage.embedding_identity().unwrap().as_deref(),
+        Some("old-id")
+    );
 }
 
 // ============================================================================
@@ -208,7 +233,10 @@ fn integrity_replace_index_rejects_stale_revision_missing_ids_and_nan() {
 
 #[test]
 fn func_deduplicate_and_merge_and_duplicate_keys() {
-    assert_eq!(duplicate_key("  preserve Case & spaces  "), "preserve Case & spaces");
+    assert_eq!(
+        duplicate_key("  preserve Case & spaces  "),
+        "preserve Case & spaces"
+    );
 
     let mut rec = make_mem("m1", "T", "Body", MemoryType::Fact);
     let att = AttachmentInput::from_bytes("a.txt", b"payload".to_vec());
@@ -236,7 +264,10 @@ fn func_deduplicate_and_merge_and_duplicate_keys() {
     let removed = storage.deduplicate_indexed(&emb, "hash-id").unwrap();
     assert_eq!(removed, 1);
     assert_eq!(storage.count_memories(None, None, None).unwrap(), 1);
-    let survivor = storage.list_memories(None, None, None, 10).unwrap().remove(0);
+    let survivor = storage
+        .list_memories(None, None, None, 10)
+        .unwrap()
+        .remove(0);
     assert_eq!(survivor.confidence, 0.95);
     assert_eq!(survivor.tags.len(), 2);
 }
@@ -247,8 +278,12 @@ fn integrity_deduplicate_unindexed_invalidates_embedding_state() {
     let r1 = make_mem("d1", "T1", "Dup text", MemoryType::Fact);
     let r2 = make_mem("d2", "T2", "Dup text", MemoryType::Fact);
     let emb = HashEmbeddingProvider;
-    storage.insert_indexed_batch(&[r1], &emb, "hash-id", false).unwrap();
-    storage.insert_indexed_batch(&[r2], &emb, "hash-id", false).unwrap();
+    storage
+        .insert_indexed_batch(&[r1], &emb, "hash-id", false)
+        .unwrap();
+    storage
+        .insert_indexed_batch(&[r2], &emb, "hash-id", false)
+        .unwrap();
 
     let removed = storage.deduplicate_and_merge().unwrap();
     assert_eq!(removed, 1);
@@ -360,12 +395,11 @@ fn func_attachments_save_copy_and_sha_reference() {
     assert!(storage.is_attachment_sha_referenced(&sha).unwrap());
 
     // Copy attachment from m1 to m2
-    let copied = storage.copy_attachments_between_memories("m1", "m2").unwrap();
+    let copied = storage
+        .copy_attachments_between_memories("m1", "m2")
+        .unwrap();
     assert_eq!(copied, 1);
-    assert_eq!(
-        storage.get_memory_attachments_data("m2").unwrap().len(),
-        1
-    );
+    assert_eq!(storage.get_memory_attachments_data("m2").unwrap().len(), 1);
 
     // Save attachments across multiple memories with filename collision disambiguation
     let out_dir = dir.path().join("exported_atts");
@@ -373,7 +407,10 @@ fn func_attachments_save_copy_and_sha_reference() {
         .save_memories_attachments_to(&["m1".to_string(), "m2".to_string()], &out_dir)
         .unwrap();
     assert_eq!(paths.len(), 2);
-    assert_ne!(paths[0], paths[1], "Duplicate filenames across memories must be disambiguated");
+    assert_ne!(
+        paths[0], paths[1],
+        "Duplicate filenames across memories must be disambiguated"
+    );
 }
 
 #[test]
@@ -387,16 +424,20 @@ fn integrity_attachment_sha256_corruption_detection() {
     // Intentionally mismatch the stored sha256 metadata vs raw data bytes
     att.metadata.sha256 =
         "0000000000000000000000000000000000000000000000000000000000000000".to_string();
-    let m1 = make_mem("m-tamper", "Tampered", "Tampered attachment", MemoryType::Artifact);
+    let m1 = make_mem(
+        "m-tamper",
+        "Tampered",
+        "Tampered attachment",
+        MemoryType::Artifact,
+    );
     storage
         .insert_indexed_with_attachments(&m1, &[att], &emb, "hash-id", false)
         .unwrap();
 
-    let err = storage
-        .get_memory_attachments_data("m-tamper")
-        .unwrap_err();
+    let err = storage.get_memory_attachments_data("m-tamper").unwrap_err();
     assert!(
-        err.to_string().contains("Attachment integrity verification failed"),
+        err.to_string()
+            .contains("Attachment integrity verification failed"),
         "Must detect SHA-256 mismatch on read"
     );
 }
@@ -455,7 +496,9 @@ fn func_graph_links_restore_copy_multihop_and_autolink() {
     // Multi-hop traversal from node-1 (2 hops: node-1 -> node-2 -> node-3)
     let related = storage.traverse_multi_hop("node-1", 2).unwrap();
     assert_eq!(related.len(), 2);
-    assert!(related.iter().any(|r| r.memory.id == "node-3" && r.distance == 2));
+    assert!(related
+        .iter()
+        .any(|r| r.memory.id == "node-3" && r.distance == 2));
 
     // Autolink vault (discovers title mentions & >=2 shared non-generic tags)
     let created_links = storage.autolink_vault(0.99).unwrap();
@@ -470,7 +513,9 @@ fn func_graph_links_restore_copy_multihop_and_autolink() {
     // Copy links & remove link
     let all = storage.all_links().unwrap();
     assert!(!all.is_empty());
-    assert!(storage.remove_link("node-2", "node-3", Some("depends_on")).unwrap());
+    assert!(storage
+        .remove_link("node-2", "node-3", Some("depends_on"))
+        .unwrap());
 }
 
 #[test]
@@ -485,8 +530,12 @@ fn integrity_graph_rejects_self_links_clamps_weights_and_handles_cycles() {
     assert!(storage.add_link("n1", "n1", None, None).is_err());
 
     // Weight clamping [0.01, 10.0] and cycle creation n1 <-> n2
-    storage.add_link("n1", "n2", Some("cycle"), Some(999.0)).unwrap();
-    storage.add_link("n2", "n1", Some("cycle"), Some(-5.0)).unwrap();
+    storage
+        .add_link("n1", "n2", Some("cycle"), Some(999.0))
+        .unwrap();
+    storage
+        .add_link("n2", "n1", Some("cycle"), Some(-5.0))
+        .unwrap();
 
     let links = storage.get_links_for_memory("n1").unwrap();
     assert!(links.iter().all(|l| (0.01..=10.0).contains(&l.weight)));
@@ -524,7 +573,13 @@ fn func_list_paginated_bm25_forget_clear_and_stats() {
     }
 
     let page1 = storage
-        .list_memories_paginated(Some(MemoryType::Fact), Some(MemoryStatus::Active), None, 2, 0)
+        .list_memories_paginated(
+            Some(MemoryType::Fact),
+            Some(MemoryStatus::Active),
+            None,
+            2,
+            0,
+        )
         .unwrap();
     assert_eq!(page1.total, 5);
     assert_eq!(page1.items.len(), 2);
@@ -563,12 +618,23 @@ fn integrity_bm25_injection_and_corrupt_vector_blob_rejection() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("corrupt_vec.db");
     let storage = Storage::open(&db_path).unwrap();
-    let m = make_mem("m1", "SQL Test", "Safe FTS5 query handling", MemoryType::Fact);
+    let m = make_mem(
+        "m1",
+        "SQL Test",
+        "Safe FTS5 query handling",
+        MemoryType::Fact,
+    );
     storage.insert_memory(&m, Some(&[1.0, 2.0])).unwrap();
 
     // Hostile FTS5 syntax characters must not cause SQL syntax errors
     let hostile = storage
-        .search_bm25("NEAR/2 \"unclosed 'quote (OR AND NOT * ^ : -", None, None, None, 5)
+        .search_bm25(
+            "NEAR/2 \"unclosed 'quote (OR AND NOT * ^ : -",
+            None,
+            None,
+            None,
+            5,
+        )
         .unwrap();
     assert!(hostile.is_empty());
 

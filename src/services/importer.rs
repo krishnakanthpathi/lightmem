@@ -70,6 +70,29 @@ impl ImportCandidate {
         let mut att_inputs = Vec::new();
         for mut meta in raw_attachments {
             meta.memory_id = record.id.clone();
+            let trimmed = meta.filename.trim();
+            anyhow::ensure!(
+                !trimmed.is_empty(),
+                "Imported attachment filename cannot be blank"
+            );
+            anyhow::ensure!(
+                !trimmed.contains("..")
+                    && !trimmed.contains('/')
+                    && !trimmed.contains('\\')
+                    && !std::path::Path::new(trimmed).is_absolute(),
+                "Attachment filename '{}' contains forbidden path traversal or directory separators",
+                meta.filename
+            );
+            let safe_name = std::path::Path::new(trimmed)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            anyhow::ensure!(
+                safe_name == trimmed,
+                "Attachment filename '{}' must be a single filename component",
+                meta.filename
+            );
+            meta.filename = safe_name.to_string();
             if let Some(b64) = meta.data_base64.take() {
                 let data = decode_base64(&b64).map_err(|e| {
                     anyhow::anyhow!(
@@ -573,8 +596,9 @@ pub fn extract_imported_links(raw: &str, is_json: bool) -> Vec<MemoryLink> {
                         get_str_field(rel, &["from", "source", "source_id"]),
                         get_str_field(rel, &["to", "target", "target_id"]),
                     ) {
-                        let relation = get_str_field(rel, &["relationType", "relation_type", "relation"])
-                            .unwrap_or_else(|| "relates_to".to_string());
+                        let relation =
+                            get_str_field(rel, &["relationType", "relation_type", "relation"])
+                                .unwrap_or_else(|| "relates_to".to_string());
                         let weight = get_str_field(rel, &["weight"])
                             .and_then(|s| s.parse::<f32>().ok())
                             .unwrap_or(1.0);

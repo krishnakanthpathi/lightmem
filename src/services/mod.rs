@@ -3,11 +3,11 @@ pub mod embeddings;
 pub mod exporter;
 pub mod graph_view;
 pub mod importer;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod observer;
 pub mod reranker;
 pub mod search;
-#[cfg(feature = "mcp")]
-pub mod mcp;
 
 pub use connect::{ConnectResult, ConnectService, PlatformInfo};
 #[cfg(feature = "mcp")]

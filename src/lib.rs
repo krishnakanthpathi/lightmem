@@ -19,6 +19,8 @@ pub use models::{
     ScoredMemory, StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
+#[cfg(feature = "mcp")]
+pub use services::McpServer;
 pub use services::{
     AnswerResult, ConnectResult, ConnectService, EmbeddingProvider, Exporter,
     HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker,
@@ -26,7 +28,5 @@ pub use services::{
     OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker,
     Reranker, Top1Reranker,
 };
-#[cfg(feature = "mcp")]
-pub use services::McpServer;
 
 pub use views::CliView;

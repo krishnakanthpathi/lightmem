@@ -408,7 +408,7 @@ impl McpServer {
                     "type": "object",
                     "properties": {}
                 }
-            })
+            }),
         ]
     }
 
@@ -467,17 +467,8 @@ impl McpServer {
                     .map(|s| s.to_string());
 
                 let (record, conflicts) = lm.remember_with_attachments(
-                    content,
-                    &files,
-                    extract,
-                    None,
-                    category,
-                    title,
-                    tags,
-                    confidence,
-                    ttl,
-                    supersede,
-                    provenance,
+                    content, &files, extract, None, category, title, tags, confidence, ttl,
+                    supersede, provenance,
                 )?;
 
                 Ok(json!({
@@ -497,10 +488,7 @@ impl McpServer {
                     .get("category")
                     .and_then(|v| v.as_str())
                     .and_then(|s| MemoryType::from_str(s).ok());
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(10) as usize;
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let min_sim = args
                     .get("min_similarity")
                     .and_then(|v| v.as_f64())
@@ -522,13 +510,17 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .and_then(|s| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok());
 
-                let results = lm.recall_expanded(
-                    query, category, as_of, on_date, limit, min_sim, multi_hop,
-                )?;
+                let results =
+                    lm.recall_expanded(query, category, as_of, on_date, limit, min_sim, multi_hop)?;
 
                 let ranked = if precision && !results.is_empty() {
                     let ans = lm.answer_with_options(
-                        query, category, as_of, on_date, limit, Some("onnx"),
+                        query,
+                        category,
+                        as_of,
+                        on_date,
+                        limit,
+                        Some("onnx"),
                     )?;
                     let mut res = results;
                     if let Some(ref selected) = ans.selected_memory {
@@ -575,10 +567,7 @@ impl McpServer {
                     .get("category")
                     .and_then(|v| v.as_str())
                     .and_then(|s| MemoryType::from_str(s).ok());
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(10) as usize;
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let reranker_override = args.get("reranker").and_then(|v| v.as_str());
                 let precision = args
                     .get("precision")
@@ -586,7 +575,8 @@ impl McpServer {
                     .unwrap_or(false);
 
                 let res = if precision || reranker_override.is_some() {
-                    let effective_r = reranker_override.or(if precision { Some("onnx") } else { None });
+                    let effective_r =
+                        reranker_override.or(if precision { Some("onnx") } else { None });
                     lm.answer_with_options(question, category, None, None, limit, effective_r)?
                 } else {
                     lm.answer(question, category, None, limit, false)?
@@ -606,10 +596,7 @@ impl McpServer {
                     .get("id")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: id")?;
-                let hops = args
-                    .get("hops")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(2) as usize;
+                let hops = args.get("hops").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
 
                 let related = lm.related(id, hops)?;
                 Ok(json!({
@@ -684,10 +671,7 @@ impl McpServer {
                     .get("id")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: id")?;
-                let hard = args
-                    .get("hard")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 let forgotten = lm.forget(id, hard)?;
                 Ok(json!({
@@ -759,10 +743,7 @@ mod tests {
         let resp = server.handle_request(req).expect("Response expected");
         let res = resp.result.unwrap();
         let tools = res["tools"].as_array().unwrap();
-        let tool_names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
         assert!(tool_names.contains(&"remember"));
         assert!(tool_names.contains(&"recall"));
