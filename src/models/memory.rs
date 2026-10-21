@@ -1093,6 +1093,8 @@ pub fn parse_mp4_dimensions_and_duration(data: &[u8]) -> (Option<String>, Option
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::models::MemoryContext>,
     pub id: String,
     pub category: MemoryType,
     pub title: String,
@@ -1120,6 +1122,7 @@ impl MemoryRecord {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4().to_string(),
+            context: None,
             category,
             title,
             content,

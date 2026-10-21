@@ -23,6 +23,116 @@ pub struct ConnectResult {
 pub struct ConnectService;
 
 impl ConnectService {
+    /// Install a harness binding that always selects the registered scope.
+    pub fn connect_bound(
+        connection: &crate::models::ResolvedConnection,
+        platform: Option<&str>,
+        workspace: bool,
+        custom_path: Option<&Path>,
+        mcp: bool,
+    ) -> Result<Vec<ConnectResult>> {
+        let id = &connection.context.connection_id;
+        let scope = serde_json::to_value(&connection.context.scope)?;
+        let scope = scope.as_str().unwrap();
+        let registry_dir = connection.registry_dir.to_string_lossy();
+        let shell_registry = registry_dir.replace('\'', "'\"'\"'");
+        let prefix = format!(
+            "LIGHTMEM_CONFIG_DIR='{shell_registry}' lmem --connection {id} --scope {scope} "
+        );
+        let key = platform.unwrap_or(&connection.context.harness_id);
+        let registered = connection.context.harness_id.as_str();
+        anyhow::ensure!(key == registered || Self::resolve_target(key, workspace).zip(Self::resolve_target(registered, workspace)).is_some_and(|(a,b)| a.0 == b.0), "Target harness must match the registered connection; register another connection for a different harness");
+        anyhow::ensure!(key != "all", "A bound connection targets one harness; register separate connections for each harness");
+        let (name, target) = if mcp {
+            anyhow::ensure!(custom_path.is_none(), "--path selects a skill target; configure custom MCP clients using lmem --connection <id> mcp");
+            Self::resolve_mcp_target(key, workspace).context("Automatic MCP configuration is unavailable for this harness; configure lmem --connection <id> mcp manually")?
+        } else if let Some(path) = custom_path.or(connection.skill_path.as_deref()) {
+            let target = if path.extension().is_some() {
+                path.to_path_buf()
+            } else {
+                path.join("lightmem/SKILL.md")
+            };
+            let content = Self::bound_skill_content(connection, scope, &prefix);
+            let (created, message) = Self::write_skill_content(&target, &content)?;
+            return Ok(vec![ConnectResult {
+                platform: key.into(),
+                target_file: target,
+                created,
+                message,
+            }]);
+        } else {
+            Self::resolve_target(key, workspace)
+                .context("Custom harness needs a registered skill path or --path")?
+        };
+        let (created, message) = if mcp {
+            Self::write_mcp_config_bound(
+                &target,
+                Some(vec![
+                    "--connection".into(),
+                    id.clone(),
+                    "--scope".into(),
+                    scope.into(),
+                    "mcp".into(),
+                ]),
+                Some(&connection.registry_dir),
+            )?
+        } else {
+            let content = Self::bound_skill_content(connection, scope, &prefix);
+            Self::write_skill_content(&target, &content)?
+        };
+        Ok(vec![ConnectResult {
+            platform: name.into(),
+            target_file: target,
+            created,
+            message,
+        }])
+    }
+    fn bound_skill_content(
+        connection: &crate::models::ResolvedConnection,
+        scope: &str,
+        prefix: &str,
+    ) -> String {
+        let context = serde_json::to_string_pretty(connection).expect("Connection is serializable");
+        format!(
+            r#"---
+name: lightmem
+description: Persistent memory for this registered user, agent, and harness connection.
+---
+
+# LightMem connection
+
+This harness is bound to the following identity and default scope:
+
+```json
+{context}
+```
+
+Use the command prefix below for every memory operation. It selects the registry and connection regardless of the current working directory. Do not combine it with `--db`, `LIGHTMEM_DB`, `-g`, or `--global`.
+
+```bash
+{prefix}context --json
+{prefix}recall "relevant project decisions" --json
+{prefix}remember "Decision: use SQLite WAL" -t decision --json
+{prefix}remember "A verified finding" -t learning --confidence 0.95 --provenance validated --json
+{prefix}remember "Current checkpoint" -t context --ttl 24h --json
+{prefix}remember "Architecture diagram" -f ./diagram.png --json
+{prefix}list -t decision --json
+{prefix}inspect <memory-id> --json
+{prefix}answer "What database did we choose?" --json
+{prefix}observe transcript.txt --dry-run --json
+{prefix}link <source-id> <target-id> -r depends_on --json
+{prefix}related <memory-id> --hops 2 --json
+{prefix}graph --json
+{prefix}stats --json
+```
+
+Before working, recall relevant decisions, instructions, and context. Save atomic verified facts, decisions, preferences, and useful handoff notes with `remember`. `observe` extracts candidates from supplied text; installation does not automatically record conversations. Pass `--session <current-session-id>` when the harness provides one, and use a new ID for a new conversation.
+
+The default scope is `{scope}`. Each command reads or writes one vault. To access personal preferences replace `--scope {scope}` with `--scope user`. Use `--scope project` for shared decisions (requires a registered project) and `--scope agent` for dedicated agent notes. Query another scope explicitly when needed. Memories retain their source identity through JSON export/import; deduplication retains the original source. Local identities organize memory and do not provide authentication.
+"#
+        )
+    }
+
     const KNOWN_PLATFORMS: &'static [&'static str] = &[
         "antigravity",
         "codex",
@@ -210,13 +320,17 @@ impl ConnectService {
     }
 
     fn write_skill_file(target: &Path) -> Result<(bool, String)> {
+        Self::write_skill_content(target, SKILL_MD_CONTENT)
+    }
+
+    fn write_skill_content(target: &Path, content: &str) -> Result<(bool, String)> {
         let is_new = !target.exists();
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {:?}", parent))?;
         }
 
-        std::fs::write(target, SKILL_MD_CONTENT)
+        std::fs::write(target, content)
             .with_context(|| format!("Failed to write skill file to {:?}", target))?;
 
         let msg = if is_new {
@@ -318,6 +432,14 @@ impl ConnectService {
     }
 
     fn write_mcp_config_file(target: &Path) -> Result<(bool, String)> {
+        Self::write_mcp_config_bound(target, None, None)
+    }
+
+    fn write_mcp_config_bound(
+        target: &Path,
+        args: Option<Vec<String>>,
+        registry_dir: Option<&Path>,
+    ) -> Result<(bool, String)> {
         let is_new = !target.exists();
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
@@ -326,17 +448,23 @@ impl ConnectService {
 
         let mut root: serde_json::Value = if target.exists() {
             let content = std::fs::read_to_string(target).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+            serde_json::from_str(&content)
+                .context("Existing MCP config is invalid JSON; refusing to overwrite it")?
         } else {
             serde_json::json!({})
         };
 
-        if !root.is_object() {
-            root = serde_json::json!({});
-        }
+        anyhow::ensure!(
+            root.is_object(),
+            "Existing MCP config must be a JSON object; refusing to overwrite it"
+        );
 
         let obj = root.as_object_mut().unwrap();
-        if !obj.contains_key("mcpServers") || !obj["mcpServers"].is_object() {
+        anyhow::ensure!(
+            !obj.contains_key("mcpServers") || obj["mcpServers"].is_object(),
+            "Existing mcpServers must be an object; refusing to overwrite it"
+        );
+        if !obj.contains_key("mcpServers") {
             obj.insert("mcpServers".to_string(), serde_json::json!({}));
         }
 
@@ -345,10 +473,21 @@ impl ConnectService {
             "lightmem".to_string(),
             serde_json::json!({
                 "command": "lmem",
-                "args": ["mcp"]
+                "args": args.unwrap_or_else(|| vec!["mcp".into()])
             }),
         );
 
+        if let Some(dir) = registry_dir {
+            mcp_servers
+                .get_mut("lightmem")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(
+                    "env".into(),
+                    serde_json::json!({"LIGHTMEM_CONFIG_DIR": dir}),
+                );
+        }
         let formatted = serde_json::to_string_pretty(&root)?;
         std::fs::write(target, formatted)
             .with_context(|| format!("Failed to write MCP config to {:?}", target))?;

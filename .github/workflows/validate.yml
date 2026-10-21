@@ -1,0 +1,38 @@
+name: Validate Rust and Python
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Rust formatting
+        run: cargo fmt --check
+      - name: Test Rust library, CLI, and MCP
+        run: cargo test --locked --lib --bins --tests
+      - name: Test Python SDK against the native binary
+        env:
+          PYTHONPATH: python/src
+          LMEM_BINARY_PATH: ${{ github.workspace }}/target/debug/lmem
+          LIGHTMEM_CONFIG_DIR: ${{ runner.temp }}/lightmem-python-tests
+          LIGHTMEM_OFFLINE: "1"
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ["LIGHTMEM_CONFIG_DIR"])
+          root.mkdir(parents=True, exist_ok=True)
+          (root / "config.json").write_text(json.dumps({"backend":"hash", "onnx_model":None, "ollama_url":"http://localhost:11434", "embedding_model":"test", "reranker":"top1"}))
+          PY
+          python -m unittest discover -s python/tests -v

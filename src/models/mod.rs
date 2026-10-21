@@ -1,3 +1,7 @@
+pub mod identity;
+pub use identity::{
+    IdentityEntry, IdentityRegistry, MemoryContext, MemoryScope, ResolvedConnection,
+};
 pub mod config;
 pub mod link;
 pub mod memory;

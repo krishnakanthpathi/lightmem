@@ -8,6 +8,10 @@ import shutil
 import zipfile
 import platform
 import subprocess
+import base64
+import csv
+import hashlib
+import io
 from pathlib import Path
 
 
@@ -64,11 +68,26 @@ def build_platform_wheel(binary_path: str, platform_tag: str | None = None) -> P
 
     # Re-tag WHEEL file inside the zip archive
     with zipfile.ZipFile(base_whl, "r") as zin, zipfile.ZipFile(target_whl, "w") as zout:
+        records = []
+        record_path = None
         for item in zin.infolist():
+            if item.filename.endswith(".dist-info/RECORD"):
+                record_path = item.filename
+                continue
             content = zin.read(item.filename)
             if item.filename.endswith("WHEEL"):
                 content = content.replace(b"Tag: py3-none-any", f"Tag: py3-none-{platform_tag}".encode())
+                content = content.replace(b"Root-Is-Purelib: true", b"Root-Is-Purelib: false")
             zout.writestr(item, content)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
+            records.append((item.filename, f"sha256={digest}", str(len(content))))
+        if record_path is None:
+            raise ValueError("Built wheel has no RECORD manifest")
+        manifest = io.StringIO(newline="")
+        writer = csv.writer(manifest, lineterminator="\n")
+        writer.writerows(records)
+        writer.writerow((record_path, "", ""))
+        zout.writestr(record_path, manifest.getvalue())
 
     base_whl.unlink(missing_ok=True)
     return target_whl

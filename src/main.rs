@@ -22,6 +22,18 @@ struct Cli {
     #[arg(short = 'g', long, global = true)]
     global: bool,
 
+    /// Registered user/agent/harness connection (or LIGHTMEM_CONNECTION)
+    #[arg(long, global = true)]
+    connection: Option<String>,
+
+    /// Override the connection scope: user, project, or agent
+    #[arg(long, global = true)]
+    scope: Option<lightmem::MemoryScope>,
+
+    /// Source conversation/session ID for new memories
+    #[arg(long, global = true)]
+    session: Option<String>,
+
     /// Explicit path to SQLite database file
     #[arg(long, global = true)]
     db: Option<PathBuf>,
@@ -37,6 +49,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Register and inspect users, agents, harnesses, and named connections
+    Identity {
+        #[command(subcommand)]
+        action: IdentityCommand,
+        #[arg(long, global = true)]
+        json: bool,
+    },
+    /// Show the active connection, scope, source identity, and database
+    Context {
+        #[arg(long)]
+        json: bool,
+    },
     /// Store a memory principle, fact, or attached file/image/audio/document
     Remember {
         /// Content of the memory (optional when attaching files via -f/--file)
@@ -615,7 +639,91 @@ fn parse_exact_date(s: &str) -> Result<NaiveDate> {
     )
 }
 
-fn open_controller(db_path: Option<&Path>, global: bool) -> Result<LightMem> {
+#[derive(Subcommand)]
+enum IdentityCommand {
+    UserAdd {
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    AgentAdd {
+        id: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    HarnessAdd {
+        id: String,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    ConnectionAdd {
+        id: String,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        harness: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value = "user")]
+        memory_scope: lightmem::MemoryScope,
+    },
+    List {
+        #[arg(default_value = "connections")]
+        kind: String,
+    },
+    Show {
+        id: String,
+    },
+}
+
+fn run_identity(action: &IdentityCommand) -> Result<()> {
+    let registry = lightmem::IdentityRegistry::open_default()?;
+    let value = match action {
+        IdentityCommand::UserAdd { id, name } => {
+            serde_json::to_value(registry.add_user(id, name.as_deref())?)?
+        }
+        IdentityCommand::AgentAdd { id, user, name } => {
+            serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?
+        }
+        IdentityCommand::HarnessAdd { id, path, name } => {
+            serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?
+        }
+        IdentityCommand::ConnectionAdd {
+            id,
+            user,
+            agent,
+            harness,
+            project,
+            memory_scope,
+        } => serde_json::to_value(registry.add_connection(
+            id,
+            user,
+            agent,
+            harness,
+            project.clone(),
+            memory_scope.clone(),
+        )?)?,
+        IdentityCommand::List { kind } => registry.list(kind)?,
+        IdentityCommand::Show { id } => serde_json::to_value(registry.resolve(id, None, None)?)?,
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn open_controller(
+    db_path: Option<&Path>,
+    global: bool,
+    connection: Option<&lightmem::ResolvedConnection>,
+) -> Result<LightMem> {
+    if let Some(connection) = connection {
+        return LightMem::open_resolved(connection);
+    }
     if let Some(path) = db_path {
         let config = LightMemConfig::try_load()?;
         LightMem::open_at(path, config)
@@ -690,23 +798,67 @@ fn main() -> Result<()> {
     if cli.version {
         return CliView::render_version(cli.json);
     }
-    let env_db = std::env::var("LIGHTMEM_DB").ok().map(PathBuf::from);
-    let effective_db = cli.db.as_deref().or(env_db.as_deref());
+    if let Some(Commands::Identity { action, .. }) = &cli.command {
+        return run_identity(action);
+    }
+    let connection_id = cli.connection.clone().or_else(|| {
+        std::env::var("LIGHTMEM_CONNECTION")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    });
+    let env_db = std::env::var("LIGHTMEM_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    anyhow::ensure!(
+        connection_id.is_some() || (cli.scope.is_none() && cli.session.is_none()),
+        "--scope and --session require --connection"
+    );
+    anyhow::ensure!(
+        connection_id.is_none() || (cli.db.is_none() && env_db.is_none() && !cli.global),
+        "A connection cannot be combined with --db, LIGHTMEM_DB, or --global"
+    );
+    let resolved_connection = connection_id
+        .as_deref()
+        .map(|id| {
+            lightmem::IdentityRegistry::open_default()?.resolve(
+                id,
+                cli.scope.clone(),
+                cli.session.clone(),
+            )
+        })
+        .transpose()?;
+    let connection = resolved_connection.as_ref();
+    let effective_db = cli
+        .db
+        .as_deref()
+        .or(env_db.as_deref())
+        .or_else(|| connection.map(|c| c.db_path.as_path()));
     let global = cli.global;
 
     let Some(command) = cli.command else {
         if cli.json {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let stats = lm.stats()?;
             return CliView::render_stats(&stats, lm.db_path(), true);
         }
-        let lm = open_controller(effective_db, global)?;
+        let lm = open_controller(effective_db, global, connection)?;
         let stats = lm.stats()?;
         CliView::render_intro(lm.db_path(), &stats);
         return Ok(());
     };
 
     match command {
+        Commands::Identity { .. } => unreachable!(),
+        Commands::Context { .. } => {
+            let value = match connection {
+                Some(connection) => serde_json::to_value(connection)?,
+                None => {
+                    serde_json::json!({"connection_id": null, "db_path": effective_db.map(Path::to_path_buf).unwrap_or_else(|| LightMemConfig::resolve_db_path(global))})
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
         Commands::Remember {
             content,
             files,
@@ -730,7 +882,7 @@ fn main() -> Result<()> {
                 has_text || !files.is_empty(),
                 "Provide memory content or attach at least one file via --file / -f"
             );
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let tag_vec = tags
                 .map(|t| {
@@ -780,7 +932,7 @@ fn main() -> Result<()> {
             path,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let as_of_dt = as_of;
 
@@ -886,7 +1038,7 @@ fn main() -> Result<()> {
             path,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let st = Some(status);
             let as_of_dt = as_of;
@@ -998,7 +1150,7 @@ fn main() -> Result<()> {
             path,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             if path {
                 let mut ids = Vec::new();
                 for term in &terms {
@@ -1129,7 +1281,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Deduplicate { json } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let merged = lm.deduplicate()?;
             CliView::render_dedup(merged, json)?;
         }
@@ -1140,7 +1292,7 @@ fn main() -> Result<()> {
             hard,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             if all || id.as_deref() == Some("all") {
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(hard)?;
@@ -1159,7 +1311,7 @@ fn main() -> Result<()> {
 
         Commands::Clear { soft, json } => {
             let hard = !soft;
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let db_path = lm.db_path().to_path_buf();
             let removed = lm.clear_all(hard)?;
             drop(lm);
@@ -1175,7 +1327,7 @@ fn main() -> Result<()> {
             output,
             output_json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let exported_path = if json {
                 let target = output.unwrap_or_else(|| PathBuf::from("lightmem-backup.json"));
                 lm.export_json(&target)?
@@ -1191,7 +1343,7 @@ fn main() -> Result<()> {
             replace,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -1209,7 +1361,7 @@ fn main() -> Result<()> {
             limit,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let as_of_dt = as_of;
 
@@ -1241,7 +1393,7 @@ fn main() -> Result<()> {
             json,
         } => {
             if reset_db {
-                let lm = open_controller(effective_db, global)?;
+                let lm = open_controller(effective_db, global, connection)?;
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(true)?;
                 drop(lm);
@@ -1509,7 +1661,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Reindex { yes, json } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let migrated = migrate_embeddings(&lm, yes, json, true)?;
             if json {
                 let obj = serde_json::json!({
@@ -1522,7 +1674,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Stats { json } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let stats = lm.stats()?;
             CliView::render_stats(&stats, lm.db_path(), json)?;
         }
@@ -1533,7 +1685,7 @@ fn main() -> Result<()> {
             min_similarity,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -1610,7 +1762,7 @@ fn main() -> Result<()> {
             weight,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let (src_id, dst_id) = lm.link(&source, &target, Some(&relation), Some(weight))?;
             CliView::render_link(&src_id, &dst_id, &relation, weight, json)?;
         }
@@ -1621,19 +1773,19 @@ fn main() -> Result<()> {
             relation,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let removed = lm.unlink(&source, &target, relation.as_deref())?;
             CliView::render_unlink(&source, &target, relation.as_deref(), removed, json)?;
         }
 
         Commands::Related { id, hops, json } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let related = lm.related(&id, hops)?;
             CliView::render_related(&id, &related, json)?;
         }
 
         Commands::Graph { focus, hops, json } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let snapshot = lm.graph(focus.as_deref(), Some(hops))?;
             CliView::render_graph(&snapshot, json)?;
         }
@@ -1642,7 +1794,7 @@ fn main() -> Result<()> {
             min_similarity,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let new_links = lm.autolink(Some(min_similarity))?;
             let snapshot = lm.graph(None, None)?;
             CliView::render_autolink(new_links, snapshot.nodes.len(), snapshot.edges.len(), json)?;
@@ -1659,7 +1811,7 @@ fn main() -> Result<()> {
             reranker,
             json,
         } => {
-            let lm = open_controller(effective_db, global)?;
+            let lm = open_controller(effective_db, global, connection)?;
             if !dry_run && !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -1813,7 +1965,24 @@ fn main() -> Result<()> {
             json,
             mcp,
         } => {
-            if mcp {
+            if let Some(connection) = connection {
+                if list {
+                    CliView::render_platforms_list(
+                        &lightmem::ConnectService::list_platforms(workspace),
+                        workspace,
+                        json,
+                    )?;
+                } else {
+                    let results = lightmem::ConnectService::connect_bound(
+                        connection,
+                        platform.as_deref(),
+                        workspace,
+                        path.as_deref(),
+                        mcp,
+                    )?;
+                    CliView::render_connect(&results, json)?;
+                }
+            } else if mcp {
                 let results =
                     lightmem::ConnectService::connect_mcp(platform.as_deref(), workspace)?;
                 CliView::render_connect(&results, json)?;
@@ -1832,7 +2001,8 @@ fn main() -> Result<()> {
 
         #[cfg(feature = "mcp")]
         Commands::Mcp => {
-            let server = lightmem::McpServer::new(global, effective_db.map(Path::to_path_buf));
+            let server = lightmem::McpServer::new(global, effective_db.map(Path::to_path_buf))
+                .with_connection(connection.cloned());
             server.run_stdio()?;
         }
 

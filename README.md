@@ -150,6 +150,58 @@ print(f"Vault: {stats.active_memories} memories, {stats.vector_count} indexed ve
 
 ---
 
+## Identity-aware connections (v0.4.0)
+
+Register the person, the logical agent, and a named harness connection once:
+
+```bash
+lmem identity user-add alice --name "Alice"
+lmem identity agent-add coding --user alice
+lmem identity connection-add agy --user alice --agent coding --harness antigravity --project myapp --memory-scope project
+lmem identity connection-add codex --user alice --agent coding --harness codex --project myapp --memory-scope project
+
+lmem --connection agy --session chat-123 remember "Decision: use SQLite WAL" -t decision
+lmem --connection codex recall "database decision"
+lmem --connection codex context --json
+lmem --connection codex --scope agent remember "Current debugging checkpoint"
+lmem --connection agy connect
+lmem --connection agy connect --mcp
+```
+
+Connections for the same user/project open the same persistent project vault across harnesses. `user` scope follows the user; `agent` scope belongs to the user/agent and, when provided, project. Each command uses one scope. Switch with `--scope`; recall does not blend scopes. `LIGHTMEM_CONNECTION` can select a default connection. Do not combine a connection with `--db`, `LIGHTMEM_DB`, or `--global`.
+
+Register custom harnesses and deploy their bound instructions:
+
+```bash
+lmem identity harness-add my-harness --path /absolute/path/to/skills
+lmem identity connection-add custom --user alice --agent coding --harness my-harness --memory-scope user
+lmem --connection custom connect
+lmem identity list connections --json
+lmem identity list users --json
+```
+
+Custom MCP clients can launch `lmem --connection custom mcp`; automatic MCP configuration supports Antigravity, Claude, and Cursor. The MCP `context` tool shows the active binding. MCP `remember` also accepts a per-call `session_id` for conversation attribution. Connection IDs, user IDs, agent IDs, project IDs, and optional session IDs accept 1–128 ASCII letters, digits, underscores, or hyphens.
+
+The registry is stored in `~/.lightmem/identities.db` and scoped vaults under `~/.lightmem/vaults/` (or `LIGHTMEM_CONFIG_DIR`). Scope keys use hashes to avoid filesystem case collisions. All memory operations, including graph traversal, deduplication, conflicts, attachments, and export, operate on the selected vault. New memories expose optional `context` source metadata in JSON; exact duplicates retain their original source. Backups preserve source metadata even when deliberately imported into another vault.
+
+Existing commands and databases continue to work. Schema v5 adds optional source context; existing memories are not attributed to a user automatically. To copy existing memories into a new scope, explicitly export the old database and import into the selected connection. These are local organizational identities, not authentication. Connections do not automatically capture chats; agents must invoke `remember` or `observe`.
+
+```python
+from lmem import LightMem
+
+admin = LightMem()
+admin.register_user("alice")
+admin.register_agent("coding", "alice")
+admin.register_connection("agy", "alice", "coding", "antigravity", project_id="myapp", scope="project")
+
+memory = LightMem(connection="agy", session="chat-123")
+saved = memory.remember("Decision: use SQLite WAL", category="decision")
+print(saved.context)
+print(memory.context())
+```
+
+Python also exposes `register_harness`, `identities`, `connection_info`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
+
 ## 🔌 Model Context Protocol (MCP) Server
 
 LightMem features a native, zero-dependency **Model Context Protocol (MCP)** stdio server (JSON-RPC 2.0). It operates on-demand without background daemons and consumes 0% idle CPU.

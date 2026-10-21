@@ -47,6 +47,29 @@ impl LightMem {
         })
     }
 
+    /// Open one registered scope. Every storage operation uses the selected vault.
+    pub fn open_connection(
+        id: &str,
+        scope: Option<crate::models::MemoryScope>,
+        session: Option<String>,
+    ) -> Result<Self> {
+        let resolved =
+            crate::models::IdentityRegistry::open_default()?.resolve(id, scope, session)?;
+        Self::open_resolved(&resolved)
+    }
+
+    pub fn open_resolved(connection: &crate::models::ResolvedConnection) -> Result<Self> {
+        let config = LightMemConfig::try_load()?;
+        let embedding_identity = config.embedding_identity()?;
+        let storage = Storage::open(&connection.db_path)?.with_context(connection.context.clone());
+        Ok(Self {
+            storage: Arc::new(storage),
+            embedder: OnceLock::new(),
+            config,
+            embedding_identity,
+        })
+    }
+
     fn embedder(&self) -> Result<&Arc<dyn EmbeddingProvider>> {
         if let Some(emb) = self.embedder.get() {
             return Ok(emb);

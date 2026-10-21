@@ -10,7 +10,7 @@
 
 | Function / Method | Functionality Test | Integrity Test | Verified Invariants |
 | :--- | :--- | :--- | :--- |
-| `Storage::{open, open_in_memory, path}` & `migrate` | `func_storage_open_and_in_memory` | `integrity_storage_open_permissions_future_version_and_legacy_repair` | Enforces `0600` owner-only Unix permissions; enables WAL mode & foreign keys; repairs legacy comma-separated tags and empty `dedup_key`; refuses to open future `user_version > 4`. |
+| `Storage::{open, open_in_memory, path}` & `migrate` | `func_storage_open_and_in_memory` | `integrity_storage_open_permissions_future_version_and_legacy_repair` | Enforces `0600` owner-only Unix permissions; enables WAL mode & foreign keys; repairs legacy comma-separated tags and empty `dedup_key`; refuses to open future `user_version > 5`. |
 
 ---
 

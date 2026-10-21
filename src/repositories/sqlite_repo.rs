@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
+    context: Option<crate::models::MemoryContext>,
 }
 
 impl Storage {
@@ -43,6 +44,7 @@ impl Storage {
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             path: path_buf,
+            context: None,
         };
 
         storage.migrate()?;
@@ -54,10 +56,16 @@ impl Storage {
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             path: PathBuf::from(":memory:"),
+            context: None,
         };
         conn_settings(&storage)?;
         storage.migrate()?;
         Ok(storage)
+    }
+
+    pub fn with_context(mut self, context: crate::models::MemoryContext) -> Self {
+        self.context = Some(context);
+        self
     }
 
     pub fn path(&self) -> &Path {
@@ -69,10 +77,14 @@ impl Storage {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 4,
+            version <= 5,
             "Database schema is newer than this version of LightMem"
         );
-        if version == 4 {
+        if version >= 4 {
+            if version == 4 {
+                tx.execute("ALTER TABLE memories ADD COLUMN context_json TEXT", [])?;
+                tx.pragma_update(None, "user_version", 5)?;
+            }
             let needs_tag_or_key_repair: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM memories WHERE tags NOT LIKE '[%' OR (dedup_key = '' AND TRIM(content) != ''))",
@@ -82,8 +94,8 @@ impl Storage {
                 .unwrap_or(false);
             if needs_tag_or_key_repair {
                 repair_legacy_tags_and_dedup_keys(&tx)?;
-                tx.commit()?;
             }
+            tx.commit()?;
             return Ok(());
         }
 
@@ -277,7 +289,15 @@ impl Storage {
             END;
             "#,
         )?;
-        tx.pragma_update(None, "user_version", 4)?;
+        let has_context: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='context_json')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_context {
+            tx.execute("ALTER TABLE memories ADD COLUMN context_json TEXT", [])?;
+        }
+        tx.pragma_update(None, "user_version", 5)?;
         tx.commit()?;
         Ok(())
     }
@@ -287,7 +307,7 @@ impl Storage {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Low-level writes cannot prove the embedding model identity. Invalidate it.
         tx.execute("DELETE FROM embedding_state", [])?;
-        write_record(&tx, memory, true, |merged| {
+        write_record(&tx, memory, self.context.as_ref(), true, |merged| {
             if merged.to_card_text() != memory.to_card_text() {
                 return Ok(None);
             }
@@ -358,7 +378,7 @@ impl Storage {
         }
         let mut records = Vec::with_capacity(memories.len());
         for memory in memories {
-            let written = write_record(&tx, memory, merge, |_| Ok(None))?;
+            let written = write_record(&tx, memory, self.context.as_ref(), merge, |_| Ok(None))?;
             if let Some((_, att_inputs)) =
                 attachments_by_mem.iter().find(|(id, _)| *id == memory.id)
             {
@@ -371,10 +391,10 @@ impl Storage {
         // Later rows in one import may merge away an earlier survivor. Resolve all
         // returned records to their final survivor before embedding the final cards.
         for record in &mut records {
-            let exact = tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1", [&record.id], row_to_memory).optional()?;
+            let exact = tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE id=?1", [&record.id], row_to_memory).optional()?;
             let mut resolved = match exact {
                 Some(current) => current,
-                None if merge && record.status == MemoryStatus::Active => tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC LIMIT 1", params![record.category.as_str(), duplicate_key_for_record(record)], row_to_memory)?,
+                None if merge && record.status == MemoryStatus::Active => tx.query_row("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC LIMIT 1", params![record.category.as_str(), duplicate_key_for_record(record)], row_to_memory)?,
                 None => anyhow::bail!("An imported record unexpectedly disappeared"),
             };
             resolved.attachments = load_attachments_for_id(&tx, &resolved.id)?;
@@ -490,7 +510,7 @@ impl Storage {
         let mut removed = 0;
         for records in groups.into_values().filter(|g| g.len() > 1) {
             let primary = &records[0]; // all_records orders oldest first, with a stable ID tie-break.
-            write_record(&tx, primary, true, |merged| {
+            write_record(&tx, primary, self.context.as_ref(), true, |merged| {
                 if let Some((embedder, identity)) = indexed {
                     let v = embedder.embed(&merged.to_card_text())?;
                     validate_vector(&v)?;
@@ -522,7 +542,7 @@ impl Storage {
         };
         let mut opt = conn
             .query_row(
-                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
+                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE id=?1",
                 [id],
                 row_to_memory,
             )
@@ -549,7 +569,7 @@ impl Storage {
             let placeholders = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let sql = format!("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id IN ({})", placeholders);
+            let sql = format!("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE id IN ({})", placeholders);
             let mut stmt = conn.prepare(&sql)?;
             for row in stmt.query_map(rusqlite::params_from_iter(chunk), row_to_memory)? {
                 let mut record = row?;
@@ -570,7 +590,7 @@ impl Storage {
         };
         let mut opt = conn
             .query_row(
-                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
+                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE id=?1",
                 [id],
                 row_to_memory,
             )
@@ -1036,7 +1056,7 @@ impl Storage {
 
                 if let Some(mut mem) = conn
                     .query_row(
-                        "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE id=?1",
+                        "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE id=?1",
                         [&neighbor_id],
                         row_to_memory,
                     )
@@ -1473,7 +1493,7 @@ impl Storage {
 
         let conn = self.conn.lock().unwrap();
         let mut query = String::from(
-            "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE 1=1"
+            "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE 1=1"
         );
 
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1877,7 +1897,20 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
             .ok()
     });
 
+    let context_json: Option<String> = row.get(11)?;
+    let context = context_json
+        .map(|raw| {
+            serde_json::from_str(&raw).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })
+        })
+        .transpose()?;
     Ok(MemoryRecord {
+        context,
         id,
         category,
         title,
@@ -1974,7 +2007,7 @@ pub fn duplicate_key_for_record(record: &MemoryRecord) -> String {
 }
 
 fn all_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
-    let mut stmt = conn.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories ORDER BY created_at ASC, id ASC")?;
+    let mut stmt = conn.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories ORDER BY created_at ASC, id ASC")?;
     let rows = stmt.query_map([], row_to_memory)?;
     let mut records: Vec<MemoryRecord> = rows.collect::<rusqlite::Result<_>>()?;
     drop(stmt);
@@ -2081,6 +2114,7 @@ fn bind_identity(conn: &Connection, identity: &str, dims: usize) -> Result<()> {
 fn write_record<F>(
     tx: &Transaction<'_>,
     memory: &MemoryRecord,
+    context: Option<&crate::models::MemoryContext>,
     merge: bool,
     embed: F,
 ) -> Result<MemoryRecord>
@@ -2096,9 +2130,12 @@ where
         "Confidence must be between 0 and 1"
     );
     let mut merged = memory.clone();
+    if merged.context.is_none() {
+        merged.context = context.cloned();
+    }
     let dedup_key = duplicate_key_for_record(memory);
     let duplicates: Vec<MemoryRecord> = if merge && memory.status == MemoryStatus::Active {
-        let mut stmt = tx.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC")?;
+        let mut stmt = tx.prepare("SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE status='active' AND category=?1 AND dedup_key=?2 ORDER BY created_at ASC, id ASC")?;
         let rows = stmt.query_map(params![memory.category.as_str(), &dedup_key], row_to_memory)?;
         let mut dups: Vec<MemoryRecord> = rows.collect::<rusqlite::Result<_>>()?;
         drop(stmt);
@@ -2118,6 +2155,7 @@ where
         if let Some(first) = duplicates.first() {
             merged.id = first.id.clone();
             merged.provenance = first.provenance.clone();
+            merged.context = first.context.clone();
         }
     }
     for existing in &duplicates {
@@ -2152,10 +2190,10 @@ where
     }
     let final_dedup_key = duplicate_key_for_record(&merged);
     let vector = embed(&merged)?;
-    tx.execute("INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, dedup_key)
-        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
-        ON CONFLICT(id) DO UPDATE SET category=excluded.category, title=excluded.title, content=excluded.content, tags=excluded.tags, confidence=excluded.confidence, status=excluded.status, provenance=excluded.provenance, created_at=excluded.created_at, updated_at=excluded.updated_at, expired_at=excluded.expired_at, dedup_key=excluded.dedup_key",
-        params![merged.id, merged.category.as_str(), merged.title, merged.content, serde_json::to_string(&merged.tags)?, merged.confidence, merged.status.as_str(), merged.provenance, merged.created_at.to_rfc3339(), merged.updated_at.to_rfc3339(), merged.expired_at.map(|t| t.to_rfc3339()), final_dedup_key])?;
+    tx.execute("INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, dedup_key, context_json)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+        ON CONFLICT(id) DO UPDATE SET category=excluded.category, title=excluded.title, content=excluded.content, tags=excluded.tags, confidence=excluded.confidence, status=excluded.status, provenance=excluded.provenance, created_at=excluded.created_at, updated_at=excluded.updated_at, expired_at=excluded.expired_at, dedup_key=excluded.dedup_key, context_json=excluded.context_json",
+        params![merged.id, merged.category.as_str(), merged.title, merged.content, serde_json::to_string(&merged.tags)?, merged.confidence, merged.status.as_str(), merged.provenance, merged.created_at.to_rfc3339(), merged.updated_at.to_rfc3339(), merged.expired_at.map(|t| t.to_rfc3339()), final_dedup_key, merged.context.as_ref().map(serde_json::to_string).transpose()?])?;
     tx.execute("DELETE FROM memory_vectors WHERE id=?1", [&merged.id])?;
     if let Some(vector) = vector {
         validate_vector(&vector)?;

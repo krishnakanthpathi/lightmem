@@ -52,6 +52,7 @@ class Memory:
     expired_at: Optional[str] = None
     attachments: List[AttachmentMetadata] = field(default_factory=list)
     saved_attachments: List[str] = field(default_factory=list)
+    context: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Memory:
@@ -59,6 +60,7 @@ class Memory:
         raw_atts = mem_data.get("attachments", [])
         saved_atts = mem_data.get("saved_attachments", data.get("saved_attachments", []))
         return cls(
+            context=mem_data.get("context"),
             id=mem_data.get("id", ""),
             category=mem_data.get("category", "fact"),
             title=mem_data.get("title", ""),

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportCandidate {
+    #[serde(default)]
+    pub context: Option<crate::models::MemoryContext>,
     pub id: Option<String>,
     pub category: Option<MemoryType>,
     pub title: String,
@@ -62,6 +64,7 @@ impl ImportCandidate {
             record.created_at = ts;
             record.updated_at = ts;
         }
+        record.context = self.context;
         record.updated_at = self.updated_at.unwrap_or(record.updated_at);
         record.expired_at = self.expired_at;
         record.status = self.status.unwrap_or(MemoryStatus::Active);
@@ -127,6 +130,7 @@ impl ImportCandidate {
 impl From<MemoryRecord> for ImportCandidate {
     fn from(m: MemoryRecord) -> Self {
         Self {
+            context: m.context,
             id: Some(m.id),
             category: Some(m.category),
             title: m.title,
@@ -457,6 +461,10 @@ fn parse_json_candidate(val: &serde_json::Value, _enrich: bool) -> Option<Import
         .unwrap_or_default();
 
     Some(ImportCandidate {
+        context: val
+            .get("context")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok()),
         id,
         category,
         title,
@@ -713,6 +721,7 @@ impl OkfMemoryImporter {
         });
 
         Some(ImportCandidate {
+            context: None,
             id,
             category: Some(resolved_cat),
             title: resolved_title,
@@ -782,6 +791,7 @@ impl MemoryImporter for OkfMemoryImporter {
                 let content = lines.join("\n").trim().to_string();
                 if !content.is_empty() {
                     candidates.push(ImportCandidate {
+                        context: None,
                         id: id.take(),
                         category: Some(cat),
                         title: t,

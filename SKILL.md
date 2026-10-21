@@ -263,3 +263,10 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
    - `lmem recall`, `lmem answer`, `lmem list`, `lmem inspect`, `lmem stats`, and `lmem conflicts` all support `--json` with clean, deterministic schemas, and `inspect`/`recall`/`list` support `--path` (`--paths`) for raw file path output.
 4. **Scope Project vs Global Memories**:
    - By default, `lmem` uses `./.lightmem.db` if present in the current directory or git root, falling back to `~/.lightmem/memories.db`. Pass `-g` (`--global`) to force the global vault or `--db <PATH>` for an isolated vault.
+
+
+## Registered identities and scopes (v0.4.0)
+
+When a harness supplies a registered connection, pass `--connection <id>` on every memory command (or set `LIGHTMEM_CONNECTION`). Inspect `lmem --connection <id> context --json` before writing. Use the selected user/project scope for shared decisions, `--scope user` for personal preferences, and `--scope agent` for dedicated agent context. Each command uses one vault; query other scopes explicitly when their context is needed. Use `--session <id>` when the harness supplies a session ID. Never combine a connection with `--db`, `LIGHTMEM_DB`, or `--global`.
+
+Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` to inspect bindings. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.

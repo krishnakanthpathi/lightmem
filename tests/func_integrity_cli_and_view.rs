@@ -704,13 +704,13 @@ fn test_new_cli_json_options_and_version() {
     let ver_plain = run_lmem(&cfg_dir, &db_path, &["--version"]);
     assert!(ver_plain.status.success());
     let ver_plain_str = String::from_utf8_lossy(&ver_plain.stdout);
-    assert!(ver_plain_str.contains("lmem 0.3.1"));
+    assert!(ver_plain_str.contains(&format!("lmem {}", env!("CARGO_PKG_VERSION"))));
 
     let ver_json = run_lmem(&cfg_dir, &db_path, &["--version", "--json"]);
     assert!(ver_json.status.success());
     let v_val: serde_json::Value = serde_json::from_slice(&ver_json.stdout).unwrap();
     assert_eq!(v_val["name"], "lightmem");
-    assert_eq!(v_val["version"], "0.3.1");
+    assert_eq!(v_val["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v_val["schema_version"], 1);
 
     // 2. version subcommand and version --json
@@ -719,7 +719,7 @@ fn test_new_cli_json_options_and_version() {
     let sub_ver_json = run_lmem(&cfg_dir, &db_path, &["version", "--json"]);
     assert!(sub_ver_json.status.success());
     let sub_val: serde_json::Value = serde_json::from_slice(&sub_ver_json.stdout).unwrap();
-    assert_eq!(sub_val["version"], "0.3.1");
+    assert_eq!(sub_val["version"], env!("CARGO_PKG_VERSION"));
 
     // 3. Export with --output-json
     let rem = run_lmem(&cfg_dir, &db_path, &["remember", "Memory to test export"]);

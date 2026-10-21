@@ -39,14 +39,30 @@ struct JsonRpcError {
 pub struct McpServer {
     global: bool,
     db_path: Option<PathBuf>,
+    connection: Option<crate::models::ResolvedConnection>,
 }
 
 impl McpServer {
     pub fn new(global: bool, db_path: Option<PathBuf>) -> Self {
-        Self { global, db_path }
+        Self {
+            global,
+            db_path,
+            connection: None,
+        }
+    }
+
+    pub fn with_connection(
+        mut self,
+        connection: Option<crate::models::ResolvedConnection>,
+    ) -> Self {
+        self.connection = connection;
+        self
     }
 
     fn open_controller(&self) -> Result<LightMem> {
+        if let Some(ref connection) = self.connection {
+            return LightMem::open_resolved(connection);
+        }
         if let Some(ref path) = self.db_path {
             let config = LightMemConfig::try_load().unwrap_or_default();
             LightMem::open_at(path, config)
@@ -191,12 +207,17 @@ impl McpServer {
 
     fn list_tools(&self) -> Vec<Value> {
         vec![
+            json!({ "name": "context", "description": "Show the active user, agent, harness, memory scope, and database", "inputSchema": {"type": "object", "properties": {}} }),
             json!({
                 "name": "remember",
                 "description": "Store a memory, fact, preference, decision, instruction, or attached file/image into persistent SQLite memory",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Current conversation ID for source attribution; user, agent, and harness remain bound by the server"
+                        },
                         "content": {
                             "type": "string",
                             "description": "Textual content of the memory (optional when attaching files)"
@@ -413,9 +434,29 @@ impl McpServer {
     }
 
     fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
-        let lm = self.open_controller()?;
+        let mut connection = self.connection.clone();
+        if name == "remember" {
+            if let Some(session) = args.get("session_id") {
+                let session = session.as_str().context("session_id must be a string")?;
+                crate::models::identity::validate_id(session)?;
+                let context = connection
+                    .as_mut()
+                    .context("session_id requires a registered server connection")?;
+                context.context.session_id = Some(session.into());
+            }
+        }
+        let lm = match &connection {
+            Some(connection) => LightMem::open_resolved(connection)?,
+            None => self.open_controller()?,
+        };
 
         match name {
+            "context" => Ok(match &self.connection {
+                Some(c) => serde_json::to_value(c)?,
+                None => {
+                    json!({"connection_id": null, "db_path": lm.db_path()})
+                }
+            }),
             "remember" => {
                 let content = args.get("content").and_then(|v| v.as_str());
                 let category = args

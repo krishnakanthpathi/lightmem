@@ -27,7 +27,20 @@ class LightMem:
         self,
         db_path: Optional[str | Path] = None,
         global_db: bool = False,
+        *,
+        connection: Optional[str] = None,
+        scope: Optional[str] = None,
+        session: Optional[str] = None,
     ):
+        if connection and (db_path or global_db):
+            raise ValueError("connection cannot be combined with db_path or global_db")
+        if (scope or session) and not connection:
+            raise ValueError("scope and session require a connection")
+        if scope is not None and scope not in ("user", "project", "agent"):
+            raise ValueError("scope must be user, project, or agent")
+        self.connection = connection
+        self.scope = scope
+        self.session = session
         self.db_path = str(db_path) if db_path else None
         self.global_db = global_db
 
@@ -37,7 +50,13 @@ class LightMem:
 
     def _build_base_args(self) -> List[str]:
         args: List[str] = []
-        if self.global_db:
+        if self.connection:
+            args.extend(["--connection", self.connection])
+            if self.scope:
+                args.extend(["--scope", self.scope])
+            if self.session:
+                args.extend(["--session", self.session])
+        elif self.global_db:
             args.append("--global")
         elif self.db_path:
             args.extend(["--db", self.db_path])
@@ -53,6 +72,44 @@ class LightMem:
             return json.loads(stdout)
         except json.JSONDecodeError as e:
             raise RuntimeError(f"Failed to parse JSON output from lmem {subcommand}: {stdout}") from e
+
+    def context(self) -> Dict[str, Any]:
+        """Inspect the active identity, scope, and persistent vault path."""
+        return self._call("context", [])
+
+    def register_user(self, user_id: str, name: Optional[str] = None) -> Dict[str, Any]:
+        args = ["user-add", user_id]
+        if name is not None:
+            args.extend(["--name", name])
+        return self._call("identity", args)
+
+    def register_agent(self, agent_id: str, user_id: str, name: Optional[str] = None) -> Dict[str, Any]:
+        args = ["agent-add", agent_id, "--user", user_id]
+        if name is not None:
+            args.extend(["--name", name])
+        return self._call("identity", args)
+
+    def register_harness(self, harness_id: str, path: Optional[str | Path] = None, name: Optional[str] = None) -> Dict[str, Any]:
+        args = ["harness-add", harness_id]
+        if path is not None:
+            args.extend(["--path", str(path)])
+        if name is not None:
+            args.extend(["--name", name])
+        return self._call("identity", args)
+
+    def register_connection(self, connection_id: str, user_id: str, agent_id: str, harness_id: str,
+                            project_id: Optional[str] = None, scope: str = "user") -> Dict[str, Any]:
+        args = ["connection-add", connection_id, "--user", user_id, "--agent", agent_id,
+                "--harness", harness_id, "--memory-scope", scope]
+        if project_id is not None:
+            args.extend(["--project", project_id])
+        return self._call("identity", args)
+
+    def identities(self, kind: str = "connections") -> List[Dict[str, Any]]:
+        return self._call("identity", ["list", kind])
+
+    def connection_info(self, connection_id: str) -> Dict[str, Any]:
+        return self._call("identity", ["show", connection_id])
 
     # 1. Store
     def remember(
@@ -316,6 +373,7 @@ class LightMem:
         platform: Optional[str] = None,
         workspace: bool = False,
         path: Optional[str] = None,
+        mcp: bool = False,
     ) -> List[Dict[str, Any]]:
         args = []
         if platform:
@@ -324,6 +382,8 @@ class LightMem:
             args.append("--workspace")
         if path:
             args.extend(["--path", path])
+        if mcp:
+            args.append("--mcp")
         return self._call("connect", args)
 
     # 14. Vault Telemetry & Stats
