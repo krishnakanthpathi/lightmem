@@ -918,7 +918,7 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
 
     // 2. Export via lmem CLI
     // Find lmem binary
-    let lmem_exe = std::env::current_exe()?.parent().unwrap().join("lmem");
+    let lmem_exe = PathBuf::from(env!("CARGO_BIN_EXE_lmem"));
 
     println!(
         "  Invoking CLI export: lmem --db {:?} export --okf -o {:?}",
