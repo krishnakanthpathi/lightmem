@@ -207,9 +207,36 @@ fn test_explicit_single_model_llm_extraction_on_attachment() {
 
     let server_handle = std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 8192];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            // A TCP read can contain only headers or part of the JSON body.
+            // Read the complete HTTP request before checking its model field.
+            let req_str = {
+                use std::io::{BufRead, BufReader};
+                let mut reader = BufReader::new(&mut stream);
+                let mut headers = String::new();
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(
+                        reader.read_line(&mut line).unwrap() > 0,
+                        "Incomplete HTTP request"
+                    );
+                    headers.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse::<usize>().unwrap();
+                        }
+                    }
+                }
+                let mut request_body = vec![0; content_length];
+                reader.read_exact(&mut request_body).unwrap();
+                headers + &String::from_utf8(request_body).unwrap()
+            };
             let body = r#"{"choices":[{"message":{"content":"Extracted diagram shows API Gateway routing to PostgreSQL 16 on port 5432."}}]}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
