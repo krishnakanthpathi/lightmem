@@ -1,6 +1,6 @@
 [package]
 name = "lightmem"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Ultra-fast, pure-Rust agent memory engine and CLI (lmem)"
 
@@ -22,7 +22,7 @@ default = ["mcp"]
 mcp = []
 
 [dependencies]
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
@@ -39,6 +39,7 @@ colored = "2.1"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "api-24", "download-binaries", "tls-rustls"] }
 tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 ndarray = { version = "0.17.2", default-features = false }
+zip = { version = "9.1", default-features = false, features = ["deflate-flate2"] }
+tempfile = "3.10"
 
 [dev-dependencies]
-tempfile = "3.10"

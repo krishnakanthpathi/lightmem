@@ -338,13 +338,20 @@ lmem conflicts --yes -r ollama:qwen2.5:3b # Synthesize merged memory using LLM
 
 ### 7. Import, Export & Agent Skills
 ```bash
+# Single-file compressed DB transfer bundle (.zip containing DB, all videos, photos, docs & vectors)
+lmem bundle export -o backup.zip
+lmem bundle info backup.zip
+lmem bundle import backup.zip                  # Full vault restore + media extraction
+lmem bundle import backup.zip --merge          # Merge into existing memories
+
 # Import structured JSON, JSONL, OKF directory, MCP Graph, or Memanto memory.md
 lmem import memories.json
 lmem import ~/.memanto/on-prem/exports/memory.md
 
-# Lossless backup export (Open Knowledge Format v2 or JSON)
+# Lossless backup export (Open Knowledge Format v2, JSON, or DB transfer bundle)
 lmem export --okf -o backup.okf
 lmem export --json -o backup.json
+lmem export --bundle -o backup.zip
 
 # Deploy LightMem skill to AI agent frameworks
 lmem connect all                      # Antigravity, Codex, Hermes, Cursor, Claude

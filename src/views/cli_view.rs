@@ -940,6 +940,127 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_bundle_export(
+        bundle_path: &Path,
+        manifest: &crate::services::BundleManifest,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "status": "ok",
+                "path": bundle_path.display().to_string(),
+                "manifest": manifest,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        println!(
+            "{} Exported DB transfer bundle {} {}",
+            Self::crimson_bold("📦"),
+            Self::slate("▸"),
+            Self::white_bold(&bundle_path.display().to_string())
+        );
+        println!(
+            "  {} Memories: {}  Links: {}  Attachments: {} ({} bytes)",
+            Self::slate("•"),
+            Self::emerald_bold(&manifest.stats.total_memories.to_string()),
+            Self::violet_bold(&manifest.stats.total_links.to_string()),
+            Self::crimson_bold(&manifest.stats.total_attachments.to_string()),
+            manifest.stats.total_attachment_bytes,
+        );
+        for (kind, count) in &manifest.stats.media_breakdown {
+            println!("    - {}: {}", kind, count);
+        }
+        Ok(())
+    }
+
+    pub fn render_bundle_import(
+        res: &crate::services::BundleImportResult,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(res)?);
+            return Ok(());
+        }
+
+        let mode_desc = if res.mode == "restore" {
+            "Restored entire vault from"
+        } else {
+            "Merged vault from"
+        };
+        println!(
+            "{} {} {}",
+            Self::emerald_bold("✓"),
+            Self::white_bold(mode_desc),
+            Self::white_bold(&res.bundle_file.display().to_string())
+        );
+        println!(
+            "  {} Memories: {}  Extracted attachments: {} ({} bytes)",
+            Self::slate("•"),
+            Self::emerald_bold(&res.memories_imported.to_string()),
+            Self::crimson_bold(&res.attachments_extracted.to_string()),
+            res.total_attachment_bytes,
+        );
+        Ok(())
+    }
+
+    pub fn render_bundle_info(
+        manifest: &crate::services::BundleManifest,
+        bundle_path: &Path,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(manifest)?);
+            return Ok(());
+        }
+
+        println!(
+            "{} Transfer Bundle: {}",
+            Self::crimson_bold("📦"),
+            Self::white_bold(&bundle_path.display().to_string())
+        );
+        println!("  Format:           {}", manifest.format);
+        println!("  LightMem Version: {}", manifest.lightmem_version);
+        println!("  Created:          {}", manifest.created_at.to_rfc3339());
+        println!("  DB SHA-256:       {}", manifest.db_sha256);
+        println!("  DB Size:          {} bytes", manifest.db_size_bytes);
+        if let Some(ref emb) = manifest.embedding_identity {
+            println!("  Embedding Model:  {}", emb);
+        }
+        println!();
+        println!("  {} Contents:", Self::white_bold("Summary"));
+        println!("    • Memories:    {}", manifest.stats.total_memories);
+        println!("    • Graph Links: {}", manifest.stats.total_links);
+        println!(
+            "    • Attachments: {} ({} bytes)",
+            manifest.stats.total_attachments, manifest.stats.total_attachment_bytes
+        );
+        for (kind, count) in &manifest.stats.media_breakdown {
+            println!("      - {}: {}", kind, count);
+        }
+        if !manifest.attachments.is_empty() {
+            println!();
+            println!("  {} Attached Media Files:", Self::white_bold("Indexed"));
+            for att in &manifest.attachments {
+                let dur = att
+                    .duration_secs
+                    .map(|d| format!(" ({:.1}s)", d))
+                    .unwrap_or_default();
+                let dim = att
+                    .dimensions
+                    .as_deref()
+                    .map(|d| format!(" [{}]", d))
+                    .unwrap_or_default();
+                println!(
+                    "    • {} ({} bytes, {}{}{})",
+                    att.filename, att.size_bytes, att.media_kind, dim, dur
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn render_version(json: bool) -> Result<()> {
         if json {
             let obj = serde_json::json!({

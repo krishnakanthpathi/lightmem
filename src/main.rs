@@ -266,15 +266,19 @@ enum Commands {
         json: bool,
     },
 
-    /// Export memories to Open Knowledge Format (OKF) or lossless JSON backup
+    /// Export memories to Open Knowledge Format (OKF), lossless JSON backup, or compressed DB transfer bundle (.zip)
     Export {
         /// Export to Open Knowledge Format bundle
         #[arg(long)]
         okf: bool,
 
         /// Lossless JSON backup format including expired memories and links
-        #[arg(long, conflicts_with = "okf")]
+        #[arg(long, conflicts_with_all = ["okf", "bundle"])]
         json: bool,
+
+        /// Export full database transfer bundle (.zip with DB, all video/photo files, embeddings, and manifest)
+        #[arg(long, conflicts_with_all = ["okf", "json"])]
+        bundle: bool,
 
         /// Output file path
         #[arg(short = 'o', long)]
@@ -285,9 +289,9 @@ enum Commands {
         output_json: bool,
     },
 
-    /// Import external memories from file (.json, .jsonl, or .okf/.md) or directory
+    /// Import external memories from file (.json, .jsonl, .okf/.md, or .zip transfer bundle) or directory
     Import {
-        /// Path to import file or OKF directory
+        /// Path to import file, OKF directory, or .zip transfer bundle
         file: PathBuf,
 
         /// Opt in to heuristic title/category enrichment
@@ -298,8 +302,20 @@ enum Commands {
         #[arg(long)]
         replace: bool,
 
+        /// Merge bundle into existing memories instead of requiring an empty vault or complete replacement
+        #[arg(long)]
+        merge: bool,
+
         /// Output result as JSON
         #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage portable compressed transfer bundles (.zip) with DB, video/photo files, and embeddings
+    Bundle {
+        #[command(subcommand)]
+        action: BundleCommand,
+        #[arg(long, global = true)]
         json: bool,
     },
 
@@ -637,6 +653,48 @@ fn parse_exact_date(s: &str) -> Result<NaiveDate> {
         "Invalid --date '{}'. Expected YYYY-MM-DD (e.g. 2026-09-20)",
         s
     )
+}
+
+#[derive(Subcommand, Debug)]
+enum BundleCommand {
+    /// Export active vault into a single compressed transfer .zip file containing the database and all video/photo media files
+    Export {
+        /// Output file path (.zip or .lmbundle)
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Import and unpack a transfer .zip file, restoring the database and extracting all video/photo files
+    Import {
+        /// Path to .zip transfer bundle
+        file: PathBuf,
+
+        /// Overwrite/replace the entire existing vault with the transfer bundle
+        #[arg(long)]
+        replace: bool,
+
+        /// Merge bundle into existing memories instead of replacing
+        #[arg(long)]
+        merge: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect a transfer .zip file's manifest and video/photo media summary without unpacking
+    Info {
+        /// Path to .zip transfer bundle
+        file: PathBuf,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1324,31 +1382,72 @@ fn main() -> Result<()> {
         Commands::Export {
             okf: _,
             json,
+            bundle,
             output,
             output_json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
-            let exported_path = if json {
+            let is_bundle = bundle
+                || output
+                    .as_ref()
+                    .and_then(|p| p.extension())
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("lmbundle"))
+                    .unwrap_or(false);
+
+            if is_bundle {
+                let exported_path = lm.export_bundle(output.as_deref())?;
+                let manifest = lm.inspect_bundle(&exported_path)?;
+                CliView::render_bundle_export(&exported_path, &manifest, output_json || json)?;
+            } else if json {
                 let target = output.unwrap_or_else(|| PathBuf::from("lightmem-backup.json"));
-                lm.export_json(&target)?
+                let exported_path = lm.export_json(&target)?;
+                CliView::render_export(&exported_path, true, output_json)?;
             } else {
-                lm.export_okf(output.as_deref())?
-            };
-            CliView::render_export(&exported_path, json, output_json)?;
+                let exported_path = lm.export_okf(output.as_deref())?;
+                CliView::render_export(&exported_path, false, output_json)?;
+            }
         }
 
         Commands::Import {
             file,
             enrich,
             replace,
+            merge,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
-            if !migrate_embeddings(&lm, false, json, false)? {
-                return Ok(());
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("lmbundle") {
+                let res = lm.import_bundle(&file, replace, merge)?;
+                CliView::render_bundle_import(&res, json)?;
+            } else {
+                if !migrate_embeddings(&lm, false, json, false)? {
+                    return Ok(());
+                }
+                let count = lm.import_file_with_options(&file, enrich, replace)?;
+                CliView::render_import(count, &file, json)?;
             }
-            let count = lm.import_file_with_options(&file, enrich, replace)?;
-            CliView::render_import(count, &file, json)?;
+        }
+
+        Commands::Bundle { action, json } => {
+            match action {
+                BundleCommand::Export { output, json: cmd_json } => {
+                    let lm = open_controller(effective_db, global, connection)?;
+                    let exported_path = lm.export_bundle(output.as_deref())?;
+                    let manifest = lm.inspect_bundle(&exported_path)?;
+                    CliView::render_bundle_export(&exported_path, &manifest, json || cmd_json)?;
+                }
+                BundleCommand::Import { file, replace, merge, json: cmd_json } => {
+                    let lm = open_controller(effective_db, global, connection)?;
+                    let res = lm.import_bundle(&file, replace, merge)?;
+                    CliView::render_bundle_import(&res, json || cmd_json)?;
+                }
+                BundleCommand::Info { file, json: cmd_json } => {
+                    let manifest = lightmem::services::bundle::BundleService::inspect_bundle(&file)?;
+                    CliView::render_bundle_info(&manifest, &file, json || cmd_json)?;
+                }
+            }
         }
 
         Commands::Answer {

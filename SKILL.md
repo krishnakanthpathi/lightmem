@@ -112,10 +112,14 @@ lmem get <MEMORY_ID> --json
 lmem forget <MEMORY_ID>                            # Soft-retire (status -> expired, keeps audit trail)
 lmem forget <MEMORY_ID> --hard                     # Permanently purge row + vector + FTS index
 
-# 8. Import / Export (Open Knowledge Format v2, JSONL, Mem0, LangChain, Letta, MCP Graph)
-lmem export ./memory_bundle                        # Export human-readable OKF v2 Markdown tree
-lmem export ./backup.json --json                   # Full lossless JSON backup envelope
-lmem import ./backup.json --enrich                 # Transactional import with heuristic enrichment
+# 8. Import / Export & DB Transfer Bundles (.zip, OKF v2, JSONL, Mem0, LangChain, Letta, MCP Graph)
+lmem bundle export -o ./vault_backup.zip        # Single-file compressed DB transfer bundle (DB, all videos, photos, docs & vectors)
+lmem bundle info ./vault_backup.zip            # Inspect bundle manifest, counts, and attached video/photo summary
+lmem bundle import ./vault_backup.zip          # Restore entire vault + extract all videos/photos into destination attachments/
+lmem bundle import ./vault_backup.zip --merge  # Merge memories and media into existing vault without wiping
+lmem export ./memory_bundle                    # Export human-readable OKF v2 Markdown tree
+lmem export ./backup.json --json               # Full lossless JSON backup envelope
+lmem import ./backup.json --enrich             # Transactional import with heuristic enrichment
 
 # 9. Engine, Reranker & Setup Wizard
 lmem setup                                         # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
@@ -249,6 +253,9 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 | `lmem graph --focus <id> -n 1` | Focused network tree or JSON subgraph for a node's immediate neighborhood | When inspecting node/edge cluster counts and topology around a concept |
 | `lmem answer "<question>"` | Exact extracted span (via ONNX `minilm-squad2` / `tinyroberta-squad2` or `ollama:<model>`), confidence `%`, and source memory ID | When answering a specific factual question (`"what port..."`, `"what is my..."`, `"who is..."`) |
 | `lmem conflicts` | Pairs of semantically similar + lexically overlapping memories with `[OLDER · UTC]` and `[NEWER · UTC]` timestamps | When cleaning up duplicate memories or merging updated facts into a single canonical record |
+| `lmem bundle export -o <file.zip>` | Single compressed `.zip` containing SQLite DB, all video/photo files, and SHA-256 manifest | When transferring or backing up a vault with all attached media to another machine |
+| `lmem bundle info <file.zip>` | Manifest inspection, memory counts, video/photo media breakdown, and SHA-256 hashes | When checking archive contents and file sizes before extracting |
+| `lmem bundle import <file.zip>` | Restores SQLite DB and unpacks video/photo files into `attachments/` without re-indexing | When importing or merging (`--merge`) a vault transfer bundle anywhere |
 
 ---
 
@@ -270,3 +277,41 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 When a harness supplies a registered connection, pass `--connection <id>` on every memory command (or set `LIGHTMEM_CONNECTION`). Inspect `lmem --connection <id> context --json` before writing. Use the selected user/project scope for shared decisions, `--scope user` for personal preferences, and `--scope agent` for dedicated agent context. Each command uses one vault; query other scopes explicitly when their context is needed. Use `--session <id>` when the harness supplies a session ID. Never combine a connection with `--db`, `LIGHTMEM_DB`, or `--global`.
 
 Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` to inspect bindings. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.
+
+---
+
+## Single-File DB Transfer Bundles (.zip) & Full Export/Import (v0.5.0)
+
+When migrating, sharing, or transferring a memory vault between machines, use **single-file transfer bundles**:
+
+1. **Why Transfer Bundles Over Raw JSON/DB Copies**:
+   - `export --json` base64-encodes media (33% size inflation) and forces the receiving machine to re-run neural embedding models across all memories from scratch.
+   - Raw database file copies can miss active WAL transactions (`-wal`/`-shm`) or leave orphaned attachments.
+   - `lmem bundle export` uses SQLite's atomic `VACUUM INTO` to create a pristine, zero-WAL database and packages it alongside all raw physical video (`.mp4`, `.mov`), image, audio, and document files into a single `.zip` file with SHA-256 manifest verification.
+
+2. **CLI Commands & `--help` Discovery**:
+   - `lmem --help`: Top-level CLI overview including `bundle`, `export`, and `import`.
+   - `lmem bundle --help`: Overview of bundle export, import, and inspection commands.
+   - `lmem bundle export --help` (or `lmem export --help`): Complete options for exporting bundles (`-o <path.zip>`, `--bundle`, `--json`).
+   - `lmem bundle import --help` (or `lmem import --help`): Complete options for importing bundles (`--replace`, `--merge`, `--json`).
+   - `lmem bundle info --help`: Options for inspecting bundle manifest without unpacking.
+
+3. **Core Command Syntax**:
+   ```bash
+   # Export complete vault (DB + all video, photo, audio & doc files) into a portable .zip bundle
+   lmem bundle export -o ./my_vault_backup.zip
+   # Alternative shorthand:
+   lmem export --bundle -o ./my_vault_backup.zip
+
+   # Inspect bundle contents (manifest, memory count, video resolutions, audio durations, byte sizes) without extracting
+   lmem bundle info ./my_vault_backup.zip
+   lmem bundle info ./my_vault_backup.zip --json
+
+   # Restore bundle on a new machine (replaces vault and extracts all video/photo files into attachments/)
+   lmem bundle import ./my_vault_backup.zip
+   # Or using standard import (auto-detects .zip):
+   lmem import ./my_vault_backup.zip
+
+   # Merge bundle into an existing database without overwriting existing memories
+   lmem bundle import ./my_vault_backup.zip --merge
+   ```

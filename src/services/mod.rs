@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod connect;
 pub mod embeddings;
 pub mod exporter;
@@ -9,6 +10,9 @@ pub mod observer;
 pub mod reranker;
 pub mod search;
 
+pub use bundle::{
+    BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService, BundleStats,
+};
 pub use connect::{ConnectResult, ConnectService, PlatformInfo};
 #[cfg(feature = "mcp")]
 pub use mcp::McpServer;

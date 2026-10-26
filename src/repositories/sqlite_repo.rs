@@ -616,6 +616,255 @@ impl Storage {
         Ok(conflicts)
     }
 
+    /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for all attachments in vault
+    pub fn all_attachments_data(&self) -> Result<Vec<(AttachmentMetadata, Vec<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at, data
+             FROM memory_attachments
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let meta = row_to_attachment_metadata(r)?;
+            let data: Vec<u8> = r.get(10)?;
+            Ok((meta, data))
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            let (meta, data) = item?;
+            let actual_sha = compute_sha256_hex(&data);
+            anyhow::ensure!(
+                actual_sha == meta.sha256 && data.len() as u64 == meta.size_bytes,
+                "Attachment integrity verification failed for '{}' (expected sha256:{}, got sha256:{})",
+                meta.filename,
+                meta.sha256,
+                actual_sha
+            );
+            out.push((meta, data));
+        }
+        Ok(out)
+    }
+
+    /// Snapshot and defragment database into a standalone single SQLite file (flushing WAL)
+    pub fn backup_to_file(&self, target_path: &Path) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        if target_path.exists() {
+            let _ = std::fs::remove_file(target_path);
+        }
+        let target_str = target_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid target path: {}", target_path.display()))?;
+        if let Err(_) = conn.execute("VACUUM INTO ?1", rusqlite::params![target_str]) {
+            let mut dst = rusqlite::Connection::open(target_path)?;
+            let backup = rusqlite::backup::Backup::new(&conn, &mut dst)?;
+            backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+        }
+        Ok(())
+    }
+
+    /// Restore and replace active database completely from an external SQLite file
+    pub fn restore_from_db_file(&self, src_db_path: &Path) -> Result<()> {
+        let src_conn = rusqlite::Connection::open_with_flags(
+            src_db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let mut conn = self.conn.lock().unwrap();
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut *conn)?;
+        backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+        drop(backup);
+        drop(src_conn);
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    }
+
+    /// Merge records, vectors, attachments, and graph links from another SQLite storage instance
+    pub fn merge_vault(&self, src: &Storage, replace: bool) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let src_conn = src.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let mut stmt = src_conn.prepare(
+            "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key FROM memories"
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, Option<String>>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, String>(12)?,
+            ))
+        })?;
+
+        let mut count = 0;
+        for row in rows {
+            let (
+                id,
+                category,
+                title,
+                content,
+                tags,
+                confidence,
+                status,
+                provenance,
+                created_at,
+                updated_at,
+                expired_at,
+                context_json,
+                dedup_key,
+            ) = row?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if exists && !replace {
+                continue;
+            }
+            if exists && replace {
+                tx.execute("DELETE FROM memories WHERE id=?1", [&id])?;
+            }
+            tx.execute(
+                "INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    id, category, title, content, tags, confidence, status, provenance, created_at,
+                    updated_at, expired_at, context_json, dedup_key
+                ],
+            )?;
+            count += 1;
+        }
+
+        // Vectors
+        let mut vec_stmt = src_conn.prepare("SELECT id, embedding, dims FROM memory_vectors")?;
+        let vec_rows = vec_stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for v in vec_rows {
+            let (id, emb, dims) = v?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+                [&id],
+                |r| r.get(0),
+            )?;
+            if exists {
+                tx.execute(
+                    "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
+                    rusqlite::params![id, emb, dims],
+                )?;
+            }
+        }
+
+        // Attachments
+        let mut att_stmt = src_conn.prepare(
+            "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at FROM memory_attachments"
+        )?;
+        let att_rows = att_stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, Option<f64>>(8)?,
+                r.get::<_, Vec<u8>>(9)?,
+                r.get::<_, String>(10)?,
+            ))
+        })?;
+        for a in att_rows {
+            let (
+                id,
+                memory_id,
+                filename,
+                mime_type,
+                media_kind,
+                size_bytes,
+                sha256,
+                dimensions,
+                duration_secs,
+                data,
+                created_at,
+            ) = a?;
+            let mem_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+                [&memory_id],
+                |r| r.get(0),
+            )?;
+            if mem_exists {
+                tx.execute(
+                    "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    rusqlite::params![
+                        id,
+                        memory_id,
+                        filename,
+                        mime_type,
+                        media_kind,
+                        size_bytes,
+                        sha256,
+                        dimensions,
+                        duration_secs,
+                        data,
+                        created_at
+                    ],
+                )?;
+            }
+        }
+
+        // Links
+        let mut link_stmt = src_conn.prepare(
+            "SELECT source_id, target_id, relation, weight, created_at FROM memory_links",
+        )?;
+        let link_rows = link_stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        for l in link_rows {
+            let (s, t, rel, weight, created_at) = l?;
+            let s_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+                [&s],
+                |r| r.get(0),
+            )?;
+            let t_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+                [&t],
+                |r| r.get(0),
+            )?;
+            if s_exists && t_exists {
+                tx.execute(
+                    "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![s, t, rel, weight, created_at],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(count)
+    }
+
     /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
     pub fn get_memory_attachments_data(
         &self,

@@ -36,8 +36,8 @@ class TestLightMemSDK(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_package_exports(self):
-        self.assertEqual(lmem.__version__, "0.4.0")
-        self.assertEqual(lightmem.__version__, "0.4.0")
+        self.assertEqual(lmem.__version__, "0.5.0")
+        self.assertEqual(lightmem.__version__, "0.5.0")
         self.assertTrue(callable(lmem.LightMem))
         self.assertTrue(callable(lightmem.LightMem))
         self.assertTrue(Path(self.client.binary_path).is_file())
@@ -246,6 +246,36 @@ class TestLightMemSDK(unittest.TestCase):
         self.assertIsNone(self.client.get("nonexistent-id-0000"))
         self.assertIsNone(self.client.inspect("nonexistent-id-0000"))
         self.assertEqual(self.client.inspect("nonexistent-id-0000", path=True), [])
+
+    def test_bundle_export_import_and_info(self):
+        # 1. Create a memory with file attachment
+        media_file = Path(self.temp_dir.name) / "sample_video.mp4"
+        media_file.write_bytes(b"\x00\x00\x00\x14ftypisom\x00\x00\x02\x00isom\x00\x00\x00\x08moov\x00\x00\x00\x10mdatHELLO_VIDEO")
+        self.client.remember("Memory with video", files=[str(media_file)])
+
+        # 2. Export bundle
+        bundle_file = Path(self.temp_dir.name) / "transfer.zip"
+        res = self.client.bundle_export(bundle_file)
+        self.assertEqual(res["status"], "ok")
+        self.assertTrue(bundle_file.is_file())
+
+        # 3. Info
+        info = self.client.bundle_info(bundle_file)
+        self.assertEqual(info["format"], "lightmem-bundle-v1")
+        self.assertEqual(info["stats"]["total_memories"], 1)
+        self.assertEqual(info["stats"]["total_attachments"], 1)
+
+        # 4. Restore into fresh client
+        fresh_db = Path(self.temp_dir.name) / "restored_vault.db"
+        fresh_client = lmem.LightMem(db_path=fresh_db)
+        import_res = fresh_client.bundle_import(bundle_file)
+        self.assertEqual(import_res["mode"], "restore")
+        self.assertEqual(import_res["memories_imported"], 1)
+
+        # Verify memory exists
+        mem = fresh_client.recall("video")
+        self.assertTrue(len(mem) >= 1)
+
 
 
 if __name__ == "__main__":

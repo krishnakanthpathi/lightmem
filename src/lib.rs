@@ -7,7 +7,7 @@ pub mod views;
 // Module aliases for seamless internal & external imports
 pub use models::config;
 pub use repositories::sqlite_repo as storage;
-pub use services::{connect, embeddings, exporter, importer, observer, reranker, search};
+pub use services::{bundle, connect, embeddings, exporter, importer, observer, reranker, search};
 
 // Primary SDK Re-exports
 pub use controllers::{LightMem, MemoryController};
@@ -25,7 +25,8 @@ pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]
 pub use services::McpServer;
 pub use services::{
-    AnswerResult, ConnectResult, ConnectService, EmbeddingProvider, Exporter,
+    AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService,
+    BundleStats, ConnectResult, ConnectService, EmbeddingProvider, Exporter,
     HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker,
     MemoryImporter, ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider,
     OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker,

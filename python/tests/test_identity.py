@@ -1,10 +1,16 @@
 """Exercise identity registration and scoped memory through the public Python SDK."""
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_SRC = REPO_ROOT / "python" / "src"
+if str(PYTHON_SRC) not in sys.path:
+    sys.path.insert(0, str(PYTHON_SRC))
 
 from lmem import LightMem
 from lmem.binary import ensure_binary_downloaded

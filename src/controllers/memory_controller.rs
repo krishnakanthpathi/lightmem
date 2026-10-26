@@ -979,6 +979,26 @@ impl LightMem {
         Exporter::export_json(&self.storage, target_path)
     }
 
+    /// Export the entire database, all videos, photos, documents, and vectors into a compressed ZIP transfer bundle
+    pub fn export_bundle(&self, target_path: Option<&Path>) -> Result<PathBuf> {
+        crate::services::BundleService::export_bundle(&self.storage, target_path)
+    }
+
+    /// Read and inspect a transfer bundle's manifest without unpacking
+    pub fn inspect_bundle(&self, bundle_path: &Path) -> Result<crate::services::BundleManifest> {
+        crate::services::BundleService::inspect_bundle(bundle_path)
+    }
+
+    /// Import a transfer bundle, restoring or merging the DB and materializing all video/photo files
+    pub fn import_bundle(
+        &self,
+        bundle_path: &Path,
+        replace: bool,
+        merge: bool,
+    ) -> Result<crate::services::BundleImportResult> {
+        crate::services::BundleService::import_bundle(&self.storage, bundle_path, replace, merge)
+    }
+
     /// Import memories from an external file (.json, .jsonl, or .md/.okf) or an OKF bundle directory
     pub fn import_file(&self, file_path: &Path) -> Result<usize> {
         self.import_file_with_options(file_path, false, false)
@@ -995,6 +1015,13 @@ impl LightMem {
         enrich: bool,
         replace: bool,
     ) -> Result<usize> {
+        if !file_path.is_dir() {
+            let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("lmbundle") {
+                let res = self.import_bundle(file_path, replace, false)?;
+                return Ok(res.memories_imported);
+            }
+        }
         let mut files = Vec::new();
         if file_path.is_dir() {
             let root = if file_path.join("memories").is_dir() {

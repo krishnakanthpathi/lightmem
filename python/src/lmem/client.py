@@ -423,3 +423,34 @@ class LightMem:
             else:
                 return [ObservedCandidate.from_dict(item) for item in data]
         return data
+
+    # 16. DB Transfer Bundles (.zip)
+    def bundle_export(self, output_path: Optional[str | Path] = None) -> Dict[str, Any]:
+        """Export the active vault, all video/photo files, and vector embeddings into a single .zip transfer bundle."""
+        args = ["export"]
+        if output_path:
+            args.extend(["-o", str(output_path)])
+        return self._call("bundle", args)
+
+    def bundle_import(
+        self,
+        bundle_path: str | Path,
+        replace: bool = False,
+        merge: bool = False,
+    ) -> Dict[str, Any]:
+        """Import a .zip transfer bundle, restoring the database and extracting all video/photo files."""
+        args = ["import", str(bundle_path)]
+        if replace:
+            args.append("--replace")
+        if merge:
+            args.append("--merge")
+        return self._call("bundle", args)
+
+    @staticmethod
+    def bundle_info(bundle_path: str | Path) -> Dict[str, Any]:
+        """Inspect a transfer bundle's manifest and video/photo media summary without unpacking."""
+        code, stdout, stderr = execute_lmem(["bundle", "info", str(bundle_path), "--json"])
+        if code != 0:
+            err = stderr.strip() or stdout.strip()
+            raise RuntimeError(f"lmem bundle info failed (exit code {code}): {err}")
+        return json.loads(stdout)
