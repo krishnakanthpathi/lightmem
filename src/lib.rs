@@ -26,11 +26,10 @@ pub use repositories::{SqliteRepository, Storage};
 pub use services::McpServer;
 pub use services::{
     AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService,
-    BundleStats, ConnectResult, ConnectService, EmbeddingProvider, Exporter,
-    HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker,
-    MemoryImporter, ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider,
-    OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker,
-    Reranker, Top1Reranker,
+    BundleStats, ConnectResult, ConnectService, EmbeddingProvider, Exporter, HashEmbeddingProvider,
+    HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker, MemoryImporter,
+    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
+    OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, Top1Reranker,
 };
 
 pub use views::CliView;

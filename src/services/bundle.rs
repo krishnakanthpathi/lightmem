@@ -105,12 +105,20 @@ impl BundleService {
             let safe_name = Path::new(&meta.filename)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .filter(|s| !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\'))
+                .filter(|s| {
+                    !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\')
+                })
                 .unwrap_or("attachment.bin");
 
             let entry_name = if used_entry_names.contains(safe_name) {
-                let stem = Path::new(safe_name).file_stem().and_then(|s| s.to_str()).unwrap_or("attachment");
-                let ext = Path::new(safe_name).extension().and_then(|e| e.to_str()).unwrap_or("");
+                let stem = Path::new(safe_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("attachment");
+                let ext = Path::new(safe_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
                 let short_sha = &meta.sha256[..meta.sha256.len().min(8)];
                 if ext.is_empty() {
                     format!("{}_{}", stem, short_sha)
@@ -176,8 +184,8 @@ impl BundleService {
         };
 
         let mut zip = ZipWriter::new(zip_file);
-        let options_deflate = SimpleFileOptions::default()
-            .compression_method(CompressionMethod::Deflated);
+        let options_deflate =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
         // Write manifest.json
         zip.start_file("manifest.json", options_deflate)?;
@@ -264,7 +272,8 @@ impl BundleService {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&attachments_dir, std::fs::Permissions::from_mode(0o700));
+            let _ =
+                std::fs::set_permissions(&attachments_dir, std::fs::Permissions::from_mode(0o700));
         }
 
         let mut extracted_count = 0;
@@ -284,7 +293,9 @@ impl BundleService {
                 let safe_filename = Path::new(&att.filename)
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .filter(|s| !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\'))
+                    .filter(|s| {
+                        !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\')
+                    })
                     .unwrap_or("attachment.bin");
 
                 let target_file = attachments_dir.join(safe_filename);

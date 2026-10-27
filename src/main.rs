@@ -1430,25 +1430,34 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::Bundle { action, json } => {
-            match action {
-                BundleCommand::Export { output, json: cmd_json } => {
-                    let lm = open_controller(effective_db, global, connection)?;
-                    let exported_path = lm.export_bundle(output.as_deref())?;
-                    let manifest = lm.inspect_bundle(&exported_path)?;
-                    CliView::render_bundle_export(&exported_path, &manifest, json || cmd_json)?;
-                }
-                BundleCommand::Import { file, replace, merge, json: cmd_json } => {
-                    let lm = open_controller(effective_db, global, connection)?;
-                    let res = lm.import_bundle(&file, replace, merge)?;
-                    CliView::render_bundle_import(&res, json || cmd_json)?;
-                }
-                BundleCommand::Info { file, json: cmd_json } => {
-                    let manifest = lightmem::services::bundle::BundleService::inspect_bundle(&file)?;
-                    CliView::render_bundle_info(&manifest, &file, json || cmd_json)?;
-                }
+        Commands::Bundle { action, json } => match action {
+            BundleCommand::Export {
+                output,
+                json: cmd_json,
+            } => {
+                let lm = open_controller(effective_db, global, connection)?;
+                let exported_path = lm.export_bundle(output.as_deref())?;
+                let manifest = lm.inspect_bundle(&exported_path)?;
+                CliView::render_bundle_export(&exported_path, &manifest, json || cmd_json)?;
             }
-        }
+            BundleCommand::Import {
+                file,
+                replace,
+                merge,
+                json: cmd_json,
+            } => {
+                let lm = open_controller(effective_db, global, connection)?;
+                let res = lm.import_bundle(&file, replace, merge)?;
+                CliView::render_bundle_import(&res, json || cmd_json)?;
+            }
+            BundleCommand::Info {
+                file,
+                json: cmd_json,
+            } => {
+                let manifest = lightmem::services::bundle::BundleService::inspect_bundle(&file)?;
+                CliView::render_bundle_info(&manifest, &file, json || cmd_json)?;
+            }
+        },
 
         Commands::Answer {
             question,

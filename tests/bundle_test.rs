@@ -1,6 +1,4 @@
-use lightmem::{
-    compute_sha256_hex, BundleService, LightMem, LightMemConfig, MemoryType,
-};
+use lightmem::{compute_sha256_hex, BundleService, LightMem, LightMemConfig, MemoryType};
 use std::fs::File;
 use std::io::Read;
 use tempfile::tempdir;
@@ -112,8 +110,14 @@ fn test_bundle_export_and_restore_with_video_and_photos() {
     assert_eq!(manifest.stats.total_memories, 2);
     assert_eq!(manifest.stats.total_links, 1);
     assert_eq!(manifest.stats.total_attachments, 2);
-    assert_eq!(manifest.stats.media_breakdown.get("video").copied(), Some(1));
-    assert_eq!(manifest.stats.media_breakdown.get("image").copied(), Some(1));
+    assert_eq!(
+        manifest.stats.media_breakdown.get("video").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        manifest.stats.media_breakdown.get("image").copied(),
+        Some(1)
+    );
     assert_eq!(manifest.attachments.len(), 2);
 
     // 4. Verify ZIP archive structure directly
@@ -150,9 +154,7 @@ fn test_bundle_export_and_restore_with_video_and_photos() {
     let dst_db = dst_dir.path().join("destination_vault.db");
     let lm_dst = LightMem::open_at(&dst_db, hash_config()).unwrap();
 
-    let res = lm_dst
-        .import_bundle(&bundle_path, false, false)
-        .unwrap();
+    let res = lm_dst.import_bundle(&bundle_path, false, false).unwrap();
     assert_eq!(res.mode, "restore");
     assert_eq!(res.memories_imported, 2);
     assert_eq!(res.attachments_extracted, 2);
@@ -236,7 +238,10 @@ fn test_bundle_merge_into_existing_vault() {
     // Vault 2 attachments folder has clip1.mp4
     let att_dir = dir2.path().join("attachments");
     assert!(att_dir.join("clip1.mp4").exists());
-    assert_eq!(std::fs::read(att_dir.join("clip1.mp4")).unwrap(), fake_video);
+    assert_eq!(
+        std::fs::read(att_dir.join("clip1.mp4")).unwrap(),
+        fake_video
+    );
 }
 
 #[test]
