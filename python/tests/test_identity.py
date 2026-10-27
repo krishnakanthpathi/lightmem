@@ -65,7 +65,7 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 ensure_binary_downloaded()
             self.assertEqual(download.call_count, 1)
-            self.assertIn("v0.4.0", download.call_args.args[0])
+            self.assertIn("v0.5.0", download.call_args.args[0])
 
     def test_invalid_identity_and_ambiguous_options(self):
         with self.assertRaises(RuntimeError):

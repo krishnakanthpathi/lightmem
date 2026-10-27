@@ -19,6 +19,8 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - [Performance & Comparison](#-performance--comparison)
 - [Quick Install](#-quick-install-macos-linux--windows)
 - [Python SDK Quickstart](#-python-sdk-quickstart)
+- [Identity-Aware Connections](#identity-aware-connections-v040)
+- [Single-File DB & Media Transfer Bundles](#single-file-db--media-transfer-bundles-v050)
 - [Model Context Protocol (MCP) Server](#-model-context-protocol-mcp-server)
 - [Core CLI Reference](#-core-cli-reference)
 - [Switching Rerankers & Embedding Models](#-switching-rerankers--embedding-models)
@@ -39,6 +41,7 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - **Multimodal BLOB Vault**: Secure `0600` file storage for images, diagrams, audio, and 4K video with SHA-256 integrity checks and instant path materialization (`--path`).
 - **Graph Multi-Hop Traversal**: Connect memories with Obsidian-style `[[wikilinks]]` or explicit directional edges and navigate relationship trees.
 - **Smart Conflict Merging**: Nearest-neighbor cosine similarity and token overlap scanner that finds and synthesizes conflicting facts into updated records.
+- **Portable DB & Media Transfer Bundles**: Export and import complete vaults—including SQLite tables, full vector embeddings, and all physical video, photo, audio, and PDF files—into a single compressed `.zip` bundle with zero re-indexing overhead.
 
 ---
 
@@ -146,6 +149,13 @@ related = lm.related(memory.id, hops=2)
 conflicts = lm.conflicts(min_similarity=0.80)
 stats = lm.stats()
 print(f"Vault: {stats.active_memories} memories, {stats.vector_count} indexed vectors.")
+
+# 8. Single-File DB & Media Transfer Bundles (Zero Re-embedding)
+# Packages checkpointed SQLite DB, all attached videos/photos/docs & vector embeddings into a .zip
+lm.bundle_export("my-vault.zip")
+info = lm.bundle_info("my-vault.zip")
+print(f"Backed up {info['record_count']} memories & {info['attachment_count']} attachments")
+lm.bundle_import("my-vault.zip", mode="replace")  # or mode="merge"
 ```
 
 ---
@@ -201,6 +211,32 @@ print(memory.context())
 ```
 
 Python also exposes `register_harness`, `identities`, `connection_info`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
+
+---
+
+## Single-File DB & Media Transfer Bundles (v0.5.0)
+
+Transfer complete memory vaults between machines, servers, or workstations in a single compressed file—including all SQLite tables, full vector embeddings, knowledge graph links, and attached physical video, photo, audio, and PDF files:
+
+```bash
+# Export complete vault with clean SQLite checkpoint (VACUUM INTO) & all physical media
+lmem bundle export -o my-vault.zip
+lmem export --bundle -o my-vault.zip
+
+# Inspect archive contents, record counts, and attachments without unzipping
+lmem bundle info my-vault.zip
+
+# Restore on a new machine with zero re-indexing or re-embedding overhead
+lmem bundle import my-vault.zip              # Clean restore (default: replace)
+lmem bundle import my-vault.zip --merge      # Merge into existing memories
+```
+
+Bundles use the standard `.zip` (or `.lmbundle`) format containing:
+- `memories.db`: Pristine SQLite database snapshot generated via `VACUUM INTO` (WAL flushed, defragmented).
+- `manifest.json`: Verification manifest with schema version, record counts, SHA-256 digests, and media metadata.
+- `attachments/`: Physical media files (4K videos, photos, voice notes, PDFs) extracted automatically to the target vault.
+
+---
 
 ## 🔌 Model Context Protocol (MCP) Server
 

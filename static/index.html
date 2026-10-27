@@ -16,7 +16,7 @@
   <link rel="stylesheet" href="/theme.css" />
   <link rel="stylesheet" href="/landing.css" />
   <script type="module" src="/site.js"></script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"LightMem","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux, Windows","softwareVersion":"0.4.0","license":"https://opensource.org/license/mit","description":"Local persistent memory for AI agents, with a Rust CLI, Python SDK, and MCP server.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"LightMem","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux, Windows","softwareVersion":"0.5.0","license":"https://opensource.org/license/mit","description":"Local persistent memory for AI agents, with a Rust CLI, Python SDK, and MCP server.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -35,7 +35,7 @@
     <section class="landing-hero" aria-labelledby="hero-title">
       <div class="shell hero-grid">
         <div>
-          <a class="release-link" href="/docs#integrations"><span class="badge badge-accent">v0.4.0</span> One memory. Every agent. <span aria-hidden="true">↗</span></a>
+          <a class="release-link" href="/docs#formats"><span class="badge badge-accent">v0.5.0</span> Single-file DB & media transfer bundles <span aria-hidden="true">↗</span></a>
           <h1 id="hero-title">New session.<br />Same <span>memory.</span></h1>
           <p class="hero-description">Your agent shouldn’t forget what you’ve already figured out. Give it persistent, searchable memory that lives right on your machine.</p>
           <div class="hero-actions">
@@ -66,7 +66,7 @@
         <div class="feature-grid">
           <article class="feature-card"><span class="feature-index">01 / PERSISTENCE</span><h3>Remember across sessions.</h3><p>Save durable facts and decisions. Connect your agent tools to a shared vault with project, user, and agent scopes.</p><div class="feature-detail">CLI · PYTHON SDK · MCP SERVER</div></article>
           <article class="feature-card"><span class="feature-index">02 / RETRIEVAL</span><h3>Find the useful part.</h3><p>Combine keyword and semantic search, then ask for an answer grounded in your stored memories.</p><div class="feature-detail">BM25 + VECTORS · EXTRACTIVE QA</div></article>
-          <article class="feature-card"><span class="feature-index">03 / OWNERSHIP</span><h3>Keep it on your machine.</h3><p>Store memories and attachments in local SQLite. Use local models, export your data, and choose when to connect Ollama.</p><div class="feature-detail">LOCAL STORAGE · MIT LICENSE</div></article>
+          <article class="feature-card"><span class="feature-index">03 / OWNERSHIP</span><h3>Keep it on your machine.</h3><p>Store memories and attachments in local SQLite. Export as single-file compressed .zip transfer bundles with all photos and videos, and choose when to connect Ollama.</p><div class="feature-detail">LOCAL STORAGE · DB BUNDLES (.ZIP) · MIT</div></article>
         </div>
       </div>
     </section>
@@ -103,6 +103,7 @@
         <div class="faq-list">
           <details open><summary>What is LightMem?</summary><p>LightMem is a local persistent memory engine for AI agents. A Rust CLI, Python SDK, and MCP server let your tools store and retrieve facts, preferences, decisions, and attachments across sessions.</p></details>
           <details><summary>Does it need a cloud service?</summary><p>The default engine uses local SQLite storage and local ONNX models. Models download on first use; once cached, the local configuration works offline. Ollama is optional and can use a local or remote endpoint.</p></details>
+          <details><summary>How do I transfer or back up my memories and videos?</summary><p>Use <code>lmem bundle export -o backup.zip</code> to package the SQLite database, all attached videos, images, and documents, and vector embeddings into a single compressed .zip file. On your new machine, run <code>lmem bundle import backup.zip</code> to restore everything in milliseconds without re-computing embeddings.</p></details>
           <details><summary>Can different agents share memory?</summary><p>Yes. Register your agent connections against the same user and project, then select the scope each tool should use. See the <a class="text-link" href="/docs#integrations">integration guide →</a> for setup.</p></details>
           <details><summary>How do I get started?</summary><p>Install with <code>pip install -U lmem</code> using Python 3.8 or newer. Native wheels are available for supported platforms; shell installers and source builds are also documented in the <a class="text-link" href="/docs#quickstart">quick start →</a>.</p></details>
         </div>

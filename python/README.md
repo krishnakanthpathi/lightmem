@@ -76,7 +76,14 @@ conflicts = lm.conflicts(min_similarity=0.80)
 stats = lm.stats()
 print(f"Active memories: {stats.active_memories} | Vectors: {stats.vector_count}")
 
-# 8. Deploy Skill to AI Agents (Antigravity, Codex, Hermes, Cursor, Claude)
+# 8. Single-File DB & Media Transfer Bundles (Zero Re-embedding)
+# Packages checkpointed SQLite DB, all attached videos/photos/docs & vector embeddings into a .zip
+lm.bundle_export("my-vault.zip")
+info = lm.bundle_info("my-vault.zip")
+print(f"Backed up {info['record_count']} memories & {info['attachment_count']} media files")
+lm.bundle_import("my-vault.zip", mode="replace")  # or mode="merge"
+
+# 9. Deploy Skill to AI Agents (Antigravity, Codex, Hermes, Cursor, Claude)
 lm.connect("antigravity")
 ```
 
@@ -91,6 +98,9 @@ lm.connect("antigravity")
 | `lm.answer(question, category=None, reranker=None, as_of=None, date=None)` | Extractive QA via local ONNX (`minilm-squad2`, `tinyroberta-squad2`), `ollama:<model>`, or `top1`. |
 | `lm.observe(input_text_or_path, yes=False, dry_run=False, reranker=None)` | Extract atomic candidate memories from dialogue transcripts or notes. |
 | `lm.inspect(memory_id, *extra_ids, save_to=None, path=False)` | Inspect full record + graph links + attachments, or materialize verified file paths (`path=True`). |
+| `lm.bundle_export(output_path)` | Export complete vault into a portable compressed `.zip` bundle (DB, vectors & all video/photo files). |
+| `lm.bundle_import(bundle_path, mode="replace")` | Restore (`mode="replace"`) or merge (`mode="merge"`) vault from a `.zip` transfer bundle. |
+| `lm.bundle_info(bundle_path)` | Inspect bundle manifest (record counts, attachments, schema) without extracting. |
 | `lm.list(page=None, limit=20, category=None, media=None, path=False)` | Paginated chronological listing (`PaginatedList` or `List[str]` paths when `path=True`). |
 | `lm.link(source, target, relation="relates_to", weight=1.0)` | Create or update a directional knowledge graph edge. |
 | `lm.unlink(source, target, relation=None)` | Remove a directional edge between two memories. |
@@ -120,8 +130,35 @@ lmem link <SRC_ID> <DST_ID> -r "depends_on"
 lmem related <ID> --hops 2
 lmem graph --focus <ID> --hops 2
 lmem conflicts
+lmem bundle export -o backup.zip
+lmem bundle info backup.zip
+lmem bundle import backup.zip --merge
 lmem connect all
 ```
+
+---
+
+## Single-File DB & Media Transfer Bundles (v0.5.0)
+
+Transfer complete memory vaults between machines, servers, or workstations in a single compressed file—including all SQLite tables, full vector embeddings, knowledge graph links, and attached physical video, photo, audio, and PDF files:
+
+```bash
+# Export complete vault with clean SQLite checkpoint (VACUUM INTO) & all physical media
+lmem bundle export -o my-vault.zip
+lmem export --bundle -o my-vault.zip
+
+# Inspect archive contents, record counts, and attachments without unzipping
+lmem bundle info my-vault.zip
+
+# Restore on a new machine with zero re-indexing or re-embedding overhead
+lmem bundle import my-vault.zip              # Clean restore (default: replace)
+lmem bundle import my-vault.zip --merge      # Merge into existing memories
+```
+
+Bundles use the standard `.zip` (or `.lmbundle`) format containing:
+- `memories.db`: Pristine SQLite database snapshot generated via `VACUUM INTO` (WAL flushed, defragmented).
+- `manifest.json`: Verification manifest with schema version, record counts, SHA-256 digests, and media metadata.
+- `attachments/`: Physical media files (4K videos, photos, voice notes, PDFs) extracted automatically to the target vault.
 
 ---
 
