@@ -18,20 +18,28 @@ let index;
 function getIndex() {
   if (index) return index;
   index = [
-    ...commands.map(element => ({
-      id: element.id,
-      title: 'lmem ' + element.querySelector('.command-name').textContent.trim().replace(/^\d+\s*/, ''),
-      description: element.querySelector('.command-desc').textContent,
-      text: normalize(element.textContent + ' ' + element.dataset.search),
-      command: true
-    })),
-    ...sections.map(element => ({
-      id: element.id,
-      title: element.querySelector('h1, h2').textContent,
-      description: element.querySelector('.lead, :scope > p')?.textContent || '',
-      text: normalize(element.dataset.search + ' ' + element.textContent),
-      command: false
-    }))
+    ...commands.map(element => {
+      const nameEl = element.querySelector('.command-name');
+      const descEl = element.querySelector('.command-desc');
+      const name = nameEl ? nameEl.textContent.trim().replace(/^\d+[a-z]?\s*/i, '') : element.id;
+      return {
+        id: element.id,
+        title: 'lmem ' + name,
+        description: descEl?.textContent || '',
+        text: normalize((element.textContent || '') + ' ' + (element.dataset.search || '')),
+        command: true
+      };
+    }),
+    ...sections.map(element => {
+      const heading = element.querySelector('h1, h2');
+      return {
+        id: element.id,
+        title: heading?.textContent?.trim() || element.id,
+        description: element.querySelector('.lead, :scope > p')?.textContent || '',
+        text: normalize((element.dataset.search || '') + ' ' + (element.textContent || '')),
+        command: false
+      };
+    })
   ];
   return index;
 }
@@ -162,12 +170,14 @@ function setActive(id) {
     else link.removeAttribute('aria-current');
   });
   const section = document.getElementById(id);
+  if (!section || !outline) return;
   const headings = [...section.querySelectorAll('h2, h3')];
   outline.replaceChildren();
-  (headings.length ? headings : [section.querySelector('h1')]).forEach(heading => {
+  const rawList = headings.length ? headings : [section.querySelector('h1')];
+  rawList.filter(Boolean).forEach(heading => {
     const link = document.createElement('a');
     link.href = '#' + (heading.id || id);
-    link.textContent = heading.textContent;
+    link.textContent = heading.textContent || '';
     outline.append(link);
   });
 }

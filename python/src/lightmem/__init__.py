@@ -12,6 +12,7 @@ from lmem import (
     StorageStats,
     PaginatedList,
     MemoryInspection,
+    ObservedCandidate,
     get_binary_path,
     __version__,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "StorageStats",
     "PaginatedList",
     "MemoryInspection",
+    "ObservedCandidate",
     "get_binary_path",
     "__version__",
 ]

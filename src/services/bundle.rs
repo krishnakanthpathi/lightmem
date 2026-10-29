@@ -11,6 +11,11 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::models::compute_sha256_hex;
 use crate::storage::Storage;
 
+const MAX_MANIFEST_SIZE: u64 = 32 * 1024 * 1024; // 32 MB
+const MAX_ATTACHMENT_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+const MAX_PREALLOCATION_BYTES: usize = 32 * 1024 * 1024; // 32 MB
+const MAX_DB_SIZE: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleStats {
     pub total_memories: usize,
@@ -217,7 +222,10 @@ impl BundleService {
             .by_name("manifest.json")
             .with_context(|| "Bundle archive is missing manifest.json")?;
         let mut content = String::new();
-        manifest_file.read_to_string(&mut content)?;
+        manifest_file
+            .by_ref()
+            .take(MAX_MANIFEST_SIZE)
+            .read_to_string(&mut content)?;
 
         let manifest: BundleManifest = serde_json::from_str(&content)
             .with_context(|| "Failed to parse manifest.json from bundle")?;
@@ -248,8 +256,15 @@ impl BundleService {
             let mut db_file = archive
                 .by_name("memories.db")
                 .with_context(|| "Bundle is missing memories.db")?;
+            anyhow::ensure!(
+                manifest.db_size_bytes <= MAX_DB_SIZE,
+                "Database declared size ({} bytes) exceeds maximum allowed limit ({} bytes)",
+                manifest.db_size_bytes,
+                MAX_DB_SIZE
+            );
             let mut out = File::create(&temp_db_path)?;
-            std::io::copy(&mut db_file, &mut out)?;
+            let mut limited = db_file.by_ref().take(MAX_DB_SIZE + 1);
+            std::io::copy(&mut limited, &mut out)?;
         }
 
         let db_bytes = std::fs::read(&temp_db_path)?;
@@ -281,8 +296,30 @@ impl BundleService {
 
         for att in &manifest.attachments {
             if let Ok(mut zip_att) = archive.by_name(&att.entry_path) {
-                let mut data = Vec::with_capacity(att.size_bytes as usize);
-                zip_att.read_to_end(&mut data)?;
+                anyhow::ensure!(
+                    att.size_bytes <= MAX_ATTACHMENT_SIZE,
+                    "Attachment '{}' declared size ({} bytes) exceeds maximum limit",
+                    att.filename,
+                    att.size_bytes
+                );
+                let alloc_capacity = (att.size_bytes as usize).min(MAX_PREALLOCATION_BYTES);
+                let mut data = Vec::with_capacity(alloc_capacity);
+                zip_att
+                    .by_ref()
+                    .take(MAX_ATTACHMENT_SIZE + 1)
+                    .read_to_end(&mut data)?;
+                anyhow::ensure!(
+                    data.len() as u64 <= MAX_ATTACHMENT_SIZE,
+                    "Attachment '{}' decompressed data exceeded maximum allowed size",
+                    att.filename
+                );
+                anyhow::ensure!(
+                    data.len() as u64 == att.size_bytes,
+                    "Attachment '{}' decompressed size mismatch: expected {} bytes, got {} bytes",
+                    att.filename,
+                    att.size_bytes,
+                    data.len()
+                );
                 let actual_sha = compute_sha256_hex(&data);
                 anyhow::ensure!(
                     actual_sha == att.sha256,
@@ -290,15 +327,26 @@ impl BundleService {
                     att.filename
                 );
 
-                let safe_filename = Path::new(&att.filename)
+                let safe_entry_filename = Path::new(&att.entry_path)
                     .file_name()
                     .and_then(|s| s.to_str())
                     .filter(|s| {
                         !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\')
                     })
-                    .unwrap_or("attachment.bin");
+                    .unwrap_or_else(|| {
+                        Path::new(&att.filename)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .filter(|s| {
+                                !s.is_empty()
+                                    && !s.contains("..")
+                                    && !s.contains('/')
+                                    && !s.contains('\\')
+                            })
+                            .unwrap_or("attachment.bin")
+                    });
 
-                let target_file = attachments_dir.join(safe_filename);
+                let target_file = attachments_dir.join(safe_entry_filename);
                 #[cfg(unix)]
                 {
                     use std::fs::OpenOptions;

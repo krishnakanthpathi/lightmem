@@ -1,4 +1,6 @@
-use crate::models::{encode_base64, AttachmentInput, LightMemConfig, MemoryRecord, MemoryType};
+use crate::models::{
+    encode_base64, AttachmentInput, EntityRecord, LightMemConfig, MemoryRecord, MemoryType,
+};
 use crate::services::reranker::OllamaReranker;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -1157,6 +1159,176 @@ impl ObserverService {
         let _ = std::fs::remove_file(&out_path);
         frame
     }
+
+    /// Extracts structured key-value entities (e.g. pincode, address, phone, email, names, IDs)
+    /// from memory content using the configured LLM.
+    pub fn extract_entities_via_llm(
+        text: &str,
+        reranker_spec: Option<&str>,
+        config: &LightMemConfig,
+    ) -> Result<Vec<EntityRecord>> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
+            || std::env::var_os("LIGHTMEM_OFFLINE").is_some()
+        {
+            anyhow::bail!("Offline mode active: skipping LLM entity extraction");
+        }
+
+        let raw_spec = reranker_spec.unwrap_or(&config.reranker);
+        let model_spec = raw_spec
+            .strip_prefix("ollama:")
+            .or_else(|| raw_spec.strip_prefix("openai:"))
+            .or_else(|| raw_spec.strip_prefix("llm:"))
+            .unwrap_or(raw_spec)
+            .trim();
+
+        let explicit_model = if matches!(
+            model_spec.to_lowercase().as_str(),
+            "ollama"
+                | "openai"
+                | "llm"
+                | "auto"
+                | "default"
+                | ""
+                | "minilm-squad2"
+                | "tinyroberta-squad2"
+                | "top1"
+                | "none"
+        ) {
+            None
+        } else {
+            Some(model_spec.to_string())
+        };
+
+        let ollama = OllamaReranker::with_api_key(
+            config.effective_ollama_url(),
+            explicit_model,
+            config.effective_ollama_api_key(),
+        );
+        let resolved_model = ollama.resolve_model();
+
+        let system_prompt = "You are a precise entity and slot extraction engine. Extract all key factual attributes, identifiers, and entities from the provided text (such as pincode, postal_code, address, city, country, phone, email, full_name, user_id, organization, port, role, etc.).\n\
+            Return ONLY a valid JSON array of objects matching schema:\n\
+            [\n\
+              {\n\
+                \"name\": \"entity_name_in_lowercase_snake_case\",\n\
+                \"val\": \"exact_extracted_value\"\n\
+              }\n\
+            ]\n\
+            If no specific entities or attributes are present, return [].";
+
+        let chat_url = format!("{}/v1/chat/completions", config.effective_ollama_url());
+        let payload = serde_json::json!({
+            "model": resolved_model,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": text }
+            ],
+            "temperature": 0.0,
+            "max_tokens": 1024
+        });
+
+        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(12));
+        if let Some(ref key) = config.effective_ollama_api_key() {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+
+        let resp = req
+            .send_json(payload)
+            .with_context(|| format!("Failed to connect to LLM at {}", chat_url))?;
+
+        let json_resp: serde_json::Value = resp
+            .into_json()
+            .context("Failed to parse LLM JSON response")?;
+
+        let raw_content = json_resp
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        Self::parse_entities_llm_json(&raw_content)
+    }
+
+    /// Parse LLM JSON array response into EntityRecords.
+    pub fn parse_entities_llm_json(raw: &str) -> Result<Vec<EntityRecord>> {
+        let trimmed = raw.trim();
+        let clean_json = if let Some(start) = trimmed.find("```json") {
+            let after = &trimmed[start + 7..];
+            if let Some(end) = after.find("```") {
+                &after[..end]
+            } else {
+                after
+            }
+        } else if let Some(start) = trimmed.find("```") {
+            let after = &trimmed[start + 3..];
+            if let Some(end) = after.find("```") {
+                &after[..end]
+            } else {
+                after
+            }
+        } else {
+            trimmed
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(clean_json.trim())
+            .context("Failed parsing LLM entities output as JSON")?;
+
+        let arr = parsed
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("LLM entities response is not a JSON array"))?;
+
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+
+        for item in arr {
+            let name = item
+                .get("name")
+                .or_else(|| item.get("key"))
+                .or_else(|| item.get("entity"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase()
+                .replace(' ', "_");
+
+            let val = item
+                .get("val")
+                .or_else(|| item.get("value"))
+                .and_then(|v| {
+                    if let Some(s) = v.as_str() {
+                        Some(s.to_string())
+                    } else if v.is_number() || v.is_boolean() {
+                        Some(v.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+
+            if !name.is_empty() && !val.is_empty() {
+                let key = format!("{}\0{}", name, val);
+                if seen.insert(key) {
+                    results.push(EntityRecord::new(name, val));
+                }
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -1220,5 +1392,25 @@ mod tests {
         let dirty = "Sure thing, understood, we decided to deploy on AWS.";
         let cleaned = ObserverService::clean_conversational_filler(dirty);
         assert_eq!(cleaned, "we decided to deploy on AWS.");
+    }
+
+    #[test]
+    fn test_parse_entities_llm_json() {
+        let raw = r#"```json
+        [
+            {"name": "pincode", "val": "500081"},
+            {"key": "city", "value": "Hyderabad"},
+            {"name": "PORT", "val": 8080}
+        ]
+        ```"#;
+        let entities =
+            ObserverService::parse_entities_llm_json(raw).expect("Should parse entities");
+        assert_eq!(entities.len(), 3);
+        assert_eq!(entities[0].name, "pincode");
+        assert_eq!(entities[0].val, "500081");
+        assert_eq!(entities[1].name, "city");
+        assert_eq!(entities[1].val, "Hyderabad");
+        assert_eq!(entities[2].name, "port");
+        assert_eq!(entities[2].val, "8080");
     }
 }

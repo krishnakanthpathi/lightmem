@@ -1,11 +1,15 @@
 # LightMem (lmem) Universal Windows PowerShell Installer
 # Usage: irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.ps1 | iex
 
+param(
+    [switch]$SkipModels
+)
+
 $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
 $Branch = "main"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.3.1" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.5.2" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Target = "x86_64-pc-windows-msvc"
 $ArchiveUrl = "https://github.com/$Repo/releases/download/$ReleaseTag/lmem-$Target.zip"
@@ -59,12 +63,18 @@ if ($UserPath -notlike "*$InstallDir*") {
     Write-Host "  ✓ Added $InstallDir to your User PATH" -ForegroundColor Green
 }
 
-Write-Host "  ◈ Pre-caching default ONNX embedding (bge-small) and Extractive QA (minilm-squad2) models..." -ForegroundColor Cyan
-$PrevErrPref = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-& $ExePath config --download bge-small
-& $ExePath config --download minilm-squad2
-$ErrorActionPreference = $PrevErrPref
+$SkipModelsFlag = $SkipModels -or ($env:LIGHTMEM_SKIP_MODELS -eq "1") -or ($env:LIGHTMEM_NO_MODELS -eq "1") -or ($env:LIGHTMEM_MODEL -in @("none", "skip", "5"))
+
+if (-not $SkipModelsFlag) {
+    Write-Host "  ◈ Pre-caching default ONNX embedding (bge-small) and Extractive QA (minilm-squad2) models..." -ForegroundColor Cyan
+    $PrevErrPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $ExePath config --download bge-small
+    & $ExePath config --download minilm-squad2
+    $ErrorActionPreference = $PrevErrPref
+} else {
+    Write-Host "  ↷ Skipped downloading local models (run 'lmem config --download <model>' anytime)" -ForegroundColor DarkGray
+}
 
 # Interactive LLM Setup
 $LlmChoice = if ($env:LIGHTMEM_LLM) { $env:LIGHTMEM_LLM } else { "" }

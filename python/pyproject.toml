@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lmem"
-version = "0.5.0"
+version = "0.5.2"
 description = "Ultra-Fast Local AI Agent Persistent Memory Engine with Neural Extractive QA, Multimodal BLOB Vault & Knowledge Graph"
 readme = "README.md"
 license = "MIT"

@@ -129,7 +129,11 @@ impl HybridSearchEngine {
             }
         }
 
-        total_boost.min(0.35)
+        if total_boost.is_finite() {
+            total_boost.clamp(0.0, 0.35)
+        } else {
+            0.0
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -215,8 +219,14 @@ impl HybridSearchEngine {
                 .into_iter()
                 .map(|(id, vec)| {
                     let sim = cosine_similarity(&query_vector, &vec);
-                    (id, sim)
+                    let safe_sim = if sim.is_finite() {
+                        sim.clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    (id, safe_sim)
                 })
+                .filter(|(_, score)| score.is_finite())
                 .collect();
 
             // Select a bounded top-k pool without sorting the full vault.
@@ -233,6 +243,9 @@ impl HybridSearchEngine {
             scored_vectors.sort_by(compare);
 
             for (rank_idx, (id, score)) in scored_vectors.into_iter().enumerate() {
+                if !score.is_finite() {
+                    continue;
+                }
                 if let Some(min_sim) = min_similarity {
                     if score < min_sim {
                         continue;
@@ -282,7 +295,8 @@ impl HybridSearchEngine {
                     continue;
                 }
                 if let Some(min) = min_similarity {
-                    if vector_scores.get(&id).copied().unwrap_or(-1.0) < min {
+                    let v_score = vector_scores.get(&id).copied().unwrap_or(-1.0);
+                    if !v_score.is_finite() || v_score < min {
                         continue;
                     }
                 }
@@ -307,7 +321,12 @@ impl HybridSearchEngine {
                     } else {
                         boost * 0.2
                     };
-                let score = (0.85 * base_score + 0.15 * effective_boost / 0.35).min(1.0);
+                let raw_score = 0.85 * base_score + 0.15 * effective_boost / 0.35;
+                let score = if raw_score.is_finite() {
+                    raw_score.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
 
                 results.push(ScoredMemory {
                     memory: mem,
@@ -492,5 +511,51 @@ mod tests {
             results[0].memory.id, target.id,
             "Bare acronym 'kk' should rescue 'Krishna Kanth' from beyond default fetch_limit to Rank 1"
         );
+    }
+
+    #[test]
+    fn nan_and_clamped_vector_similarity_enforces_min_similarity() {
+        let storage = Storage::open_in_memory().unwrap();
+        let embedder = ScriptedEmbedder {
+            query_vec: vec![1.0, 0.0],
+        };
+
+        let mem1 = MemoryRecord::new(
+            MemoryType::Fact,
+            "Target Memory".to_string(),
+            "Exact match content".to_string(),
+            vec![],
+            0.9,
+            None,
+        );
+        storage.insert_memory(&mem1, Some(&[1.0, 0.0])).unwrap();
+
+        let mem_low = MemoryRecord::new(
+            MemoryType::Fact,
+            "Low similarity memory".to_string(),
+            "Completely different topic".to_string(),
+            vec![],
+            0.9,
+            None,
+        );
+        storage.insert_memory(&mem_low, Some(&[0.1, 0.99])).unwrap();
+
+        // Search with min_similarity = 0.5; low similarity record must not pass
+        let results = HybridSearchEngine::search(
+            &storage,
+            &embedder,
+            "Exact match",
+            None,
+            None,
+            None,
+            10,
+            Some(0.5),
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].memory.id, mem1.id);
+        assert!(results[0].score.is_finite());
+        assert!(results[0].score >= 0.0 && results[0].score <= 1.0);
     }
 }

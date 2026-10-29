@@ -5,10 +5,41 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.3.1"
+VERSION="v0.5.2"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
-# Support --uninstall / -u flag
+old_tty=""
+if [ -r /dev/tty ] && [ -w /dev/tty ] && stty -g </dev/tty >/dev/null 2>&1; then
+    old_tty="$(stty -g </dev/tty)"
+fi
+TMP_DIR=""
+
+cleanup() {
+    exit_code=$?
+    sig="${1:-}"
+    trap - INT TERM EXIT
+    if [ -n "${old_tty:-}" ]; then
+        stty "$old_tty" </dev/tty 2>/dev/null || true
+    fi
+    if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR"
+    fi
+    case "$sig" in
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+        *) exit "$exit_code" ;;
+    esac
+}
+trap 'cleanup INT' INT
+trap 'cleanup TERM' TERM
+trap 'cleanup EXIT' EXIT
+
+# Support CLI flags & environment variables
+SKIP_MODELS=0
+if [ "${LIGHTMEM_SKIP_MODELS:-0}" = "1" ] || [ "${LIGHTMEM_SKIP_MODELS:-}" = "true" ] || [ "${LIGHTMEM_NO_MODELS:-0}" = "1" ] || [ "${LIGHTMEM_MODEL:-}" = "none" ] || [ "${LIGHTMEM_MODEL:-}" = "skip" ]; then
+    SKIP_MODELS=1
+fi
+
 for arg in "$@"; do
     case "$arg" in
         --uninstall|-u)
@@ -18,6 +49,9 @@ for arg in "$@"; do
             else
                 exec sh -c "$(curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/uninstall.sh")" sh "$@"
             fi
+            ;;
+        --skip-models|--no-models|--skip-local-models|--skip-lockout-models)
+            SKIP_MODELS=1
             ;;
     esac
 done
@@ -161,7 +195,6 @@ mkdir -p "$INSTALL_DIR"
 # 1. Download pre-built binary from GitHub Releases
 RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}/lmem-${TARGET}.tar.gz"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 
 INSTALLED_BIN=0
 if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
@@ -230,14 +263,15 @@ download_onnx_model() {
 
 select_model_interactive() {
     sel=1
-    printf "\n  \033[1;31m❖\033[0m \033[1;37mSelect ONNX Embedding Model(s) to Download\033[0m \033[38;2;148;163;184m(Use ↑/↓ arrows or 1-4, then Enter):\033[0m\n" >/dev/tty
+    printf "\n  \033[1;31m❖\033[0m \033[1;37mSelect ONNX Embedding Model(s) to Download\033[0m \033[38;2;148;163;184m(Use ↑/↓ arrows or 1-5, then Enter):\033[0m\n" >/dev/tty
     render_menu() {
         idx=1
         for item in \
             "bge-small  ─ Xenova/bge-small-en-v1.5       (384-dim · ~130 MB · Default)" \
             "minilm     ─ Xenova/all-MiniLM-L6-v2        (384-dim ·  ~90 MB · Ultra-Fast)" \
             "nomic      ─ nomic-ai/nomic-embed-text-v1.5 (768-dim · ~520 MB · High-Capacity)" \
-            "all        ─ Download all 3 models (switch offline anytime via lmem config)"
+            "all        ─ Download all 3 models (switch offline anytime via lmem config)" \
+            "none       ─ Skip downloading local models (lean binary install · setup later)"
         do
             name="${item%% *}"
             rest="${item#* }"
@@ -261,9 +295,9 @@ select_model_interactive() {
                 ""|"$(printf '\r')"|"$(printf '\n')")
                     break
                     ;;
-                1|2|3|4)
+                1|2|3|4|5)
                     sel="$key"
-                    printf "\033[4A" >/dev/tty
+                    printf "\033[5A" >/dev/tty
                     render_menu
                     break
                     ;;
@@ -274,14 +308,14 @@ select_model_interactive() {
                     case "$seq" in
                         "[A"|"OA")
                             sel=$(( sel - 1 ))
-                            [ "$sel" -lt 1 ] && sel=4
+                            [ "$sel" -lt 1 ] && sel=5
                             ;;
                         "[B"|"OB")
                             sel=$(( sel + 1 ))
-                            [ "$sel" -gt 4 ] && sel=1
+                            [ "$sel" -gt 5 ] && sel=1
                             ;;
                     esac
-                    printf "\033[4A" >/dev/tty
+                    printf "\033[5A" >/dev/tty
                     render_menu
                     ;;
             esac
@@ -291,40 +325,44 @@ select_model_interactive() {
         MODEL_CHOICE="$sel"
     else
         render_menu
-        printf "  \033[1;31m▸\033[0m Enter choice \033[38;2;148;163;184m[1-4, default=1]\033[0m: " >/dev/tty
+        printf "  \033[1;31m▸\033[0m Enter choice \033[38;2;148;163;184m[1-5, default=1]\033[0m: " >/dev/tty
         read -r MODEL_CHOICE </dev/tty || MODEL_CHOICE="1"
         printf "\n" >/dev/tty
     fi
 }
 
 MODEL_CHOICE="${LIGHTMEM_MODEL:-}"
-if [ -z "$MODEL_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+if [ "$SKIP_MODELS" != "1" ] && [ -z "$MODEL_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
     select_model_interactive || MODEL_CHOICE="1"
 fi
 
-case "$MODEL_CHOICE" in
-    2|minilm)
-        download_onnx_model "minilm" 90000
-        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model minilm --yes >/dev/null 2>&1 || true
-        ;;
-    3|nomic)
-        download_onnx_model "nomic" 520000
-        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model nomic --yes >/dev/null 2>&1 || true
-        ;;
-    4|all)
-        download_onnx_model "bge-small" 130000
-        download_onnx_model "minilm" 90000
-        download_onnx_model "nomic" 520000
-        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
-        ;;
-    *)
-        download_onnx_model "bge-small" 130000
-        "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
-        ;;
-esac
+if [ "$SKIP_MODELS" = "1" ] || [ "$MODEL_CHOICE" = "5" ] || [ "$MODEL_CHOICE" = "none" ] || [ "$MODEL_CHOICE" = "skip" ]; then
+    printf "  \033[38;2;113;113;122m↷ Skipped downloading local models (run 'lmem config --download <model>' anytime to cache)\033[0m\n"
+else
+    case "$MODEL_CHOICE" in
+        2|minilm)
+            download_onnx_model "minilm" 90000
+            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model minilm --yes >/dev/null 2>&1 || true
+            ;;
+        3|nomic)
+            download_onnx_model "nomic" 520000
+            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model nomic --yes >/dev/null 2>&1 || true
+            ;;
+        4|all)
+            download_onnx_model "bge-small" 130000
+            download_onnx_model "minilm" 90000
+            download_onnx_model "nomic" 520000
+            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
+            ;;
+        *)
+            download_onnx_model "bge-small" 130000
+            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
+            ;;
+    esac
 
-# 4. Pre-warm ONNX Extractive QA Model (minilm-squad2)
-download_onnx_model "minilm-squad2" 128000
+    # 4. Pre-warm ONNX Extractive QA Model (minilm-squad2)
+    download_onnx_model "minilm-squad2" 128000
+fi
 
 # 5. Interactive LLM Engine Setup (Default for Ingestion & QA)
 select_llm_interactive() {
@@ -459,11 +497,8 @@ if [ -f "$HOME/.bashrc" ] || [ "${SHELL:-}" = "/bin/bash" ] || [ "${SHELL:-}" = 
     if ! grep -q "lightmem/completions/lmem.bash" "$HOME/.bashrc" 2>/dev/null; then
         cat << 'EOF' >> "$HOME/.bashrc"
 
-# LightMem CLI completions & interactive Tab menu
+# LightMem CLI completions
 [ -f "$HOME/.lightmem/completions/lmem.bash" ] && source "$HOME/.lightmem/completions/lmem.bash"
-bind 'set show-all-if-ambiguous on' 2>/dev/null || true
-bind '"\t": menu-complete' 2>/dev/null || true
-bind '"\e[Z": menu-complete-backward' 2>/dev/null || true
 EOF
     fi
 fi

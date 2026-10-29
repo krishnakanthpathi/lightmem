@@ -3,6 +3,24 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Any, Dict
 
 
+def _safe_int(val: Any, default: int = 0) -> int:
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass
 class AttachmentMetadata:
     id: str
@@ -29,10 +47,10 @@ class AttachmentMetadata:
             filename=data.get("filename", ""),
             mime_type=data.get("mime_type", "application/octet-stream"),
             media_type=data.get("media_type") or data.get("media_kind", "binary"),
-            size_bytes=int(data.get("size_bytes", 0)),
+            size_bytes=_safe_int(data.get("size_bytes"), 0),
             sha256=data.get("sha256", ""),
             dimensions=data.get("dimensions"),
-            duration_secs=float(dur) if dur is not None else None,
+            duration_secs=_safe_float(dur) if dur is not None else None,
             created_at=data.get("created_at", ""),
         )
 
@@ -57,16 +75,16 @@ class Memory:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Memory:
         mem_data = data.get("memory", data)
-        raw_atts = mem_data.get("attachments", [])
-        saved_atts = mem_data.get("saved_attachments", data.get("saved_attachments", []))
+        raw_atts = mem_data.get("attachments") or []
+        saved_atts = mem_data.get("saved_attachments") or data.get("saved_attachments") or []
         return cls(
             context=mem_data.get("context"),
             id=mem_data.get("id", ""),
             category=mem_data.get("category", "fact"),
             title=mem_data.get("title", ""),
             content=mem_data.get("content", ""),
-            tags=mem_data.get("tags", []),
-            confidence=float(mem_data.get("confidence", 0.9)),
+            tags=mem_data.get("tags") or [],
+            confidence=_safe_float(mem_data.get("confidence"), 0.9),
             status=mem_data.get("status", "active"),
             provenance=mem_data.get("provenance", "explicit_statement"),
             created_at=mem_data.get("created_at", ""),
@@ -85,13 +103,13 @@ class MemoryInspection:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> MemoryInspection:
-        saved = data.get("saved_attachments", [])
+        saved = data.get("saved_attachments") or []
         mem = Memory.from_dict(data.get("memory", data))
         if saved and not mem.saved_attachments:
             mem.saved_attachments = [str(p) for p in saved]
         return cls(
             memory=mem,
-            links=data.get("links", []),
+            links=data.get("links") or [],
             saved_attachments=[str(p) for p in saved],
         )
 
@@ -107,13 +125,13 @@ class ScoredMemory:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> ScoredMemory:
         mem_data = data.get("memory", data)
-        saved = data.get("saved_attachments", [])
+        saved = data.get("saved_attachments") or []
         mem = Memory.from_dict(mem_data)
         if saved and not mem.saved_attachments:
             mem.saved_attachments = [str(p) for p in saved]
         return cls(
             memory=mem,
-            score=float(data.get("score", 0.0)),
+            score=_safe_float(data.get("score"), 0.0),
             vector_rank=data.get("vector_rank"),
             bm25_rank=data.get("bm25_rank"),
             saved_attachments=[str(p) for p in saved],
@@ -136,7 +154,7 @@ class AnswerResult:
         selected = data.get("selected_memory")
         return cls(
             answer=data.get("answer", ""),
-            confidence=float(data.get("confidence", 0.0)),
+            confidence=_safe_float(data.get("confidence"), 0.0),
             reranker_used=data.get("reranker_used", ""),
             selected_memory=Memory.from_dict(selected) if selected else None,
         )
@@ -151,12 +169,12 @@ class RelatedMemory:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> RelatedMemory:
-        mem_data = data.get("memory", {})
+        mem_data = data.get("memory") or {}
         return cls(
             memory=Memory.from_dict(mem_data),
-            distance=int(data.get("distance", 1)),
-            relation_path=data.get("relation_path", []),
-            score=float(data.get("score", 1.0)),
+            distance=_safe_int(data.get("distance"), 1),
+            relation_path=data.get("relation_path") or [],
+            score=_safe_float(data.get("score"), 1.0),
         )
 
 
@@ -178,7 +196,7 @@ class StorageStats:
         return self.vector_count
 
     @property
-    def by_category(self) -> List[ Any ]:
+    def by_category(self) -> List[Any]:
         return list(self.categories.items())
 
     @classmethod
@@ -188,22 +206,22 @@ class StorageStats:
             vec_cnt = data.get("total_vectors", 0)
         raw_cats = data.get("categories")
         if isinstance(raw_cats, dict):
-            cats = {str(k): int(v) for k, v in raw_cats.items()}
+            cats = {str(k): _safe_int(v, 0) for k, v in raw_cats.items()}
         elif isinstance(data.get("by_category"), list):
             cats = {
-                str(item[0]): int(item[1])
+                str(item[0]): _safe_int(item[1], 0)
                 for item in data["by_category"]
                 if isinstance(item, (list, tuple)) and len(item) >= 2
             }
         else:
             cats = {}
         return cls(
-            total_memories=int(data.get("total_memories", 0)),
-            active_memories=int(data.get("active_memories", 0)),
-            expired_memories=int(data.get("expired_memories", 0)),
-            vector_count=int(vec_cnt),
+            total_memories=_safe_int(data.get("total_memories"), 0),
+            active_memories=_safe_int(data.get("active_memories"), 0),
+            expired_memories=_safe_int(data.get("expired_memories"), 0),
+            vector_count=_safe_int(vec_cnt, 0),
             categories=cats,
-            storage_size_bytes=int(data.get("storage_size_bytes", 0)),
+            storage_size_bytes=_safe_int(data.get("storage_size_bytes"), 0),
             db_path=data.get("db_path", ""),
             backend=data.get("backend"),
             embedding_model=data.get("embedding_model"),
@@ -253,8 +271,7 @@ class ObservedCandidate:
             title=data.get("title", ""),
             content=data.get("content", ""),
             category=data.get("category", "observation"),
-            tags=data.get("tags", []),
-            confidence=float(data.get("confidence", 0.85)),
+            tags=data.get("tags") or [],
+            confidence=_safe_float(data.get("confidence"), 0.85),
             provenance=data.get("provenance", "observed"),
         )
-

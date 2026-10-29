@@ -51,11 +51,7 @@ pub fn render_terminal(snapshot: &GraphSnapshot) -> String {
         }
         visited_roots.insert(node.id.clone());
 
-        let short_id = if node.id.len() >= 8 {
-            &node.id[..8]
-        } else {
-            &node.id
-        };
+        let short_id = node.id.chars().take(8).collect::<String>();
         out.push_str(&format!(
             "  {} [{}] {} ({})\n",
             "◈".bright_blue(),
@@ -85,4 +81,28 @@ pub fn render_terminal(snapshot: &GraphSnapshot) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_terminal_multibyte_id_safe() {
+        let snapshot = GraphSnapshot {
+            nodes: vec![GraphNode {
+                id: "🦀🚀🎉✨🌟🔥💡⚡".to_string(),
+                label: "Rust Node".to_string(),
+                category: "fact".to_string(),
+                tags: vec![],
+                confidence: 0.9,
+                degree: 1,
+                snippet: "snippet".to_string(),
+            }],
+            edges: vec![],
+        };
+        let rendered = render_terminal(&snapshot);
+        assert!(rendered.contains("Rust Node"));
+        assert!(rendered.contains("🦀🚀🎉✨🌟🔥💡⚡"));
+    }
 }

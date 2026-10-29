@@ -305,7 +305,7 @@ impl CliView {
     }
 
     pub fn render_remembered(memory: &MemoryRecord, db_path: &Path, json: bool) -> Result<()> {
-        Self::render_remembered_with_conflicts(memory, &[], false, db_path, json)
+        Self::render_remembered_full(memory, &[], false, db_path, json, None)
     }
 
     pub fn render_remembered_with_conflicts(
@@ -315,6 +315,17 @@ impl CliView {
         db_path: &Path,
         json: bool,
     ) -> Result<()> {
+        Self::render_remembered_full(memory, conflicts, superseded, db_path, json, None)
+    }
+
+    pub fn render_remembered_full(
+        memory: &MemoryRecord,
+        conflicts: &[MemoryConflict],
+        superseded: bool,
+        db_path: &Path,
+        json: bool,
+        warning: Option<&str>,
+    ) -> Result<()> {
         if json {
             let mut val = serde_json::to_value(memory)?;
             if let serde_json::Value::Object(ref mut map) = val {
@@ -323,6 +334,12 @@ impl CliView {
                     "superseded".to_string(),
                     serde_json::Value::Bool(superseded),
                 );
+                if let Some(w) = warning {
+                    map.insert(
+                        "warning".to_string(),
+                        serde_json::Value::String(w.to_string()),
+                    );
+                }
             }
             println!("{}", serde_json::to_string_pretty(&val)?);
             return Ok(());
@@ -352,6 +369,23 @@ impl CliView {
             Self::slate(&db_str),
             ttl_suffix
         );
+
+        if let Some(w) = warning {
+            println!("  {} {}", Self::rose("⚠ Notice:"), Self::rose(w));
+        }
+
+        if !memory.entities.is_empty() {
+            let ent_items: Vec<String> = memory
+                .entities
+                .iter()
+                .map(|e| format!("{}: {}", Self::gold(&e.name), Self::white_bold(&e.val)))
+                .collect();
+            println!(
+                "  {} {}",
+                Self::violet_bold("🏷  Entities:"),
+                ent_items.join(&format!(" {} ", Self::slate("·")))
+            );
+        }
 
         for att in &memory.attachments {
             let mut details = vec![att.media_kind.clone(), att.mime_type.clone()];

@@ -34,7 +34,7 @@
 
   <details class="docs-navigation" open><summary>Browse documentation</summary>
   <aside class="sidebar" aria-label="Documentation navigation">
-    <div class="side-meta"><span>Documentation</span><span class="badge">v0.5.0</span></div>
+    <div class="side-meta"><span>Documentation</span><span class="badge">v0.5.2</span></div>
     <div class="nav-group"><div class="nav-label">Start</div><nav class="side-nav">
       <a href="#overview">Overview</a><a href="#quickstart">Quick start</a><a href="#architecture">Architecture</a><a href="#data-model">Data model</a>
     </nav></div>
@@ -55,7 +55,7 @@
       <span class="kicker">Getting started</span>
       <h1>Memory for your agents.</h1>
       <p>Store what matters. Find it when you need it. LightMem gives your AI tools persistent local memory through a native CLI, Python SDK, and MCP server.</p>
-      <div class="hero-badges"><span class="badge badge-accent">v0.5.0</span><span class="badge">Rust + SQLite</span><span class="badge">Local by default</span><span class="badge">MIT licensed</span></div>
+      <div class="hero-badges"><span class="badge badge-accent">v0.5.2</span><span class="badge">Rust + SQLite</span><span class="badge">Local by default</span><span class="badge">MIT licensed</span></div>
       <div class="doc-start-links">
         <a class="doc-start-link" href="#quickstart"><strong>Quick start</strong><span>From installation to your first recall.</span><b aria-hidden="true">→</b></a>
         <a class="doc-start-link" href="#integrations"><strong>Connect your agent</strong><span>Set up skills, MCP, and shared memory.</span><b aria-hidden="true">→</b></a>
@@ -63,7 +63,7 @@
     </section>
 
     <section class="doc-section searchable" id="quickstart" data-search="install quick start pip cargo curl windows mac linux uninstall">
-      <div class="section-title"><span class="section-index">01</span><div><h2>Install and run</h2><p class="lead">The Python package bundles or locates the native <code class="inline">lmem</code> executable. Shell installers prefer release binaries and fall back to Cargo.</p></div></div>
+      <div class="section-title"><span class="section-index">01</span><div><h2 id="install-and-run">Install and run</h2><p class="lead">The Python package bundles or locates the native <code class="inline">lmem</code> executable. Shell installers prefer release binaries and fall back to Cargo.</p></div></div>
       <h3 id="install-lightmem">Install LightMem</h3>
       <div class="install-tabs" aria-label="Installation method">
         <button class="install-tab" id="tab-python" aria-controls="install-python" type="button">Python / pip</button>
@@ -87,7 +87,7 @@ cargo install --path . --force</code></pre></div><p>Build the native CLI directl
     </section>
 
     <section class="doc-section searchable" id="architecture" data-search="architecture mvc mvp layers models repositories services controllers views rust python subprocess">
-      <div class="section-title"><span class="section-index">02</span><div><h2>System architecture</h2><p class="lead">One Cargo package exposes the <code class="inline">lightmem</code> library, the <code class="inline">lmem</code> CLI, and a custom benchmark harness. The Python API is a typed subprocess bridge over the same binary.</p></div></div>
+      <div class="section-title"><span class="section-index">02</span><div><h2 id="system-architecture">System architecture</h2><p class="lead">One Cargo package exposes the <code class="inline">lightmem</code> library, the <code class="inline">lmem</code> CLI, and a custom benchmark harness. The Python API is a typed subprocess bridge over the same binary.</p></div></div>
       <div class="architecture">
         <div class="layer"><div class="layer-name">Presentation<span>CLI + Python</span></div><p>Clap routes commands into the controller; <code>CliView</code> renders human or JSON output. Python invokes the binary with <code>--json</code>; the MCP server exposes the engine over stdio JSON-RPC.</p><span class="layer-path">src/main.rs<br/>src/views/<br/>python/src/lmem/</span></div>
         <div class="layer"><div class="layer-name">Controller<span>Application API</span></div><p><code>LightMem</code> coordinates storage, lazy embeddings, search, reranking, graph operations, import/export, and index migration.</p><span class="layer-path">src/controllers/<br/>memory_controller.rs</span></div>
@@ -104,7 +104,7 @@ cargo install --path . --force</code></pre></div><p>Build the native CLI directl
     </section>
 
     <section class="doc-section searchable" id="data-model" data-search="data model memory record category sqlite schema fts vector status provenance ttl tables attachments blob image audio video sha256">
-      <div class="section-title"><span class="section-index">03</span><div><h2>Data model and storage</h2><p class="lead">Memory cards are durable records with lifecycle metadata; full-text, vector, graph, and immutable binary attachment structures are stored beside them in SQLite schema version 5.</p></div></div>
+      <div class="section-title"><span class="section-index">03</span><div><h2 id="data-model-and-storage">Data model and storage</h2><p class="lead">Memory cards are durable records with lifecycle metadata; full-text, vector, graph, and immutable binary attachment structures are stored beside them in SQLite schema version 5.</p></div></div>
       <div class="schema">
         <div class="schema-card"><h3 id="data-model-1">MemoryRecord</h3><ul><li><span>id</span><span>UUID v4</span></li><li><span>category</span><span>MemoryType</span></li><li><span>title / content</span><span>String</span></li><li><span>tags</span><span>JSON array</span></li><li><span>confidence</span><span>f32 · 0…1</span></li><li><span>status</span><span>active | expired</span></li><li><span>provenance</span><span>String</span></li><li><span>context</span><span>optional source identity + session</span></li><li><span>attachments</span><span>Vec&lt;AttachmentMetadata&gt;</span></li><li><span>created / updated / expires</span><span>UTC timestamps</span></li></ul></div>
         <div class="schema-card"><h3 id="data-model-2">SQLite v5</h3><ul><li><span>memories</span><span>canonical records</span></li><li><span>memory_attachments</span><span>immutable BLOBs + SHA-256</span></li><li><span>memories_fts</span><span>FTS5 · porter unicode61</span></li><li><span>memory_vectors</span><span>LE f32 blobs + dims</span></li><li><span>embedding_state</span><span>identity + dimensions</span></li><li><span>storage_revision</span><span>atomic reindex guard</span></li><li><span>memory_links</span><span>directional graph edges</span></li><li><span>memories.context_json</span><span>optional source metadata</span></li><li><span>journaling / perms</span><span>WAL / 0600 owner-only</span></li></ul></div>
@@ -126,7 +126,7 @@ cargo install --path . --force</code></pre></div><p>Build the native CLI directl
     </section>
 
     <section class="doc-section searchable" id="retrieval" data-search="hybrid search bm25 vector cosine rrf acronym lexical ranking score date temporal recall">
-      <div class="section-title"><span class="section-index">04</span><div><h2>Hybrid retrieval pipeline</h2><p class="lead">Keyword and semantic channels are independently ranked, fused, lexically adjusted, hydrated, and deduplicated. The final score is a ranking signal—not a probability.</p></div></div>
+      <div class="section-title"><span class="section-index">04</span><div><h2 id="hybrid-retrieval-pipeline">Hybrid retrieval pipeline</h2><p class="lead">Keyword and semantic channels are independently ranked, fused, lexically adjusted, hydrated, and deduplicated. The final score is a ranking signal—not a probability.</p></div></div>
       <div class="pipeline">
         <div class="pipe"><b>01 / QUERY</b><strong>Normalize</strong><span>Remove common question words for FTS; retain raw query for vector embedding.</span></div>
         <div class="pipe"><b>02 / BM25</b><strong>FTS5 prefixes</strong><span>Quoted prefix terms; 3–6 token misses retry OR token-pairs.</span></div>
@@ -146,7 +146,7 @@ final_score = 0.85 × normalized_rrf + 0.15 × normalized_lexical</code></pre></
     </section>
 
     <section class="doc-section searchable" id="models" data-search="embedding onnx fastembed bge minilm nomic ollama hash reranker qa tinyroberta top1 model reindex">
-      <div class="section-title"><span class="section-index">05</span><div><h2>Embeddings and answer engines</h2><p class="lead">Embeddings are lazy and identity-bound. Changing backend/model requires an atomic reindex; answer rerankers sit above hybrid recall.</p></div></div>
+      <div class="section-title"><span class="section-index">05</span><div><h2 id="embeddings-and-answer-engines">Embeddings and answer engines</h2><p class="lead">Embeddings are lazy and identity-bound. Changing backend/model requires an atomic reindex; answer rerankers sit above hybrid recall.</p></div></div>
       <div class="table-scroll"><table><thead><tr><th>Layer</th><th>Implementations</th><th>Behavior</th></tr></thead><tbody>
         <tr><td>Embeddings</td><td><code>FastEmbed ONNX</code><br/><code>Ollama HTTP</code><br/><code>Hash 384</code></td><td>BGE-small (384d), MiniLM (384d), Nomic v1.5 (768d), custom ONNX directory, remote/local Ollama, or deterministic offline hash.</td></tr>
         <tr><td>Answer reranker</td><td><code>minilm-squad2</code><br/><code>tinyroberta-squad2</code></td><td>Local extractive QA; tokenization truncates to 384 tokens, context spans max 20 tokens, SQuAD no-answer gating.</td></tr>
@@ -165,7 +165,7 @@ final_score = 0.85 × normalized_rrf + 0.15 × normalized_lexical</code></pre></
     </section>
 
     <section class="doc-section searchable" id="graph" data-search="knowledge graph links wikilinks related traversal bfs autolink mentions shared topic cosine edge node">
-      <div class="section-title"><span class="section-index">06</span><div><h2>Knowledge graph</h2><p class="lead">Graph links are directional rows, while traversal navigates both directions. Explicit links, wikilinks, mentions, shared tags, and semantic similarity can all contribute edges.</p></div></div>
+      <div class="section-title"><span class="section-index">06</span><div><h2 id="knowledge-graph">Knowledge graph</h2><p class="lead">Graph links are directional rows, while traversal navigates both directions. Explicit links, wikilinks, mentions, shared tags, and semantic similarity can all contribute edges.</p></div></div>
       <div class="facts">
         <div class="fact"><div class="metric">EXPLICIT LINKS</div><b><code>source → target</code></b><p>Default relation <code>relates_to</code>; weights clamp to 0.01…10.0; identical edge triples are upserted.</p></div>
         <div class="fact"><div class="metric">TRAVERSAL</div><b>Cycle-safe BFS</b><p>Up to 10 hops internally. Score propagates as <code>(previous × weight) / hop</code>; incoming edges receive an “(incoming)” suffix.</p></div>
@@ -180,7 +180,7 @@ final_score = 0.85 × normalized_rrf + 0.15 × normalized_lexical</code></pre></
     </section>
 
     <section class="doc-section searchable" id="conflicts" data-search="conflicts supersede merge ttl deduplicate overlap similarity expired lifecycle">
-      <div class="section-title"><span class="section-index">07</span><div><h2>Conflicts, supersession, and lifecycle</h2><p class="lead">LightMem combines meaningful-token overlap with vector similarity, then retires superseded records while preserving a newer active identity and carrying over attachments.</p></div></div>
+      <div class="section-title"><span class="section-index">07</span><div><h2 id="conflicts-supersession-and-lifecycle">Conflicts, supersession, and lifecycle</h2><p class="lead">LightMem combines meaningful-token overlap with vector similarity, then retires superseded records while preserving a newer active identity and carrying over attachments.</p></div></div>
       <div class="pipeline">
         <div class="pipe"><b>01</b><strong>Candidate overlap</strong><span>Shared meaningful words and same-category scope for <code>--supersede</code>.</span></div>
         <div class="pipe"><b>02</b><strong>Similarity gate</strong><span>Exact content or max(vector, word_overlap × 0.92).</span></div>
@@ -198,8 +198,8 @@ final_score = 0.85 × normalized_rrf + 0.15 × normalized_lexical</code></pre></
     </section>
 
     <section class="doc-section searchable" id="cli" data-search="cli commands remember recall list inspect deduplicate forget clear export import answer config reindex stats conflicts link unlink related graph autolink connect completions uninstall observe attachments file media path paths save-to">
-      <div class="section-title"><span class="section-index">08</span><div><h2>Complete CLI reference</h2><p class="lead"><code class="inline">lmem [--connection ID] [--scope user|project|agent] [--session ID] [--global|-g] [--db PATH] [COMMAND]</code>. No command opens the selected vault and renders the Crimson Cloud HUD plus live statistics.</p></div></div>
-      <div class="command-toolbar"><span class="command-count">28 commands · aliases included</span><button class="expand-all" id="expandCommands">Expand all</button></div>
+      <div class="section-title"><span class="section-index">08</span><div><h2 id="complete-cli-reference">Complete CLI reference</h2><p class="lead"><code class="inline">lmem [--connection ID] [--scope user|project|agent] [--session ID] [--global|-g] [--db PATH] [COMMAND]</code>. No command opens the selected vault and renders the Crimson Cloud HUD plus live statistics.</p></div></div>
+      <div class="command-toolbar"><span class="command-count">29 commands · aliases included</span><button class="expand-all" id="expandCommands">Expand all</button></div>
       <div class="command-list" id="commandList">
         <details id="command-remember" class="command" data-search="remember store create category tags confidence ttl supersede provenance file attachment extract json"><summary><span class="command-name"><span>01</span> remember</span><span class="command-desc">Store text and/or multimodal file attachments</span><span class="command-toggle" aria-hidden="true">+</span></summary><div class="command-body"><div class="syntax">lmem remember [CONTENT] [-f|--file PATH]... [--extract] [-r MODE] [-t CATEGORY] [--title TITLE] [--tags A,B] [-c FLOAT] [-p|--provenance LEVEL] [--ttl DURATION] [-s|--supersede] [--json]</div><p>Stores text, one or more files (<code>-f</code>/<code>--file</code>), or both. When <code>CONTENT</code> is omitted with <code>-f</code>, LightMem auto-generates title and metadata summary from the attached files. <code>--extract</code> explicitly invokes the single configured LLM to describe attached files. Category defaults to inferred (or <code>artifact</code> for file-only memories); JSON returns the created <code>MemoryRecord</code> with <code>attachments</code>.</p></div></details>
         <details id="command-recall" class="command" data-search="recall search semantic keyword temporal precision multi hop media save-to path paths"><summary><span class="command-name"><span>02</span> recall</span><span class="command-desc">Hybrid semantic + keyword retrieval &amp; media materialization</span><span class="command-toggle" aria-hidden="true">+</span></summary><div class="command-body"><div class="syntax">lmem recall QUERY [-t CATEGORY] [--media KIND] [--as-of DATE] [--date DATE] [-l N] [--min-similarity FLOAT] [--precision] [--multi-hop] [-o|--save-to PATH] [-p|--path|--paths] [--json]</div><p>Limit defaults to 10. <code>--media image|audio|video|document|any</code> filters by attachment type. <code>--save-to</code> exports verified attachments to disk; <code>--path</code> / <code>--paths</code> (<code>-p</code>) materializes attachments and prints only their absolute file paths (one per line, or JSON array with <code>--json</code>).</p></div></details>
@@ -240,7 +240,7 @@ lmem --version [--json]</div><p>Reports the installed engine version and build m
     </section>
 
     <section class="doc-section searchable" id="configuration" data-search="configuration config json environment variables paths database model directory lightmem db qa disable">
-      <div class="section-title"><span class="section-index">09</span><div><h2>Configuration and paths</h2><p class="lead">Configuration lives under <code class="inline">~/.lightmem</code> unless <code class="inline">LIGHTMEM_CONFIG_DIR</code> replaces the root.</p></div></div>
+      <div class="section-title"><span class="section-index">09</span><div><h2 id="configuration-and-paths">Configuration and paths</h2><p class="lead">Configuration lives under <code class="inline">~/.lightmem</code> unless <code class="inline">LIGHTMEM_CONFIG_DIR</code> replaces the root.</p></div></div>
       <div class="code"><div class="code-head"><span>~/.lightmem/config.json defaults</span><button class="copy">Copy</button></div><pre><code>{
   "backend": "onnx",
   "onnx_model": "bge-small",
@@ -266,7 +266,7 @@ lmem --version [--json]</div><p>Reports the installed engine version and build m
     </section>
 
     <section class="doc-section searchable" id="formats" data-search="import export bundle zip lmbundle json jsonl okf markdown memanto mem0 letta langchain mcp backup attachments video photo media transfer">
-      <div class="section-title"><span class="section-index">10</span><div><h2>Import and export formats</h2><p class="lead">Import is permissive across common memory ecosystems; export is deliberately narrow, reversible, and now supports single-file transfer bundles with all attached video and photo files.</p></div></div>
+      <div class="section-title"><span class="section-index">10</span><div><h2 id="import-and-export-formats">Import and export formats</h2><p class="lead">Import is permissive across common memory ecosystems; export is deliberately narrow, reversible, and now supports single-file transfer bundles with all attached video and photo files.</p></div></div>
       <div class="table-scroll"><table><thead><tr><th>Format</th><th>Import</th><th>Export</th><th>Notes</th></tr></thead><tbody>
         <tr><td>DB Transfer Bundle</td><td>Yes (automatic)</td><td>Single-file .zip</td><td><code>lightmem-bundle-v1</code>; checkpointed SQLite DB (flushing WAL via <code>VACUUM INTO</code>), SHA-256 manifest, and all raw video, image, audio, and doc files. Zero re-embedding required.</td></tr>
         <tr><td>LightMem JSON</td><td>Yes</td><td>Lossless</td><td><code>lightmem-backup-v1</code>; active + expired records + base64 binary attachments; vectors rebuilt.</td></tr>
@@ -286,7 +286,7 @@ lmem --version [--json]</div><p>Reports the installed engine version and build m
     </section>
 
     <section class="doc-section searchable" id="python" data-search="python sdk pip lmem lightmem subprocess dataclass binary wheel api client attachments files media path bundle transfer">
-      <div class="section-title"><span class="section-index">11</span><div><h2>Python SDK</h2><p class="lead">The <code class="inline">lmem</code> distribution has no Python dependencies. It exposes typed dataclasses while delegating execution to the native CLI.</p></div></div>
+      <div class="section-title"><span class="section-index">11</span><div><h2 id="python-sdk">Python SDK</h2><p class="lead">The <code class="inline">lmem</code> distribution has no Python dependencies. It exposes typed dataclasses while delegating execution to the native CLI.</p></div></div>
       <div class="sdk-methods"><span class="sdk-method">remember()</span><span class="sdk-method">recall()</span><span class="sdk-method">answer()</span><span class="sdk-method">list()</span><span class="sdk-method">get()</span><span class="sdk-method">inspect()</span><span class="sdk-method">bundle_export()</span><span class="sdk-method">bundle_import()</span><span class="sdk-method">bundle_info()</span><span class="sdk-method">observe()</span><span class="sdk-method">forget()</span><span class="sdk-method">deduplicate()</span><span class="sdk-method">conflicts()</span><span class="sdk-method">link()</span><span class="sdk-method">unlink()</span><span class="sdk-method">related()</span><span class="sdk-method">graph()</span><span class="sdk-method">autolink()</span><span class="sdk-method">connect()</span><span class="sdk-method">stats()</span></div>
       <div class="code"><div class="code-head"><span>Python API</span><button class="copy">Copy</button></div><pre><code>from lmem import LightMem
 
@@ -323,7 +323,7 @@ print(mem.context())</code></pre></div>
     </section>
 
     <section class="doc-section searchable" id="integrations" data-search="mcp identity user agent connection scope session agent integrations connect hermes antigravity gemini codex openai cursor claude agents skill workspace">
-      <div class="section-title"><span class="section-index">12</span><div><h2>Agent integrations</h2><p class="lead">Connect supported tools through skills or native MCP. Register named connections when you want agents to share project memory while keeping user and agent scopes separate.</p></div></div>
+      <div class="section-title"><span class="section-index">12</span><div><h2 id="agent-integrations">Agent integrations</h2><p class="lead">Connect supported tools through skills or native MCP. Register named connections when you want agents to share project memory while keeping user and agent scopes separate.</p></div></div>
       <h3 id="mcp-setup">Connect with MCP</h3>
       <div class="code"><div class="code-head"><span>MCP client setup</span><button class="copy">Copy</button></div><pre><code><span class="prompt">$</span> lmem connect --mcp
 <span class="prompt">$</span> lmem connect claude --mcp
@@ -358,19 +358,19 @@ print(mem.context())</code></pre></div>
     </section>
 
     <section class="doc-section searchable" id="distribution" data-search="distribution packaging wheels pypi release platforms mac linux windows installer cargo version license">
-      <div class="section-title"><span class="section-index">13</span><div><h2>Distribution and platform support</h2><p class="lead">Version 0.5.0 ships as a Rust release binary and a Python package that bundles native executables into platform-tagged wheels.</p></div></div>
+      <div class="section-title"><span class="section-index">13</span><div><h2 id="distribution-and-platform-support">Distribution and platform support</h2><p class="lead">Version 0.5.2 ships as a Rust release binary and a Python package that bundles native executables into platform-tagged wheels.</p></div></div>
       <div class="table-scroll"><table><thead><tr><th>Channel</th><th>Targets</th><th>Mechanism</th></tr></thead><tbody>
         <tr><td>GitHub release</td><td>macOS arm64<br/>Linux x86_64 glibc<br/>Windows x86_64 MSVC<br/>Android aarch64 (Termux)</td><td>Tag <code>v*</code> or manual workflow; release archives with generated notes.</td></tr>
         <tr><td>PyPI wheels</td><td>macOS 11 arm64<br/>manylinux2014 x86_64<br/>Windows amd64</td><td>Compile <code>lmem</code>, bundle under <code>lmem/bin</code>, retag Hatch wheel.</td></tr>
         <tr><td>Source distribution</td><td>Python ≥3.8</td><td>No bundled native binary; launcher resolves or downloads one.</td></tr>
         <tr><td>Cargo</td><td>Rust toolchains supported by dependencies</td><td><code>cargo install --path . --force</code> or installer source fallback.</td></tr>
       </tbody></table></div>
-      <div class="facts"><div class="fact"><div class="metric">VERSION</div><b>0.5.0</b><p>Source version in Cargo and Python package metadata.</p></div><div class="fact"><div class="metric">LICENSE</div><b>MIT</b><p>Copyright 2026 Pathi Krishna Kanth. Cargo package metadata itself lacks a license field.</p></div></div>
+      <div class="facts"><div class="fact"><div class="metric">VERSION</div><b>0.5.2</b><p>Source version in Cargo and Python package metadata.</p></div><div class="fact"><div class="metric">LICENSE</div><b>MIT</b><p>Copyright 2026 Pathi Krishna Kanth. Cargo package metadata itself lacks a license field.</p></div></div>
       <div class="warning"><strong>Coverage limitation:</strong> installers and Python downloader construct macOS x86_64 and Linux arm64 release URLs, but the current release workflow does not build those artifacts; affected systems rely on source fallback or another available release.</div>
     </section>
 
     <section class="doc-section searchable" id="development" data-search="development build test ci clippy fmt benchmark cargo qa disable workflow release">
-      <div class="section-title"><span class="section-index">14</span><div><h2>Development, CI, and benchmarks</h2><p class="lead">Release validation checks Rust formatting, runs Rust library, CLI, and MCP tests, and exercises the Python SDK against the native binary before packaging.</p></div></div>
+      <div class="section-title"><span class="section-index">14</span><div><h2 id="development-ci-and-benchmarks">Development, CI, and benchmarks</h2><p class="lead">Release validation checks Rust formatting, runs Rust library, CLI, and MCP tests, and exercises the Python SDK against the native binary before packaging.</p></div></div>
       <div class="code"><div class="code-head"><span>Quality gates</span><button class="copy">Copy</button></div><pre><code><span class="prompt">$</span> cargo fmt --check
 <span class="prompt">$</span> cargo clippy --locked --all-targets -- -D warnings
 <span class="prompt">$</span> LIGHTMEM_QA_DISABLE=1 cargo test --locked
@@ -385,7 +385,7 @@ print(mem.context())</code></pre></div>
     </section>
 
     <section class="doc-section searchable" id="security" data-search="privacy security local offline data resilience validation errors atomic migration checksum sqlite mutex">
-      <div class="section-title"><span class="section-index">15</span><div><h2>Privacy and operational resilience</h2><p class="lead">The default stack runs locally: SQLite persistence, ONNX embeddings, and ONNX extractive QA. Ollama is optional and may point to local or remote infrastructure.</p></div></div>
+      <div class="section-title"><span class="section-index">15</span><div><h2 id="privacy-and-operational-resilience">Privacy and operational resilience</h2><p class="lead">The default stack runs locally: SQLite persistence, ONNX embeddings, and ONNX extractive QA. Ollama is optional and may point to local or remote infrastructure.</p></div></div>
       <div class="facts">
         <div class="fact"><div class="metric">LOCAL DEFAULT</div><b>No required memory cloud</b><p>Native SQLite and model cache remain under user-selected local paths.</p></div>
         <div class="fact"><div class="metric">MIGRATION SAFETY</div><b>Atomic vector replacement</b><p>Old index remains until a complete revision-consistent replacement is ready.</p></div>
@@ -396,7 +396,7 @@ print(mem.context())</code></pre></div>
     </section>
 
     <section class="doc-section searchable" id="caveats" data-search="known caveats implementation notes mismatch readme stale limitations branch needle enrich performance release ci">
-      <div class="section-title"><span class="section-index">16</span><div><h2>Implementation notes and known mismatches</h2><p class="lead">These are current source-level caveats, not roadmap promises. They are included so agent integrations do not rely on stale README/SKILL behavior.</p></div></div>
+      <div class="section-title"><span class="section-index">16</span><div><h2 id="implementation-notes-and-known-mismatches">Implementation notes and known mismatches</h2><p class="lead">These are current source-level caveats, not roadmap promises. They are included so agent integrations do not rely on stale README/SKILL behavior.</p></div></div>
       <div class="caveats">
         <div class="caveat"><div><b>No Needle integration in this commit</b><p>The branch contains ONNX QA, Ollama, and Top‑1 rerankers only. No Needle symbol, dependency, or native C‑FFI loader exists in tracked source.</p><a class="source" href="https://github.com/krishnakanthpathi/lightmem/blob/main/src/services/reranker.rs">reranker.rs</a></div></div>
         <div class="caveat"><div><b><code>recall --precision</code> hardcodes ONNX</b><p>It does not honor a configured Ollama or Top‑1 reranker; use <code>answer -r MODE</code> for explicit selection.</p></div></div>
@@ -411,7 +411,7 @@ print(mem.context())</code></pre></div>
     </section>
 
 
-    <footer class="docs-footer"><span>LightMem · v0.5.0</span><a href="https://github.com/krishnakanthpathi/lightmem/blob/main/README.md">View the source guide ↗</a><a href="#overview">Back to top ↑</a></footer>
+    <footer class="docs-footer"><span>LightMem · v0.5.2</span><a href="https://github.com/krishnakanthpathi/lightmem/blob/main/README.md">View the source guide ↗</a><a href="#overview">Back to top ↑</a></footer>
   </div></main>
   <aside class="page-outline" aria-label="On this page"><p>On this page</p><nav class="outline-links" aria-label="Section contents"><a href="#quickstart">Install and run</a><a href="#cli">CLI reference</a><a href="#python">Python SDK</a></nav><div class="outline-footer"><a href="https://github.com/krishnakanthpathi/lightmem/issues">Suggest an improvement ↗</a><a href="https://github.com/krishnakanthpathi/lightmem/blob/main/README.md">View source ↗</a></div></aside>
 

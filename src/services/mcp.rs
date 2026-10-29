@@ -8,10 +8,18 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+fn deserialize_some_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Value::deserialize(deserializer)?))
+}
+
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
     #[allow(dead_code)]
     jsonrpc: String,
+    #[serde(default, deserialize_with = "deserialize_some_value")]
     id: Option<Value>,
     method: String,
     #[serde(default)]
@@ -253,6 +261,10 @@ impl McpServer {
                             "type": "boolean",
                             "description": "Invoke configured LLM to extract text/descriptions from attached files (default: false)"
                         },
+                        "extract_entities": {
+                            "type": "boolean",
+                            "description": "Automatically extract key entities/slots via LLM (default: true)"
+                        },
                         "ttl": {
                             "type": "string",
                             "description": "Auto-expire duration, e.g. '1h', '24h', '7d', '30d'"
@@ -435,14 +447,16 @@ impl McpServer {
 
     fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
         let mut connection = self.connection.clone();
+        let mut fallback_session: Option<String> = None;
         if name == "remember" {
             if let Some(session) = args.get("session_id") {
                 let session = session.as_str().context("session_id must be a string")?;
                 crate::models::identity::validate_id(session)?;
-                let context = connection
-                    .as_mut()
-                    .context("session_id requires a registered server connection")?;
-                context.context.session_id = Some(session.into());
+                if let Some(context) = connection.as_mut() {
+                    context.context.session_id = Some(session.into());
+                } else {
+                    fallback_session = Some(session.to_string());
+                }
             }
         }
         let lm = match &connection {
@@ -467,7 +481,7 @@ impl McpServer {
                     .get("title")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let tags = match args.get("tags") {
+                let mut tags = match args.get("tags") {
                     Some(Value::Array(arr)) => arr
                         .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -479,6 +493,12 @@ impl McpServer {
                         .collect(),
                     _ => Vec::new(),
                 };
+                if let Some(ref session) = fallback_session {
+                    let s_tag = format!("session:{}", session);
+                    if !tags.contains(&s_tag) {
+                        tags.push(s_tag);
+                    }
+                }
                 let confidence = args
                     .get("confidence")
                     .and_then(|v| v.as_f64())
@@ -494,6 +514,10 @@ impl McpServer {
                     .get("extract")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let extract_entities = args
+                    .get("extract_entities")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
                 let ttl = args
                     .get("ttl")
                     .and_then(|v| v.as_str())
@@ -507,17 +531,37 @@ impl McpServer {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                let (record, conflicts) = lm.remember_with_attachments(
-                    content, &files, extract, None, category, title, tags, confidence, ttl,
-                    supersede, provenance,
+                let (record, conflicts, warning) = lm.remember_with_attachments_and_entities(
+                    content,
+                    &files,
+                    extract,
+                    extract_entities,
+                    None,
+                    category,
+                    title,
+                    tags,
+                    confidence,
+                    ttl,
+                    supersede,
+                    provenance,
                 )?;
 
-                Ok(json!({
-                    "status": "stored",
-                    "memory": record,
-                    "conflicts_detected": conflicts.len(),
-                    "superseded": supersede && !conflicts.is_empty()
-                }))
+                let mut resp_map = serde_json::Map::new();
+                resp_map.insert("status".to_string(), json!("stored"));
+                resp_map.insert("memory".to_string(), json!(record));
+                resp_map.insert("conflicts_detected".to_string(), json!(conflicts.len()));
+                resp_map.insert(
+                    "superseded".to_string(),
+                    json!(supersede && !conflicts.is_empty()),
+                );
+                if let Some(w) = warning {
+                    resp_map.insert("warning".to_string(), json!(w));
+                }
+                if let Some(ref session) = fallback_session {
+                    resp_map.insert("session_id".to_string(), json!(session));
+                }
+
+                Ok(serde_json::Value::Object(resp_map))
             }
 
             "recall" => {
@@ -838,5 +882,50 @@ mod tests {
         let resp = server.handle_request(req).expect("Response expected");
         assert!(resp.result.is_none());
         assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    #[test]
+    fn test_mcp_explicit_null_id_request() {
+        let server = McpServer::new(false, None);
+        let raw_json = r#"{"jsonrpc": "2.0", "id": null, "method": "ping"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(raw_json).expect("Must parse");
+        assert_eq!(req.id, Some(Value::Null));
+
+        let resp = server
+            .handle_request(req)
+            .expect("Response expected for null id");
+        assert_eq!(resp.id, Value::Null);
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_mcp_omitted_id_notification_deserialization() {
+        let raw_json = r#"{"jsonrpc": "2.0", "method": "notifications/initialized"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(raw_json).expect("Must parse");
+        assert_eq!(req.id, None);
+
+        let server = McpServer::new(false, None);
+        let resp = server.handle_request(req);
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn test_mcp_remember_session_without_connection() {
+        let temp_db = tempfile::NamedTempFile::new().unwrap();
+        let server = McpServer::new(false, Some(temp_db.path().to_path_buf()));
+        let res = server
+            .call_tool(
+                "remember",
+                json!({
+                    "content": "Fact: LightMem gracefully records session",
+                    "session_id": "session-xyz"
+                }),
+            )
+            .expect("Must not crash when connection is None");
+
+        assert_eq!(res["status"], "stored");
+        assert_eq!(res["session_id"], "session-xyz");
+        let tags = res["memory"]["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|t| t == "session:session-xyz"));
     }
 }

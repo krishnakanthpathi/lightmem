@@ -291,19 +291,47 @@ impl LightMem {
         reranker_override: Option<&str>,
         category: Option<MemoryType>,
         title: Option<String>,
-        mut tags: Vec<String>,
+        tags: Vec<String>,
         confidence: Option<f32>,
         ttl: Option<chrono::Duration>,
         supersede: bool,
         provenance: Option<String>,
     ) -> Result<(MemoryRecord, Vec<MemoryConflict>)> {
-        if files.is_empty() {
-            let text = content.unwrap_or("");
-            return self.remember_with_options(
-                text, category, title, tags, confidence, ttl, supersede, provenance,
-            );
-        }
+        let (stored, conflicts, _) = self.remember_with_attachments_and_entities(
+            content,
+            files,
+            extract_llm,
+            false,
+            reranker_override,
+            category,
+            title,
+            tags,
+            confidence,
+            ttl,
+            supersede,
+            provenance,
+        )?;
+        Ok((stored, conflicts))
+    }
 
+    /// Store a memory with optional file attachments and optional LLM entity extraction.
+    /// Returns the stored record, detected conflicts, and an optional warning if entity extraction failed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_attachments_and_entities(
+        &self,
+        content: Option<&str>,
+        files: &[PathBuf],
+        extract_llm: bool,
+        extract_entities: bool,
+        reranker_override: Option<&str>,
+        category: Option<MemoryType>,
+        title: Option<String>,
+        mut tags: Vec<String>,
+        confidence: Option<f32>,
+        ttl: Option<chrono::Duration>,
+        supersede: bool,
+        provenance: Option<String>,
+    ) -> Result<(MemoryRecord, Vec<MemoryConflict>, Option<String>)> {
         let mut attachment_inputs = Vec::with_capacity(files.len());
         let mut seen_sha = HashSet::new();
         for path in files {
@@ -340,7 +368,7 @@ impl LightMem {
 
         let final_content = if !content_parts.is_empty() {
             content_parts.join("\n\n")
-        } else {
+        } else if !attachment_inputs.is_empty() {
             attachment_inputs
                 .iter()
                 .map(|a| {
@@ -364,10 +392,12 @@ impl LightMem {
                 })
                 .collect::<Vec<_>>()
                 .join("; ")
+        } else {
+            anyhow::bail!("Memory content cannot be blank");
         };
 
         let resolved_type = category.unwrap_or_else(|| {
-            if user_text.is_some() || extract_llm {
+            if user_text.is_some() || extract_llm || attachment_inputs.is_empty() {
                 MemoryType::infer(&final_content)
             } else {
                 MemoryType::Artifact
@@ -378,22 +408,30 @@ impl LightMem {
             if let Some(txt) = user_text {
                 txt.lines()
                     .next()
-                    .unwrap_or("Attachment Memory")
+                    .unwrap_or("Untitled Memory")
                     .chars()
                     .take(80)
                     .collect()
             } else if attachment_inputs.len() == 1 {
                 attachment_inputs[0].metadata.filename.clone()
-            } else {
+            } else if !attachment_inputs.is_empty() {
                 format!(
                     "{} (+{} more)",
                     attachment_inputs[0].metadata.filename,
                     attachment_inputs.len() - 1
                 )
+            } else {
+                final_content
+                    .lines()
+                    .next()
+                    .unwrap_or("Untitled Memory")
+                    .chars()
+                    .take(80)
+                    .collect()
             }
         });
 
-        let conf = confidence.unwrap_or(0.95);
+        let conf = confidence.unwrap_or(0.9);
         anyhow::ensure!(
             conf.is_finite() && (0.0..=1.0).contains(&conf),
             "Confidence must be between 0 and 1"
@@ -402,17 +440,21 @@ impl LightMem {
             .map(|p| p.trim().to_string())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| {
-                if extract_llm {
-                    "attachment_llm_extracted".to_string()
+                if !attachment_inputs.is_empty() {
+                    if extract_llm {
+                        "attachment_llm_extracted".to_string()
+                    } else {
+                        "attachment_metadata".to_string()
+                    }
                 } else {
-                    "attachment_metadata".to_string()
+                    "explicit_statement".to_string()
                 }
             });
 
         let mut memory = MemoryRecord::new(
             resolved_type,
             resolved_title,
-            final_content,
+            final_content.clone(),
             tags,
             conf,
             Some(clean_provenance),
@@ -428,15 +470,46 @@ impl LightMem {
             .map(|a| a.metadata.clone())
             .collect();
 
+        // Automatic entity extraction via LLM if enabled
+        let mut entity_warning = None;
+        if extract_entities {
+            match ObserverService::extract_entities_via_llm(
+                &final_content,
+                reranker_override,
+                &self.config,
+            ) {
+                Ok(extracted_ents) => {
+                    memory.entities = extracted_ents;
+                }
+                Err(err) => {
+                    entity_warning = Some(format!(
+                        "Could not extract entities (LLM unreachable or error: {}). Memory saved without entities.",
+                        err
+                    ));
+                }
+            }
+        }
+
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        let mut stored = self.storage.insert_indexed_with_attachments(
-            &memory,
-            &attachment_inputs,
-            self.embedder()?.as_ref(),
-            &self.embedding_identity,
-            true,
-        )?;
+
+        let mut stored = if !attachment_inputs.is_empty() {
+            self.storage.insert_indexed_with_attachments(
+                &memory,
+                &attachment_inputs,
+                self.embedder()?.as_ref(),
+                &self.embedding_identity,
+                true,
+            )?
+        } else {
+            let mut batch = self.storage.insert_indexed_batch(
+                &[memory],
+                self.embedder()?.as_ref(),
+                &self.embedding_identity,
+                true,
+            )?;
+            batch.remove(0)
+        };
 
         let active_peers = self.storage.list_memories(
             Some(stored.category),
@@ -491,7 +564,7 @@ impl LightMem {
             .storage
             .auto_link_memory(&stored.id, &format!("{}\n{}", stored.title, stored.content));
 
-        Ok((stored, conflicts))
+        Ok((stored, conflicts, entity_warning))
     }
 
     /// Scan active memories by finding each memory's closest vector neighbor and checking overlap.
@@ -813,6 +886,16 @@ impl LightMem {
         self.storage.get_memory_by_id_or_title(id)
     }
 
+    /// Find memories containing a specific entity name and optional value
+    pub fn find_by_entity(&self, name: &str, val: Option<&str>) -> Result<Vec<MemoryRecord>> {
+        self.storage.find_by_entity(name, val)
+    }
+
+    /// Access underlying SQLite storage engine
+    pub fn storage(&self) -> &Storage {
+        &self.storage
+    }
+
     /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
     pub fn get_attachments_data(
         &self,
@@ -836,13 +919,13 @@ impl LightMem {
             .save_memories_attachments_to(id_or_titles, target)
     }
 
-    /// Default vault attachments cache directory (`<db_parent>/attachments`)
+    /// Default vault attachments cache directory (`<db_parent>/.lightmem_attachments`)
     pub fn default_attachments_dir(&self) -> PathBuf {
         self.db_path()
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."))
-            .join("attachments")
+            .join(".lightmem_attachments")
     }
 
     /// Materialize and verify all attachments of a memory into `save_to` (or `default_attachments_dir()` if `None`), returning their absolute paths
@@ -918,7 +1001,13 @@ impl LightMem {
         let removed = self.storage.clear_all(hard_delete)?;
         if hard_delete {
             let att_dir = self.default_attachments_dir();
-            if att_dir.is_dir() {
+            if att_dir.is_dir()
+                && att_dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == ".lightmem_attachments")
+                    .unwrap_or(false)
+            {
                 let _ = std::fs::remove_dir_all(&att_dir);
             }
         }
@@ -1043,9 +1132,16 @@ impl LightMem {
             let raw = std::fs::read_to_string(&file)
                 .with_context(|| format!("Failed to read {}", file.display()))?;
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let json = ext.eq_ignore_ascii_case("json")
-                || ext.eq_ignore_ascii_case("jsonl")
-                || raw.trim_start().starts_with(['{', '[']);
+            let is_markdown_or_okf = ext.eq_ignore_ascii_case("md")
+                || ext.eq_ignore_ascii_case("okf")
+                || ext.eq_ignore_ascii_case("markdown");
+            let json = if is_markdown_or_okf {
+                false
+            } else {
+                ext.eq_ignore_ascii_case("json")
+                    || ext.eq_ignore_ascii_case("jsonl")
+                    || raw.trim_start().starts_with(['{', '['])
+            };
             let candidates = if json {
                 JsonMemoryImporter.parse_with_enrichment(&raw, enrich)?
             } else {
@@ -1250,6 +1346,25 @@ impl LightMem {
         reranker_override: Option<&str>,
     ) -> Result<AnswerResult> {
         let candidates = self.recall_with_date(question, category, as_of, on_date, limit, None)?;
+
+        // Exact entity slot shortcut: if any recalled memory has an entity matching the question keyword
+        let q_lower = question.to_lowercase();
+        for cand in &candidates {
+            for ent in &cand.memory.entities {
+                if !ent.name.is_empty()
+                    && (q_lower.contains(&ent.name)
+                        || q_lower.contains(&ent.name.replace('_', " ")))
+                {
+                    return Ok(AnswerResult {
+                        answer: ent.val.clone(),
+                        selected_memory: Some(cand.memory.clone()),
+                        confidence: cand.memory.confidence.max(0.95),
+                        reranker_used: "entity_index".to_string(),
+                    });
+                }
+            }
+        }
+
         let reranker = self.build_reranker(reranker_override)?;
         reranker.answer(question, &candidates)
     }

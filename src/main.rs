@@ -106,6 +106,10 @@ enum Commands {
         #[arg(short = 'p', long)]
         provenance: Option<String>,
 
+        /// Disable automatic LLM entity extraction (on by default)
+        #[arg(long = "no-entities", visible_alias = "no-extract-entities")]
+        no_entities: bool,
+
         /// Output created memory as JSON
         #[arg(long)]
         json: bool,
@@ -929,6 +933,7 @@ fn main() -> Result<()> {
             ttl,
             supersede,
             provenance,
+            no_entities,
             json,
         } => {
             let has_text = content
@@ -954,10 +959,11 @@ fn main() -> Result<()> {
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
-            let (memory, conflicts) = lm.remember_with_attachments(
+            let (memory, conflicts, entity_warning) = lm.remember_with_attachments_and_entities(
                 content.as_deref(),
                 &files,
                 extract,
+                !no_entities,
                 reranker.as_deref(),
                 cat,
                 title,
@@ -967,12 +973,13 @@ fn main() -> Result<()> {
                 supersede,
                 provenance,
             )?;
-            CliView::render_remembered_with_conflicts(
+            CliView::render_remembered_full(
                 &memory,
                 &conflicts,
                 supersede,
                 lm.db_path(),
                 json,
+                entity_warning.as_deref(),
             )?;
         }
 
@@ -1351,7 +1358,7 @@ fn main() -> Result<()> {
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
-            if all || id.as_deref() == Some("all") {
+            if all {
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(hard)?;
                 drop(lm);
@@ -1850,8 +1857,8 @@ fn main() -> Result<()> {
                         merged_count += 1;
                         println!(
                             "  ✓ Merged into {} (retired older {}): {}\n",
-                            &merged.id.to_string()[..8],
-                            &c.older_memory.id.to_string()[..8],
+                            merged.id.chars().take(8).collect::<String>(),
+                            c.older_memory.id.chars().take(8).collect::<String>(),
                             merged.content
                         );
                     } else {
@@ -2052,7 +2059,7 @@ fn main() -> Result<()> {
                     println!(
                         "  {} Saved memory {} ({}): \"{}\"\n",
                         CliView::emerald_bold("✓"),
-                        CliView::gold(&record.id[..8]),
+                        CliView::gold(&record.id.chars().take(8).collect::<String>()),
                         CliView::violet_bold(record.category.as_str()),
                         record.title
                     );

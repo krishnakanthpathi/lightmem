@@ -63,7 +63,7 @@ class LightMem:
         return args
 
     def _call(self, subcommand: str, extra_args: List[str], input_text: Optional[str] = None) -> Any:
-        full_args = self._build_base_args() + [subcommand] + extra_args + ["--json"]
+        full_args = self._build_base_args() + [subcommand, "--json"] + extra_args
         code, stdout, stderr = execute_lmem(full_args, input_text=input_text)
         if code != 0:
             err = stderr.strip() or stdout.strip()
@@ -127,8 +127,6 @@ class LightMem:
         reranker: Optional[str] = None,
     ) -> Memory:
         args: List[str] = []
-        if content is not None and (content or not files):
-            args.append(content)
         if category:
             args.extend(["-t", category])
         if title:
@@ -150,6 +148,8 @@ class LightMem:
             args.append("--extract")
         if reranker:
             args.extend(["-r", reranker])
+        if content is not None and (content or not files):
+            args.extend(["--", content])
 
         data = self._call("remember", args)
         return Memory.from_dict(data)
@@ -449,7 +449,7 @@ class LightMem:
     @staticmethod
     def bundle_info(bundle_path: str | Path) -> Dict[str, Any]:
         """Inspect a transfer bundle's manifest and video/photo media summary without unpacking."""
-        code, stdout, stderr = execute_lmem(["bundle", "info", str(bundle_path), "--json"])
+        code, stdout, stderr = execute_lmem(["bundle", "--json", "info", str(bundle_path)])
         if code != 0:
             err = stderr.strip() or stdout.strip()
             raise RuntimeError(f"lmem bundle info failed (exit code {code}): {err}")

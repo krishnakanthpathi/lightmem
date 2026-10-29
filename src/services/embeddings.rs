@@ -200,8 +200,22 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                 }
                 anyhow::bail!("Ollama returned 200 OK but embedding array was empty");
             }
-            Err(e @ ureq::Error::Status(404, _)) => {
-                // If /api/embeddings failed with 404, try /api/embed (newer Ollama format)
+            Err(ureq::Error::Status(404, resp)) => {
+                let err_body = resp.into_string().unwrap_or_default();
+                let lower_err = err_body.to_lowercase();
+                if lower_err.contains("model")
+                    && (lower_err.contains("not found") || lower_err.contains("try pulling"))
+                {
+                    anyhow::bail!(
+                        "Ollama model '{}' not found at {}. Have you pulled it with `ollama pull {}`? Details: {}",
+                        self.model,
+                        self.url,
+                        self.model,
+                        err_body.trim()
+                    );
+                }
+
+                // If /api/embeddings failed with 404 because endpoint is missing, try /api/embed (newer Ollama format)
                 let alt_endpoint = format!("{}/api/embed", self.url);
                 #[derive(Serialize)]
                 struct AltRequest<'a> {
@@ -217,17 +231,48 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                         &crate::models::config::format_auth_header(key),
                     );
                 }
-                let alt_resp = alt_req
-                    .send_json(&AltRequest {
-                        model: &self.model,
-                        input: text,
-                    })
-                    .with_context(|| {
-                        format!(
-                            "Failed to call Ollama at {} (and {}) : {}",
-                            endpoint, alt_endpoint, e
-                        )
-                    })?;
+                let alt_resp_result = alt_req.send_json(&AltRequest {
+                    model: &self.model,
+                    input: text,
+                });
+
+                let alt_resp = match alt_resp_result {
+                    Ok(r) => r,
+                    Err(ureq::Error::Status(404, alt_err_resp)) => {
+                        let alt_err_body = alt_err_resp.into_string().unwrap_or_default();
+                        let alt_lower = alt_err_body.to_lowercase();
+                        if alt_lower.contains("model")
+                            && (alt_lower.contains("not found")
+                                || alt_lower.contains("try pulling"))
+                        {
+                            anyhow::bail!(
+                                "Ollama model '{}' not found at {}. Have you pulled it with `ollama pull {}`? Details: {}",
+                                self.model,
+                                self.url,
+                                self.model,
+                                alt_err_body.trim()
+                            );
+                        }
+                        anyhow::bail!(
+                            "Failed to call Ollama at {} and {}: endpoint not found (404). Details: {}",
+                            endpoint,
+                            alt_endpoint,
+                            if !alt_err_body.trim().is_empty() {
+                                alt_err_body.trim()
+                            } else {
+                                err_body.trim()
+                            }
+                        );
+                    }
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "Failed to call Ollama at {} (and {})",
+                                endpoint, alt_endpoint
+                            )
+                        });
+                    }
+                };
 
                 let parsed: OllamaEmbedResponse = alt_resp.into_json()?;
                 if let Some(mut embs) = parsed.embeddings {
@@ -253,6 +298,10 @@ impl EmbeddingProvider for HashEmbeddingProvider {
     }
 
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        anyhow::ensure!(
+            !text.trim().is_empty(),
+            "Cannot generate embedding for empty or whitespace-only input"
+        );
         const DIMS: usize = 384;
         let mut vec = vec![0.0f32; DIMS];
 
@@ -304,7 +353,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if denom == 0.0 {
         0.0
     } else {
-        dot / denom
+        let sim = dot / denom;
+        if sim.is_finite() {
+            sim.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -323,4 +377,41 @@ pub fn validate_vector(vector: &[f32]) -> Result<()> {
         "Embedding must be nonempty and contain only finite values"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cosine_similarity_clamping_and_nan() {
+        // Normal vectors
+        let a = vec![1.0, 0.0];
+        let b = vec![1.0, 0.0];
+        assert_eq!(cosine_similarity(&a, &b), 1.0);
+
+        // Opposite vectors
+        let c = vec![-1.0, 0.0];
+        assert_eq!(cosine_similarity(&a, &c), -1.0);
+
+        // Vector containing NaN should result in 0.0
+        let nan_vec = vec![f32::NAN, 1.0];
+        assert_eq!(cosine_similarity(&a, &nan_vec), 0.0);
+
+        // Zero vectors
+        let zero = vec![0.0, 0.0];
+        assert_eq!(cosine_similarity(&a, &zero), 0.0);
+
+        // Mismatched lengths
+        let short = vec![1.0];
+        assert_eq!(cosine_similarity(&a, &short), 0.0);
+    }
+
+    #[test]
+    fn test_hash_embedding_provider_rejects_empty_and_whitespace() {
+        let provider = HashEmbeddingProvider;
+        assert!(provider.embed("").is_err());
+        assert!(provider.embed("   \t\n  ").is_err());
+        assert!(provider.embed("valid content").is_ok());
+    }
 }

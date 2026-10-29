@@ -41,13 +41,14 @@ document.querySelectorAll('.copy').forEach(button => {
 });
 
 // Keep native anchor navigation working with a simple local static server, too.
-if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+const isLocalhost = ['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.local');
+if (isLocalhost) {
   document.querySelectorAll('a[href^="/docs"]').forEach(link => {
     link.setAttribute('href', link.getAttribute('href').replace(/^\/docs(?=#|$)/, '/docs.html'));
   });
 }
 
-if (!['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
+if (!isLocalhost) {
   window.va ||= function () { (window.vaq ||= []).push(arguments); };
   window.si ||= function () { (window.siq ||= []).push(arguments); };
   for (const src of ['/_vercel/insights/script.js', '/_vercel/speed-insights/script.js']) {

@@ -1091,6 +1091,21 @@ pub fn parse_mp4_dimensions_and_duration(data: &[u8]) -> (Option<String>, Option
     (dims, dur)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityRecord {
+    pub name: String,
+    pub val: String,
+}
+
+impl EntityRecord {
+    pub fn new(name: impl Into<String>, val: impl Into<String>) -> Self {
+        Self {
+            name: name.into().trim().to_lowercase(),
+            val: val.into().trim().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1108,6 +1123,8 @@ pub struct MemoryRecord {
     pub expired_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<AttachmentMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<EntityRecord>,
 }
 
 impl MemoryRecord {
@@ -1134,6 +1151,7 @@ impl MemoryRecord {
             updated_at: now,
             expired_at: None,
             attachments: Vec::new(),
+            entities: Vec::new(),
         }
     }
 
@@ -1152,6 +1170,14 @@ impl MemoryRecord {
                 .map(AttachmentMetadata::summary_text)
                 .collect();
             out.push_str(&format!("\n\nAttachments: {}", summaries.join("; ")));
+        }
+        if !self.entities.is_empty() {
+            let ent_summaries: Vec<String> = self
+                .entities
+                .iter()
+                .map(|e| format!("{}: {}", e.name, e.val))
+                .collect();
+            out.push_str(&format!("\n\nEntities: {}", ent_summaries.join("; ")));
         }
         if !self.tags.is_empty() {
             out.push_str(&format!("\n\nTags: {}", self.tags.join(", ")));

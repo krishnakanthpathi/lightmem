@@ -143,6 +143,28 @@ impl OnnxQaReranker {
         Self { model_spec }
     }
 
+    pub fn provider_label(&self) -> String {
+        let env_spec = std::env::var("LIGHTMEM_QA_MODEL").ok();
+        let effective_spec = self
+            .model_spec
+            .as_deref()
+            .or(env_spec.as_deref())
+            .unwrap_or("minilm-squad2");
+        let clean_spec = effective_spec
+            .strip_prefix("onnx:")
+            .unwrap_or(effective_spec)
+            .trim();
+        if let Some(preset) = resolve_qa_preset(clean_spec) {
+            preset.slug.to_string()
+        } else {
+            Path::new(clean_spec)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("onnx-qa")
+                .to_string()
+        }
+    }
+
     /// Ensure the specified ONNX QA model (`minilm-squad2` or `tinyroberta-squad2` or custom path) is present on disk.
     pub fn ensure_model_downloaded(model_spec: Option<&str>) -> Result<(PathBuf, String)> {
         let raw_spec = model_spec
@@ -418,7 +440,9 @@ impl Reranker for OnnxQaReranker {
             return Ok(no_evidence("none"));
         }
 
-        let engine = self.get_or_load_engine()?;
+        if candidates.is_empty() {
+            return Ok(no_evidence(&self.provider_label()));
+        }
 
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
@@ -427,8 +451,10 @@ impl Reranker for OnnxQaReranker {
             .collect();
 
         if gated.is_empty() {
-            return Ok(no_evidence(&engine.provider_label));
+            return Ok(no_evidence(&self.provider_label()));
         }
+
+        let engine = self.get_or_load_engine()?;
 
         let q_tokens = content_tokens(question);
 
@@ -943,6 +969,15 @@ pub fn build_merged_record(
             merged.attachments.push(carried);
         }
     }
+    for ent in &older.entities {
+        if !merged
+            .entities
+            .iter()
+            .any(|e| e.name == ent.name && e.val == ent.val)
+        {
+            merged.entities.push(ent.clone());
+        }
+    }
     merged
 }
 
@@ -1117,7 +1152,10 @@ fn content_tokens(text: &str) -> HashSet<String> {
     ];
     text.split(|c: char| !c.is_alphanumeric())
         .map(|w| w.to_lowercase())
-        .filter(|w| w.len() > 1 && !FUNCTION_WORDS.contains(&w.as_str()))
+        .filter(|w| {
+            (w.chars().any(|c| c.is_ascii_digit()) || w.len() > 1)
+                && !FUNCTION_WORDS.contains(&w.as_str())
+        })
         .collect()
 }
 
@@ -1331,5 +1369,34 @@ mod tests {
             .unwrap();
         assert_eq!(res_pan.answer, "HAQPP8118D");
         assert_eq!(res_pan.selected_memory.unwrap().id, "2");
+    }
+
+    #[test]
+    fn test_content_tokens_preserves_single_digit_numeric_tokens() {
+        let t1 = content_tokens("Workers: 4");
+        assert!(t1.contains("workers"));
+        assert!(t1.contains("4"));
+
+        let t2 = content_tokens("Workers: 8");
+        assert!(t2.contains("workers"));
+        assert!(t2.contains("8"));
+
+        assert_ne!(t1, t2);
+
+        // Single letters that are not digits or function words
+        let t3 = content_tokens("Plan A vs Plan B");
+        // 'a' is a function word, but digits are kept
+        assert!(t3.contains("plan"));
+    }
+
+    #[test]
+    fn test_onnx_qa_reranker_returns_no_evidence_early_when_candidates_empty() {
+        let reranker = OnnxQaReranker::new(Some("minilm-squad2".to_string()));
+        let result = reranker
+            .answer("What is the meaning of life?", &[])
+            .unwrap();
+        assert!(result.answer.contains("Insufficient evidence"));
+        assert_eq!(result.confidence, 0.0);
+        assert_eq!(result.reranker_used, "minilm-squad2");
     }
 }

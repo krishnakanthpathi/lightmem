@@ -1,6 +1,6 @@
 use crate::models::{
-    compute_sha256_hex, extract_wikilinks, AttachmentInput, AttachmentMetadata, GraphEdge,
-    GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
+    compute_sha256_hex, extract_wikilinks, AttachmentInput, AttachmentMetadata, EntityRecord,
+    GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
     PaginatedMemories, RelatedMemory, StorageStats,
 };
 use crate::services::embeddings::{cosine_similarity, validate_vector, EmbeddingProvider};
@@ -74,16 +74,63 @@ impl Storage {
 
     fn migrate(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
+
+        // Fast-path: Check user_version and need for repair first on connection before acquiring an Immediate write lock
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        anyhow::ensure!(
+            version <= 6,
+            "Database schema is newer than this version of LightMem"
+        );
+        if version == 6 {
+            let has_memories: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            let needs_tag_or_key_repair = if has_memories {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE tags NOT LIKE '[%' OR (dedup_key = '' AND TRIM(content) != ''))",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false)
+            } else {
+                false
+            };
+            if !needs_tag_or_key_repair {
+                return Ok(());
+            }
+        }
+
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 5,
+            version <= 6,
             "Database schema is newer than this version of LightMem"
         );
         if version >= 4 {
             if version == 4 {
                 tx.execute("ALTER TABLE memories ADD COLUMN context_json TEXT", [])?;
                 tx.pragma_update(None, "user_version", 5)?;
+            }
+            if version < 6 {
+                tx.execute_batch(
+                    r#"
+                    CREATE TABLE IF NOT EXISTS memory_entities (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        memory_id TEXT NOT NULL,
+                        entity_name TEXT NOT NULL,
+                        entity_val TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_entities_memory_id ON memory_entities(memory_id);
+                    CREATE INDEX IF NOT EXISTS idx_entities_lookup ON memory_entities(entity_name, entity_val);
+                    "#,
+                )?;
+                tx.pragma_update(None, "user_version", 6)?;
             }
             let needs_tag_or_key_repair: bool = tx
                 .query_row(
@@ -297,7 +344,21 @@ impl Storage {
         if !has_context {
             tx.execute("ALTER TABLE memories ADD COLUMN context_json TEXT", [])?;
         }
-        tx.pragma_update(None, "user_version", 5)?;
+        tx.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS memory_entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT NOT NULL,
+                entity_name TEXT NOT NULL,
+                entity_val TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_entities_memory_id ON memory_entities(memory_id);
+            CREATE INDEX IF NOT EXISTS idx_entities_lookup ON memory_entities(entity_name, entity_val);
+            "#,
+        )?;
+        tx.pragma_update(None, "user_version", 6)?;
         tx.commit()?;
         Ok(())
     }
@@ -398,6 +459,7 @@ impl Storage {
                 None => anyhow::bail!("An imported record unexpectedly disappeared"),
             };
             resolved.attachments = load_attachments_for_id(&tx, &resolved.id)?;
+            resolved.entities = load_entities_for_id(&tx, &resolved.id)?;
             *record = resolved;
         }
         let mut unique = std::collections::BTreeMap::new();
@@ -549,6 +611,7 @@ impl Storage {
             .optional()?;
         if let Some(ref mut rec) = opt {
             rec.attachments = load_attachments_for_id(&conn, &rec.id)?;
+            rec.entities = load_entities_for_id(&conn, &rec.id)?;
         }
         Ok(opt)
     }
@@ -576,6 +639,7 @@ impl Storage {
                 if has_atts {
                     record.attachments = load_attachments_for_id(&conn, &record.id)?;
                 }
+                record.entities = load_entities_for_id(&conn, &record.id)?;
                 records.insert(record.id.clone(), record);
             }
         }
@@ -597,8 +661,41 @@ impl Storage {
             .optional()?;
         if let Some(ref mut rec) = opt {
             rec.attachments = load_attachments_for_id(&conn, &rec.id)?;
+            rec.entities = load_entities_for_id(&conn, &rec.id)?;
         }
         Ok(opt)
+    }
+
+    pub fn find_by_entity(&self, name: &str, val: Option<&str>) -> Result<Vec<MemoryRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
+        let name_lower = name.trim().to_lowercase();
+        let mut records = if let Some(v) = val {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.category, m.title, m.content, m.tags, m.confidence, m.status, m.provenance, m.created_at, m.updated_at, m.expired_at, m.context_json
+                 FROM memories m
+                 INNER JOIN memory_entities e ON m.id = e.memory_id
+                 WHERE e.entity_name = ?1 AND e.entity_val = ?2 AND m.status = 'active'
+                 ORDER BY m.updated_at DESC",
+            )?;
+            let rows = stmt.query_map(params![name_lower, v.trim()], row_to_memory)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT m.id, m.category, m.title, m.content, m.tags, m.confidence, m.status, m.provenance, m.created_at, m.updated_at, m.expired_at, m.context_json
+                 FROM memories m
+                 INNER JOIN memory_entities e ON m.id = e.memory_id
+                 WHERE e.entity_name = ?1 AND m.status = 'active'
+                 ORDER BY m.updated_at DESC",
+            )?;
+            let rows = stmt.query_map(params![name_lower], row_to_memory)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for rec in &mut records {
+            rec.attachments = load_attachments_for_id(&conn, &rec.id)?;
+            rec.entities = load_entities_for_id(&conn, &rec.id)?;
+        }
+        Ok(records)
     }
 
     pub fn find_existing_ids(&self, ids: &[String]) -> Result<Vec<String>> {
@@ -654,7 +751,10 @@ impl Storage {
         let target_str = target_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Invalid target path: {}", target_path.display()))?;
-        if let Err(_) = conn.execute("VACUUM INTO ?1", rusqlite::params![target_str]) {
+        if conn
+            .execute("VACUUM INTO ?1", rusqlite::params![target_str])
+            .is_err()
+        {
             let mut dst = rusqlite::Connection::open(target_path)?;
             let backup = rusqlite::backup::Backup::new(&conn, &mut dst)?;
             backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
@@ -669,18 +769,34 @@ impl Storage {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         let mut conn = self.conn.lock().unwrap();
-        let backup = rusqlite::backup::Backup::new(&src_conn, &mut *conn)?;
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut conn)?;
         backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
         drop(backup);
         drop(src_conn);
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        drop(conn);
+        self.migrate()?;
         Ok(())
     }
 
     /// Merge records, vectors, attachments, and graph links from another SQLite storage instance
     pub fn merge_vault(&self, src: &Storage, replace: bool) -> Result<usize> {
-        let mut conn = self.conn.lock().unwrap();
-        let src_conn = src.conn.lock().unwrap();
+        if Arc::ptr_eq(&self.conn, &src.conn) {
+            return Ok(0);
+        }
+
+        let (mut conn, src_conn) =
+            if (Arc::as_ptr(&self.conn) as usize) < (Arc::as_ptr(&src.conn) as usize) {
+                let c = self.conn.lock().unwrap();
+                let sc = src.conn.lock().unwrap();
+                (c, sc)
+            } else {
+                let sc = src.conn.lock().unwrap();
+                let c = self.conn.lock().unwrap();
+                (c, sc)
+            };
         let tx = conn.transaction()?;
 
         let mut stmt = src_conn.prepare(
@@ -744,27 +860,100 @@ impl Storage {
         }
 
         // Vectors
-        let mut vec_stmt = src_conn.prepare("SELECT id, embedding, dims FROM memory_vectors")?;
-        let vec_rows = vec_stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
-        for v in vec_rows {
-            let (id, emb, dims) = v?;
-            let exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
-                [&id],
-                |r| r.get(0),
-            )?;
-            if exists {
-                tx.execute(
-                    "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
-                    rusqlite::params![id, emb, dims],
+        let src_has_vectors: bool = src_conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM memory_vectors)", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or(false);
+
+        if src_has_vectors {
+            let target_state: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT identity, dims FROM embedding_state WHERE singleton=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let src_state: Option<(String, i64)> = src_conn
+                .query_row(
+                    "SELECT identity, dims FROM embedding_state WHERE singleton=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+
+            let target_vec_dims: Option<i64> = tx
+                .query_row("SELECT dims FROM memory_vectors LIMIT 1", [], |r| r.get(0))
+                .optional()?;
+            let src_vec_dims: Option<i64> = src_conn
+                .query_row("SELECT dims FROM memory_vectors LIMIT 1", [], |r| r.get(0))
+                .optional()?;
+
+            let target_dims = target_state.as_ref().map(|s| s.1).or(target_vec_dims);
+            let src_dims = src_state.as_ref().map(|s| s.1).or(src_vec_dims);
+
+            if let (Some(td), Some(sd)) = (target_dims, src_dims) {
+                anyhow::ensure!(
+                    td == sd,
+                    "Incompatible embedding dimensions: target has {} dims, source has {} dims",
+                    td,
+                    sd
+                );
+            }
+
+            if let (Some(ts), Some(ss)) = (&target_state, &src_state) {
+                anyhow::ensure!(
+                    ts.0 == ss.0,
+                    "Incompatible embedding models: target uses '{}', source uses '{}'",
+                    ts.0,
+                    ss.0
+                );
+            }
+
+            let target_vec_count: i64 = tx
+                .query_row("SELECT COUNT(*) FROM memory_vectors", [], |r| r.get(0))
+                .unwrap_or(0);
+            if target_vec_count == 0 && target_state.is_none() {
+                if let Some((ref s_id, s_dims)) = src_state {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO embedding_state (singleton, identity, dims) VALUES (1, ?1, ?2)",
+                        params![s_id, s_dims],
+                    )?;
+                }
+            } else if target_state.is_some() && src_state.is_none() {
+                tx.execute("DELETE FROM embedding_state", [])?;
+            }
+
+            let mut vec_stmt =
+                src_conn.prepare("SELECT id, embedding, dims FROM memory_vectors")?;
+            let vec_rows = vec_stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            for v in vec_rows {
+                let (id, emb, dims) = v?;
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
+                    [&id],
+                    |r| r.get(0),
                 )?;
+                if exists {
+                    if replace {
+                        tx.execute(
+                            "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)
+                             ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
+                            rusqlite::params![id, emb, dims],
+                        )?;
+                    } else {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
+                            rusqlite::params![id, emb, dims],
+                        )?;
+                    }
+                }
             }
         }
 
@@ -824,6 +1013,52 @@ impl Storage {
                         created_at
                     ],
                 )?;
+            }
+        }
+
+        // Entities
+        let has_entities: bool = src_conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_entities')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if has_entities {
+            let mut ent_stmt = src_conn.prepare(
+                "SELECT e.memory_id, e.entity_name, e.entity_val, e.created_at
+                 FROM memory_entities e
+                 INNER JOIN memories m ON e.memory_id = m.id
+                 WHERE m.status = 'active'",
+            )?;
+            let ent_rows = ent_stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?;
+            for e in ent_rows {
+                let (memory_id, entity_name, entity_val, created_at) = e?;
+                let mem_exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND status='active')",
+                    [&memory_id],
+                    |r| r.get(0),
+                )?;
+                if mem_exists {
+                    let already_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM memory_entities WHERE memory_id=?1 AND entity_name=?2 AND entity_val=?3)",
+                        rusqlite::params![memory_id, entity_name, entity_val],
+                        |r| r.get(0),
+                    )?;
+                    if !already_exists {
+                        tx.execute(
+                            "INSERT INTO memory_entities (memory_id, entity_name, entity_val, created_at) VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![memory_id, entity_name, entity_val, created_at],
+                        )?;
+                    }
+                }
             }
         }
 
@@ -1312,6 +1547,7 @@ impl Storage {
                     .optional()?
                 {
                     mem.attachments = load_attachments_for_id(&conn, &mem.id)?;
+                    mem.entities = load_entities_for_id(&conn, &mem.id)?;
                     results.push(RelatedMemory {
                         memory: mem,
                         distance: next_hop,
@@ -1800,6 +2036,9 @@ impl Storage {
                     item.attachments = load_attachments_for_id(&conn, &item.id)?;
                 }
             }
+            for item in &mut items {
+                item.entities = load_entities_for_id(&conn, &item.id)?;
+            }
         }
 
         let effective_limit = if limit == 0 { total.max(1) } else { limit };
@@ -2172,6 +2411,7 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
         updated_at,
         expired_at,
         attachments: Vec::new(),
+        entities: Vec::new(),
     })
 }
 
@@ -2269,6 +2509,9 @@ fn all_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
         for rec in &mut records {
             rec.attachments = load_attachments_for_id(conn, &rec.id)?;
         }
+    }
+    for rec in &mut records {
+        rec.entities = load_entities_for_id(conn, &rec.id)?;
     }
     Ok(records)
 }
@@ -2390,6 +2633,7 @@ where
         drop(stmt);
         for d in &mut dups {
             d.attachments = load_attachments_for_id(tx, &d.id)?;
+            d.entities = load_entities_for_id(tx, &d.id)?;
         }
         dups
     } else {
@@ -2436,6 +2680,15 @@ where
                 merged.attachments.push(att.clone());
             }
         }
+        for ent in &existing.entities {
+            if !merged
+                .entities
+                .iter()
+                .any(|e| e.name == ent.name && e.val == ent.val)
+            {
+                merged.entities.push(ent.clone());
+            }
+        }
     }
     let final_dedup_key = duplicate_key_for_record(&merged);
     let vector = embed(&merged)?;
@@ -2451,13 +2704,30 @@ where
             params![merged.id, serialize_f32_slice(&vector), vector.len() as i64],
         )?;
     }
+    tx.execute(
+        "DELETE FROM memory_entities WHERE memory_id=?1",
+        [&merged.id],
+    )?;
+    for ent in &merged.entities {
+        tx.execute(
+            "INSERT INTO memory_entities (memory_id, entity_name, entity_val, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![merged.id, ent.name.to_lowercase(), ent.val, Utc::now().to_rfc3339()],
+        )?;
+    }
     for duplicate in duplicates {
         if duplicate.id != merged.id {
-            // Copy any unique attachment blobs and graph links from duplicate to merged before deleting duplicate
+            // Copy any unique attachment blobs, graph links, and entities from duplicate to merged before deleting duplicate
             tx.execute(
                 "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
                  SELECT lower(hex(randomblob(16))), ?1, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at
                  FROM memory_attachments
+                 WHERE memory_id = ?2",
+                params![merged.id, duplicate.id],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_entities (memory_id, entity_name, entity_val, created_at)
+                 SELECT ?1, entity_name, entity_val, created_at
+                 FROM memory_entities
                  WHERE memory_id = ?2",
                 params![merged.id, duplicate.id],
             )?;
@@ -2517,6 +2787,26 @@ fn load_attachments_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<Att
     )?;
     let rows = stmt.query_map([memory_id], row_to_attachment_metadata)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn load_entities_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<EntityRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT entity_name, entity_val
+         FROM memory_entities
+         WHERE memory_id = ?1
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map([memory_id], |r| {
+        Ok(EntityRecord {
+            name: r.get(0)?,
+            val: r.get(1)?,
+        })
+    })?;
+    let mut entities = Vec::new();
+    for row in rows {
+        entities.push(row?);
+    }
+    Ok(entities)
 }
 
 fn row_to_attachment_metadata(row: &rusqlite::Row) -> rusqlite::Result<AttachmentMetadata> {

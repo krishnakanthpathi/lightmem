@@ -14,6 +14,7 @@ pub use memory::{
     detect_memory_conflict_with_similarity, detect_mime_and_kind, encode_base64,
     extract_meaningful_tokens, parse_audio_duration_secs, parse_image_dimensions,
     parse_mp4_dimensions_and_duration, parse_ttl_duration, AttachmentInput, AttachmentMetadata,
-    MemoryConflict, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory,
+    EntityRecord, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories,
+    ScoredMemory,
 };
 pub use stats::StorageStats;

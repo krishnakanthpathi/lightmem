@@ -15,28 +15,28 @@ BENCHMARK_QUESTIONS = [
         "id": "Q1_friend_name",
         "category": "Personal Fact",
         "question": "what is King Grey's friend Bijo's full name",
-        "ground_truth": "Datla Siva Ramaraju",
+        "ground_truth": "Test Friend",
         "is_negative": False
     },
     {
         "id": "Q2_pan_number",
         "category": "Identifier / Tax",
         "question": "what is my PAN number",
-        "ground_truth": "HAQPP8118D",
+        "ground_truth": "ABCDE1234F",
         "is_negative": False
     },
     {
         "id": "Q3_phone_number",
         "category": "Contact / Phone",
         "question": "what is my phone number",
-        "ground_truth": "6281165645",
+        "ground_truth": "+1-555-0199",
         "is_negative": False
     },
     {
         "id": "Q4_email_address",
         "category": "Contact / Email",
         "question": "what is my primary email address",
-        "ground_truth": "krishnakanthpathi@gmail.com",
+        "ground_truth": "user@example.com",
         "is_negative": False
     },
     {
@@ -71,14 +71,14 @@ BENCHMARK_QUESTIONS = [
         "id": "Q9_codeforces_handle",
         "category": "Profile / Handle",
         "question": "what is the user's Codeforces handle",
-        "ground_truth": "krishnakanthpathi",
+        "ground_truth": "testuser",
         "is_negative": False
     },
     {
         "id": "Q10_legal_name",
         "category": "Identity / Legal",
         "question": "what is the user's full legal name",
-        "ground_truth": "Pathi Krishna Kanth",
+        "ground_truth": "Test User",
         "is_negative": False
     },
     {

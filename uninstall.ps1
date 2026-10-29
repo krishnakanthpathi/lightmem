@@ -18,7 +18,7 @@ if (-not $Yes) {
     $confirm = Read-Host "  ? Proceed with uninstalling LightMem? [y/N]"
     if ($confirm -notmatch "^[yY](es)?$") {
         Write-Host "  Aborted by user." -ForegroundColor Gray
-        exit 0
+        return
     }
 }
 

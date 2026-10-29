@@ -90,7 +90,7 @@ def get_binary_path() -> str:
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.5.0") -> str:
+def ensure_binary_downloaded(version: str = "v0.5.2") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -147,7 +147,11 @@ def ensure_binary_downloaded(version: str = "v0.5.0") -> str:
         raise RuntimeError(f"Failed to auto-download lmem binary from {url}: {e}")
 
 
-def execute_lmem(args: List[str], input_text: Optional[str] = None) -> Tuple[int, str, str]:
+def execute_lmem(
+    args: List[str],
+    input_text: Optional[str] = None,
+    timeout: Optional[float] = None,
+) -> Tuple[int, str, str]:
     binary = get_binary_path()
     proc = subprocess.Popen(
         [binary] + args,
@@ -155,6 +159,13 @@ def execute_lmem(args: List[str], input_text: Optional[str] = None) -> Tuple[int
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
-    stdout, stderr = proc.communicate(input=input_text)
+    try:
+        stdout, stderr = proc.communicate(input=input_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
     return proc.returncode, stdout, stderr

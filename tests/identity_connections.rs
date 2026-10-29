@@ -510,6 +510,6 @@ fn schema_v4_migration_keeps_legacy_memories_unattributed() {
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
 }

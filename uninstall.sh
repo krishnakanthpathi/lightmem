@@ -92,17 +92,23 @@ if [ -f "$HOME/.zshrc" ]; then
     if grep -q "lightmem/completions" "$HOME/.zshrc" 2>/dev/null; then
         # Create backup
         cp "$HOME/.zshrc" "$HOME/.zshrc.lightmem.bak"
-        # Remove lightmem blocks
-        awk '
+        # Remove lightmem blocks safely via temporary file
+        tmp_rc="$(mktemp "${TMPDIR:-/tmp}/zshrc.lightmem.XXXXXX")"
+        if awk '
             /# LightMem CLI completions/ { skip = 1; next }
             skip && /fpath=\("\$HOME\/\.lightmem\/completions"/ { next }
             skip && /autoload -Uz compinit/ { next }
             skip && /zstyle.*completion.*menu/ { skip = 0; next }
             skip && /^$/ { skip = 0; next }
             !skip { print }
-        ' "$HOME/.zshrc.lightmem.bak" > "$HOME/.zshrc"
-        rm -f "$HOME/.zshrc.lightmem.bak"
-        printf "  \033[1;32m◈\033[0m Cleaned completion hooks from \033[38;2;212;212;216m~/.zshrc\033[0m\n"
+        ' "$HOME/.zshrc.lightmem.bak" > "$tmp_rc" && [ -s "$tmp_rc" ]; then
+            mv "$tmp_rc" "$HOME/.zshrc"
+            rm -f "$HOME/.zshrc.lightmem.bak"
+            printf "  \033[1;32m◈\033[0m Cleaned completion hooks from \033[38;2;212;212;216m~/.zshrc\033[0m\n"
+        else
+            rm -f "$tmp_rc"
+            printf "  \033[1;33m▸\033[0m Failed to clean ~/.zshrc; backup preserved at \033[38;2;212;212;216m~/.zshrc.lightmem.bak\033[0m\n"
+        fi
     fi
 fi
 
@@ -110,16 +116,22 @@ fi
 if [ -f "$HOME/.bashrc" ]; then
     if grep -q "lightmem/completions" "$HOME/.bashrc" 2>/dev/null; then
         cp "$HOME/.bashrc" "$HOME/.bashrc.lightmem.bak"
-        awk '
+        tmp_rc="$(mktemp "${TMPDIR:-/tmp}/bashrc.lightmem.XXXXXX")"
+        if awk '
             /# LightMem CLI completions/ { skip = 1; next }
             skip && /lightmem\/completions\/lmem\.bash/ { next }
             skip && /show-all-if-ambiguous/ { next }
             skip && /menu-complete/ { next }
             skip && /^$/ { skip = 0; next }
             !skip { print }
-        ' "$HOME/.bashrc.lightmem.bak" > "$HOME/.bashrc"
-        rm -f "$HOME/.bashrc.lightmem.bak"
-        printf "  \033[1;32m◈\033[0m Cleaned completion hooks from \033[38;2;212;212;216m~/.bashrc\033[0m\n"
+        ' "$HOME/.bashrc.lightmem.bak" > "$tmp_rc" && [ -s "$tmp_rc" ]; then
+            mv "$tmp_rc" "$HOME/.bashrc"
+            rm -f "$HOME/.bashrc.lightmem.bak"
+            printf "  \033[1;32m◈\033[0m Cleaned completion hooks from \033[38;2;212;212;216m~/.bashrc\033[0m\n"
+        else
+            rm -f "$tmp_rc"
+            printf "  \033[1;33m▸\033[0m Failed to clean ~/.bashrc; backup preserved at \033[38;2;212;212;216m~/.bashrc.lightmem.bak\033[0m\n"
+        fi
     fi
 fi
 
