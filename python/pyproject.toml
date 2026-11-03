@@ -54,7 +54,6 @@ Issues = "https://github.com/krishnakanthpathi/lightmem/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lmem", "src/lightmem"]
-exclude = ["/src/lmem/bin"]
 
 [tool.hatch.build.targets.sdist]
 exclude = ["/src/lmem/bin"]
