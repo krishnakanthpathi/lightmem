@@ -56,6 +56,19 @@ class AttachmentMetadata:
 
 
 @dataclass
+class EntityRecord:
+    name: str
+    val: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> EntityRecord:
+        return cls(
+            name=data.get("name", ""),
+            val=data.get("val", ""),
+        )
+
+
+@dataclass
 class Memory:
     id: str
     category: str
@@ -70,6 +83,7 @@ class Memory:
     expired_at: Optional[str] = None
     attachments: List[AttachmentMetadata] = field(default_factory=list)
     saved_attachments: List[str] = field(default_factory=list)
+    entities: List[EntityRecord] = field(default_factory=list)
     context: Optional[Dict[str, Any]] = None
 
     @classmethod
@@ -77,6 +91,7 @@ class Memory:
         mem_data = data.get("memory", data)
         raw_atts = mem_data.get("attachments") or []
         saved_atts = mem_data.get("saved_attachments") or data.get("saved_attachments") or []
+        raw_entities = mem_data.get("entities") or []
         return cls(
             context=mem_data.get("context"),
             id=mem_data.get("id", ""),
@@ -92,6 +107,7 @@ class Memory:
             expired_at=mem_data.get("expired_at"),
             attachments=[AttachmentMetadata.from_dict(a) for a in raw_atts],
             saved_attachments=[str(p) for p in saved_atts],
+            entities=[EntityRecord.from_dict(e) for e in raw_entities],
         )
 
 

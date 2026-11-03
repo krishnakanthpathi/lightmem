@@ -125,6 +125,7 @@ class LightMem:
         files: Optional[List[str | Path]] = None,
         extract: bool = False,
         reranker: Optional[str] = None,
+        no_entities: bool = False,
     ) -> Memory:
         args: List[str] = []
         if category:
@@ -148,6 +149,8 @@ class LightMem:
             args.append("--extract")
         if reranker:
             args.extend(["-r", reranker])
+        if no_entities:
+            args.append("--no-entities")
         if content is not None and (content or not files):
             args.extend(["--", content])
 

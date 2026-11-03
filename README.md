@@ -21,6 +21,7 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - [Python SDK Quickstart](#-python-sdk-quickstart)
 - [Identity-Aware Connections](#identity-aware-connections-v040)
 - [Single-File DB & Media Transfer Bundles](#single-file-db--media-transfer-bundles-v050)
+- [Knowledge Graph Entities](#knowledge-graph-entities-v052)
 - [Model Context Protocol (MCP) Server](#-model-context-protocol-mcp-server)
 - [Core CLI Reference](#-core-cli-reference)
 - [Switching Rerankers & Embedding Models](#-switching-rerankers--embedding-models)
@@ -70,11 +71,15 @@ pip install -U lmem
 ### Universal Shell Installer (macOS & Linux)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
+# Optional: skip downloading local ONNX models during install (~130 MB saved)
+curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh -s -- --skip-models
 ```
 
 ### Windows (PowerShell)
 ```powershell
 irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.ps1 | iex
+# Optional: skip downloading local ONNX models during install
+$env:LIGHTMEM_SKIP_MODELS=1; irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.ps1 | iex
 ```
 
 ### Build from Source (Rust / Cargo)
@@ -238,6 +243,38 @@ Bundles use the standard `.zip` (or `.lmbundle`) format containing:
 
 ---
 
+## Knowledge Graph Entities (v0.5.2)
+
+LightMem automatically extracts and indexes structured knowledge graph entities (`name` → `value`) from ingested memories and dialogue turns. Entities are stored directly in SQLite (`entities` table), cross-referenced against canonical memories, deduplicated, and used for sub-millisecond exact attribute retrieval:
+
+```bash
+# Store a memory with automatic entity extraction (e.g. extracts 'pincode: 500081', 'city: Hyderabad')
+lmem remember "I live at Flat 402, Sunshine Apts, Hyderabad with pincode 500081"
+
+# Exact-match entity answer via zero-overhead entity_index (sub-millisecond latency)
+lmem answer "what is my pincode?"
+# -> "500081" (reranker_used: entity_index)
+
+# Inspect memory to see populated entities alongside wikilinks and attachments
+lmem inspect <ID>
+
+# Opt-out of LLM entity extraction for simple scratchpads or high-throughput batch writes
+lmem remember "Temporary scratch note" --no-entities
+```
+
+In the Python SDK, entities are parsed into typed `EntityRecord` instances and available on each memory:
+
+```python
+from lmem import LightMem
+
+lm = LightMem()
+mem = lm.remember("PostgreSQL primary runs on port 5432")
+for entity in mem.entities:
+    print(f"Entity: {entity.name} = {entity.val}")
+```
+
+---
+
 ## 🔌 Model Context Protocol (MCP) Server
 
 LightMem features a native, zero-dependency **Model Context Protocol (MCP)** stdio server (JSON-RPC 2.0). It operates on-demand without background daemons and consumes 0% idle CPU.
@@ -287,11 +324,12 @@ Add the following snippet to your editor's MCP configuration file (e.g., `claude
 # Display Crimson Cloud HUD & live vault telemetry
 lmem
 
-# Store a memory (category is auto-inferred across 14 types if -t is omitted)
+# Store a memory (category is auto-inferred across 14 types if -t is omitted; entities auto-extracted)
 lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
 
-# Store with explicit category and confidence
+# Store with explicit category, confidence, or skip entity extraction
 lmem remember "Use AES-GCM-256 for vault encryption" -t decision --confidence 0.98
+lmem remember "Ephemeral note" --no-entities                          # Skip automatic LLM entity extraction
 
 # Store files, images, audio, or 4K videos in the isolated SQLite BLOB vault (0600 owner-only, SHA-256 verified)
 lmem remember "Kubernetes ingress diagram" -f ./ingress.png             # Metadata-only default (dimensions, MIME, SHA-256)
@@ -331,8 +369,11 @@ lmem recall "who is kk" --date 2026-09-21              # Created or updated on t
 lmem recall "postgres port" --as-of 2026-09-21         # Active state on or before that timestamp
 ```
 
-### 4. Neural Extractive QA (`lmem answer`)
+### 4. Neural Extractive QA & Entity Index (`lmem answer`)
 ```bash
+# Instant sub-millisecond exact entity match (reranker: entity_index)
+lmem answer "what is my pincode"
+
 # Local ONNX extractive QA (minilm-squad2 by default, sub-600ms latency, zero API costs)
 lmem answer "what is my pan card no"
 lmem answer "what is my father name" -r tinyroberta-squad2

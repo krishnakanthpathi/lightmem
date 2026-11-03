@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.5.2"
+VERSION="v0.5.3"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 old_tty=""
@@ -168,7 +168,12 @@ case "$OS" in
         OS_TARGET="apple-darwin"
         ;;
     Linux)
-        OS_TARGET="unknown-linux-gnu"
+        # Auto-detect Android / Termux environment
+        if [ -n "${TERMUX_VERSION:-}" ] || [ "$(uname -o 2>/dev/null)" = "Android" ] || [ -d "/data/data/com.termux" ] || [ -f "/system/bin/app_process" ]; then
+            OS_TARGET="linux-android"
+        else
+            OS_TARGET="unknown-linux-gnu"
+        fi
         ;;
     *)
         printf "\033[1;31m✕ Unsupported OS: %s\033[0m\n" "$OS"
@@ -205,6 +210,10 @@ if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
         if [ -d "$HOME/.cargo/bin" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
             cp "$INSTALL_DIR/lmem" "$HOME/.cargo/bin/lmem"
             chmod +x "$HOME/.cargo/bin/lmem"
+        fi
+        if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ] && [ "$INSTALL_DIR" != "$PREFIX/bin" ]; then
+            cp "$INSTALL_DIR/lmem" "$PREFIX/bin/lmem" 2>/dev/null || true
+            chmod +x "$PREFIX/bin/lmem" 2>/dev/null || true
         fi
         INSTALLED_BIN=1
     fi

@@ -51,3 +51,11 @@ Executable Suite: [func_integrity_services.rs](file:///Users/krishnakanth/Projec
 | `ConnectService::supported_platforms` / `find_platform` | `func_connect_service_and_graph_view_render_terminal` | `integrity_connect_rejects_unknown_platform_and_graph_view_handles_empty` | Resolves all 6 supported platforms + aliases (`claude`, `agy`, `cursor`, `windsurf`, `opencode`, `codex`); returns `None` for unknown aliases |
 | `ConnectService::connect_platform` / `disconnect_platform` / `status_all` | `func_connect_service_and_graph_view_render_terminal` | `integrity_connect_rejects_unknown_platform_and_graph_view_handles_empty` | Idempotent `<!-- LIGHTMEM:START -->` block injection and clean removal without clobbering user content; rejects unknown platforms |
 | `render_terminal` | `func_connect_service_and_graph_view_render_terminal` | `integrity_connect_rejects_unknown_platform_and_graph_view_handles_empty` | Renders ASCII/ANSI node degree & edge topology; safely renders empty graph snapshot without division-by-zero |
+
+## 7. Transfer Bundles (`src/services/bundle.rs`)
+
+| Function / Method | Functionality Test (`func_*`) | Integrity Test (`integrity_*`) | Verified Invariants |
+| :--- | :--- | :--- | :--- |
+| `BundleService::export_bundle` | `tests/bundle_test.rs` | `tests/bundle_test.rs` | Clean SQLite snapshot via `VACUUM INTO`, packages all attached media and `manifest.json` into `.zip`, SHA-256 integrity verification |
+| `BundleService::import_bundle` | `tests/bundle_test.rs` | `tests/bundle_test.rs` | Restores or merges vault, unpacks media into `attachments/`, zero re-indexing overhead |
+| `BundleService::read_manifest` | `tests/bundle_test.rs` | `tests/bundle_test.rs` | Inspects bundle metadata and attachment summary without unzipping |

@@ -93,7 +93,7 @@ lm.connect("antigravity")
 
 | Method | Description |
 | :--- | :--- |
-| `lm.remember(content, ..., files=None, extract=False, supersede=False)` | Store a memory and optional binary attachments (`files=[...]`), auto-linking `[[wikilinks]]`. |
+| `lm.remember(content, ..., files=None, extract=False, supersede=False, no_entities=False)` | Store a memory, optional binary attachments (`files=[...]`), and auto-extracted entities (`EntityRecord`), auto-linking `[[wikilinks]]`. |
 | `lm.recall(query, limit=5, category=None, media=None, multi_hop=False, path=False)` | Hybrid BM25 + Cosine RRF search; returns `List[ScoredMemory]` or `List[str]` file paths when `path=True`. |
 | `lm.answer(question, category=None, reranker=None, as_of=None, date=None)` | Extractive QA via local ONNX (`minilm-squad2`, `tinyroberta-squad2`), `ollama:<model>`, or `top1`. |
 | `lm.observe(input_text_or_path, yes=False, dry_run=False, reranker=None)` | Extract atomic candidate memories from dialogue transcripts or notes. |
@@ -162,11 +162,6 @@ Bundles use the standard `.zip` (or `.lmbundle`) format containing:
 
 ---
 
-## 📄 License
-MIT License. Created by Pathi Krishna Kanth.
-
-
-
 ## Identity-aware connections (v0.4.0)
 
 Register the person, the logical agent, and a named harness connection once:
@@ -218,4 +213,9 @@ print(memory.context())
 ```
 
 Python also exposes `register_harness`, `identities`, `connection_info`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
+
+---
+
+## 📄 License
+MIT License. Created by Pathi Krishna Kanth.
 

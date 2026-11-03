@@ -436,12 +436,12 @@ impl Reranker for OnnxQaReranker {
     }
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
-        if std::env::var_os("LIGHTMEM_QA_DISABLE").is_some() {
-            return Ok(no_evidence("none"));
-        }
-
         if candidates.is_empty() {
             return Ok(no_evidence(&self.provider_label()));
+        }
+
+        if std::env::var_os("LIGHTMEM_QA_DISABLE").is_some() {
+            return Ok(no_evidence("none"));
         }
 
         let gated: Vec<&ScoredMemory> = candidates

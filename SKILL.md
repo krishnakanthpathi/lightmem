@@ -39,7 +39,7 @@ lmem --version
 Always execute `lmem` via shell commands. Never simulate memory storage or rely solely on ephemeral conversation history for long-term facts, preferences, or architectural decisions.
 
 ```bash
-# 1. Store a memory (auto-infers category if -t is omitted; auto-deduplicates exact matches)
+# 1. Store a memory (auto-infers category if -t is omitted; auto-deduplicates exact matches; extracts knowledge graph entities)
 lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" \
   -t fact \
   --title "PostgreSQL Primary Config" \
@@ -47,6 +47,7 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
   --confidence 0.95 \
   --provenance validated \
   --supersede
+lmem remember "Ephemeral scratch note" --no-entities # Skip automatic LLM entity extraction
 
 # 1a. Store Files, Images, Audio & Documents (Isolated SQLite BLOBs + Metadata Indexing)
 lmem remember "Kubernetes ingress diagram" -f ./ingress.png       # Metadata-only default (filename, MIME, 1920x1080, SHA-256)
@@ -86,8 +87,10 @@ lmem graph                                         # ASCII/Unicode network tree 
 lmem graph --focus <MEMORY_ID> --hops 2            # Neighborhood subgraph view
 lmem graph --focus <MEMORY_ID> -n 1 --json         # Focused neighborhood node & edge counts as JSON
 lmem graph --json                                  # Export graph nodes and edges as JSON
+lmem inspect <MEMORY_ID>                           # Inspect record, wikilinks, attachments, and extracted entities
 
-# 4. Extractive QA / LLM Grounded Answer (extracts the exact span from top candidates)
+# 4. Extractive QA & Entity Answering (exact span from candidates or entity index)
+lmem answer "what is my pincode"                   # Instant sub-millisecond exact answer via entity_index
 lmem answer "what port does postgresql use"
 lmem answer "what is my pan card no" --json
 lmem answer "who is kk" -r ollama:qwen2.5:3b

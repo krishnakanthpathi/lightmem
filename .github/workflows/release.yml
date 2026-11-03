@@ -27,9 +27,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: lmem-x86_64-unknown-linux-gnu.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: lmem-aarch64-unknown-linux-gnu.tar.gz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: lmem-x86_64-pc-windows-msvc.zip
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive: lmem-aarch64-pc-windows-msvc.zip
           - os: ubuntu-latest
             target: aarch64-linux-android
             archive: lmem-aarch64-linux-android.tar.gz

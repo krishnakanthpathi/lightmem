@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lmem"
-version = "0.5.2"
+version = "0.5.3"
 description = "Ultra-Fast Local AI Agent Persistent Memory Engine with Neural Extractive QA, Multimodal BLOB Vault & Knowledge Graph"
 readme = "README.md"
 license = "MIT"
@@ -54,6 +54,7 @@ Issues = "https://github.com/krishnakanthpathi/lightmem/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lmem", "src/lightmem"]
+exclude = ["/src/lmem/bin"]
 
 [tool.hatch.build.targets.sdist]
 exclude = ["/src/lmem/bin"]

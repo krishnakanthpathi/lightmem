@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+- Fix architecture mismatch crashes when scanning or running native binaries (e.g., ARM binaries on AMD/x86_64 processors).
+- Add strict ELF, Mach-O, and PE CPU architecture header validation in `_is_native_binary()` to prevent cross-architecture execution errors.
+- Fix Termux `PermissionError: [Errno 13]` when probing restricted directories in `$PATH` (such as `/system/xbin/lmem`).
+- Exclude native binary cache from wheel distribution package in `pyproject.toml` to prevent cross-architecture wheel pollution.
+- Improve `execute_lmem()` failure diagnostics with clear architecture mismatch error guidance.
+
 ## 0.5.2
 
 - Fix Linux `install.sh` and Windows `install.ps1` installer download targets and bump default release version to `v0.5.2`.
