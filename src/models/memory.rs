@@ -1155,6 +1155,12 @@ impl MemoryRecord {
         }
     }
 
+    /// Whether this memory is marked as strictly local/air-gapped (exempt from cloud sync & remote backup uploads)
+    pub fn is_local(&self) -> bool {
+        self.tags.iter().any(|t| t.eq_ignore_ascii_case("local"))
+            || self.provenance.eq_ignore_ascii_case("local")
+    }
+
     /// Format as standardized memory card for embedding and display
     pub fn to_card_text(&self) -> String {
         let mut out = format!(

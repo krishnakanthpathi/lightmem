@@ -25,11 +25,14 @@ pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]
 pub use services::McpServer;
 pub use services::{
-    AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService,
-    BundleStats, ConnectResult, ConnectService, EmbeddingProvider, Exporter, HashEmbeddingProvider,
-    HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker, MemoryImporter,
-    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
-    OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, Top1Reranker,
+    serve_docs, AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest,
+    BundleService, BundleStats, ConnectResult, ConnectService, DocsOptions, DriveAuthStatus,
+    DriveFolders, DriveLogoutReport, EmbeddingProvider, Exporter, GoogleDriveClient,
+    HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker,
+    MemoryImporter, MultimodalInput, ObservedCandidate, ObserverService, OkfMemoryImporter,
+    OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo,
+    PrecisionReranker, Reranker, SyncManifest, SyncOptions, SyncProgress, SyncPullReport,
+    SyncReport, SyncService, SyncStatusReport, Top1Reranker,
 };
 
 pub use views::CliView;

@@ -22,6 +22,8 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - [Identity-Aware Connections](#identity-aware-connections-v040)
 - [Single-File DB & Media Transfer Bundles](#single-file-db--media-transfer-bundles-v050)
 - [Knowledge Graph Entities](#knowledge-graph-entities-v052)
+- [Cloud & Google Drive Synchronization](#-cloud--google-drive-synchronization-v060)
+- [Embedded Local Documentation Server](#-embedded-local-documentation-server-lmem-docs)
 - [Model Context Protocol (MCP) Server](#-model-context-protocol-mcp-server)
 - [Core CLI Reference](#-core-cli-reference)
 - [Switching Rerankers & Embedding Models](#-switching-rerankers--embedding-models)
@@ -87,6 +89,9 @@ $env:LIGHTMEM_SKIP_MODELS=1; irm https://raw.githubusercontent.com/krishnakanthp
 git clone https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
+
+# Or install directly into ~/.local/bin:
+cargo install --path . --root ~/.local --force
 ```
 
 ---
@@ -275,6 +280,65 @@ for entity in mem.entities:
 
 ---
 
+## ☁️ Cloud & Google Drive Synchronization (v0.6.0)
+
+LightMem provides decoupled cloud and network storage synchronization with zero third-party agent dependencies:
+
+- **Decoupled Content-Addressed Storage (CAS)**: Attached images, audio, voice notes, and 4K videos are verified via SHA-256 and stored in `blobs/` on the remote target. Uploaded assets are deduplicated and transferred only once.
+- **Atomic SQLite Vector Snapshots**: Checkpointed database snapshots (`snapshots/vault_<timestamp>.db`) back up all tables, relations, and pre-computed vector embeddings.
+- **Direct Google Drive REST Engine**: Authenticate once via OAuth2 loopback (`lmem auth login`). No local Google Drive filesystem sync clients or background daemon mounts required.
+- **Adaptive Timeouts & Live Progress**: Uploads dynamically adapt network timeouts to payload size and stream real-time terminal transfer meters (`[▓▓▓▓░░░░] 24.5/50.0 MB (49%)`).
+- **Air-Gapped Privacy (`--local`)**: Memories stored with `--local` are tagged `#local` and strictly excluded from cloud backups and remote snapshots.
+- **On-Demand Background Daemon (`-d, --daemon`)**: Run continuous background sync with PID tracking, log inspection (`lmem sync --status`), and clean termination (`lmem sync --stop`).
+
+```bash
+# 1. Connect Google Drive via OAuth2 browser popup
+lmem auth login                      # Alias: lmem login
+lmem auth status                     # Inspect authenticated account & storage quota
+lmem auth logout                     # Invalidate token and clear credentials (alias: lmem logout)
+
+# 2. Push sync to Google Drive (default action)
+lmem sync                            # Sync CAS blobs + atomic SQLite snapshot
+lmem sync --backup-only              # Only snapshot SQLite DB, skipping media attachments (alias: --skip-media)
+lmem sync --skip-db                  # Only sync media attachments, skipping DB snapshot
+lmem sync -y                         # Non-interactive mode (auto-proceed)
+
+# 3. Background sync daemon
+lmem sync -d                         # Spawn detached sync daemon (runs cycle every 5 minutes)
+lmem sync --status                   # Check daemon running state, PID, and blob count
+lmem sync --stop                     # Terminate active background sync daemon
+
+# 4. Air-gap sensitive memories from cloud sync
+lmem remember "Private API Token" --local
+
+# 5. Restore or pull from remote target
+lmem sync --pull                     # Pull missing media attachments
+lmem sync --restore                  # Restore local database from latest remote snapshot
+```
+
+---
+
+## 📖 Embedded Local Documentation Server (`lmem docs`)
+
+Serve complete technical documentation and the landing page 100% offline from the standalone binary without external web servers or internet access:
+
+```bash
+# Launch documentation server and open system browser automatically
+lmem docs                            # Aliases: lmem doc, lmem web
+
+# Bind to a custom port
+lmem docs --port 8085
+
+# Run headlessly without launching the browser
+lmem docs --no-browser
+```
+
+- **Endpoints**: `http://localhost:8080/` (landing page) and `http://localhost:8080/docs` (full technical docs).
+- **Embedded Assets**: HTML, CSS, JavaScript, and icons are compiled directly into the binary.
+- **Zero Daemons**: Runs purely in the foreground and terminates cleanly upon `Ctrl+C`.
+
+---
+
 ## 🔌 Model Context Protocol (MCP) Server
 
 LightMem features a native, zero-dependency **Model Context Protocol (MCP)** stdio server (JSON-RPC 2.0). It operates on-demand without background daemons and consumes 0% idle CPU.
@@ -436,6 +500,26 @@ lmem connect --mcp                    # Auto-configure MCP in Claude Desktop, Cu
 
 # Vault telemetry & disk storage statistics
 lmem stats
+```
+
+### 8. Cloud Synchronization & Embedded Docs
+```bash
+# Authenticate Google Drive via OAuth2
+lmem auth login
+lmem auth status
+lmem auth logout
+
+# Synchronize CAS media blobs & SQLite vector snapshots
+lmem sync
+lmem sync -d                            # Background daemon mode
+lmem sync --status                      # Inspect daemon & sync status
+lmem sync --stop                        # Terminate background daemon
+lmem sync --skip-db                     # Sync only media attachments
+lmem sync --backup-only                 # Backup only DB snapshots
+
+# Launch local documentation & landing page server
+lmem docs                               # Serves http://localhost:8080/ & /docs
+lmem docs --port 8090 --no-browser
 ```
 
 ---

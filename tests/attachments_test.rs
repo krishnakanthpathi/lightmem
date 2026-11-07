@@ -49,6 +49,7 @@ fn hash_config() -> LightMemConfig {
         ollama_api_key: None,
         embedding_model: "nomic-embed-text".to_string(),
         reranker: "top1".to_string(),
+        ..Default::default()
     }
 }
 
@@ -259,6 +260,7 @@ fn test_explicit_single_model_llm_extraction_on_attachment() {
         ollama_api_key: None,
         embedding_model: "nomic-embed-text".to_string(),
         reranker: "ollama:gemma4:31b-cloud".to_string(),
+        ..Default::default()
     };
     let lm = LightMem::open_at(&db_path, cfg).unwrap();
 
@@ -914,5 +916,104 @@ fn test_qa_regressions_attachments_webp_dedup_export_conflict_and_cli() {
             .iter()
             .any(|l| l.target_id == anchor.id && l.relation == "depends_on"),
         "OKF v2 export/import must preserve explicit memory_links"
+    );
+}
+
+#[test]
+fn test_multimodal_embedding_and_tag_granularity() {
+    use lightmem::{EmbeddingProvider, MultimodalInput};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct MockMultimodalEmbedder {
+        saw_image: Arc<AtomicBool>,
+    }
+
+    impl EmbeddingProvider for MockMultimodalEmbedder {
+        fn name(&self) -> &str {
+            "mock-multimodal"
+        }
+        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5, 0.5, 0.5, 0.5])
+        }
+        fn supports_multimodal(&self) -> bool {
+            true
+        }
+        fn embed_multimodal(&self, input: &MultimodalInput<'_>) -> anyhow::Result<Vec<f32>> {
+            if input.image_b64.is_some() {
+                self.saw_image.store(true, Ordering::SeqCst);
+                Ok(vec![1.0, 0.0, 0.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0, 0.0, 0.0])
+            }
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("multimodal_vault.db");
+    let saw_image = Arc::new(AtomicBool::new(false));
+    let embedder = MockMultimodalEmbedder {
+        saw_image: saw_image.clone(),
+    };
+
+    let png_path = dir.path().join("system_architecture.png");
+    let png_bytes = make_fake_png(800, 600);
+    std::fs::write(&png_path, &png_bytes).unwrap();
+
+    let storage = lightmem::Storage::open(&db_path).unwrap();
+    let att = lightmem::AttachmentInput::from_path(&png_path).unwrap();
+
+    let memory = lightmem::MemoryRecord::new(
+        MemoryType::Artifact,
+        "Architecture Overview".to_string(),
+        "Core service topology diagram".to_string(),
+        vec!["architecture".to_string()],
+        0.95,
+        None,
+    );
+
+    // Insert memory with attachment and mock multimodal embedder
+    let stored = storage
+        .insert_indexed_with_attachments(
+            &memory,
+            &[att],
+            &embedder,
+            "mock-multimodal-identity",
+            false,
+        )
+        .unwrap();
+
+    assert!(
+        saw_image.load(Ordering::SeqCst),
+        "Multimodal embedder must receive image_b64 for image attachment"
+    );
+    assert_eq!(stored.attachments.len(), 1);
+
+    // Verify tag granularity via MemoryController on fresh db
+    let db_path2 = dir.path().join("tags_vault.db");
+    let lm = LightMem::open_at(&db_path2, hash_config()).unwrap();
+    let (mem_with_tags, _) = lm
+        .remember_with_attachments(
+            Some("Detailed diagram"),
+            &[png_path],
+            false,
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        mem_with_tags.tags.contains(&"image".to_string()),
+        "Must have media_kind tag"
+    );
+    assert!(
+        mem_with_tags.tags.contains(&"png".to_string()),
+        "Must have format extension tag"
     );
 }

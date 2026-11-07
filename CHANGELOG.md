@@ -1,6 +1,31 @@
 # Changelog
 
-## 0.5.3
+## 0.6.0
+
+- Add background sync daemon support via `lmem sync -d` / `--daemon`, with process tracking (`~/.lightmem/sync_daemon.pid`), status inspection (`lmem sync --status`), and graceful termination (`lmem sync --stop`).
+- Add standalone zero-dependency documentation and landing page HTTP server embedded directly in binary (`lmem docs`, `lmem doc`, `lmem web`).
+- Remove ambiguous silent fallback to local `~/Library/CloudStorage/GoogleDrive-*` paths, enforcing explicit Google Drive OAuth authentication.
+- Add dynamic adaptive upload timeouts and real-time terminal transfer progress meters for large SQLite snapshots and 4K media attachments.
+- Add `--skip-db`, `--skip-media` / `--backup-only`, and `-y`/`--yes` flags to `lmem sync`.
+- Add direct Google Drive REST API cloud sync engine via native OAuth2 loopback authentication.
+- Add `lmem auth` command suite (`status`, `login`, `logout`) with token revocation against Google authorization servers.
+- Add `lmem logout` top-level command to invalidate OAuth tokens and delete local token/folder caches.
+- Add `lmem login` for seamless browser OAuth popup with local loopback callback server.
+- Support `LIGHTMEM_HOME` environment variable for configuration and token isolation in tests and scripts.
+
+## 0.5.4
+
+- Add native joint multimodal vector embedding support for Google `embeddinggemma-2` (768-dimensional unified space for text, code, images, video keyframes, and audio).
+- Automatically extract and encode primary image/keyframe/audio payloads during memory indexing and re-indexing (`embed_multimodal` / `embed_multimodal_batch`).
+- Add image-based query recall (`lmem recall --image <path>`) for direct cross-modal visual similarity retrieval.
+- Add granular format extension tagging (`#png`, `#jpg`, `#webp`, `#wav`, `#mp4`) alongside broad `media_kind` tags upon attachment ingestion.
+- Add SHA-256 Content-Addressed Storage (CAS) attachment deduplication with clear CLI warning notifications on existing vault assets (zero toast/popups).
+- Add `--local` flag to `lmem remember` to strictly air-gap memories offline (`#local` tag, exempt from cloud sync and backup snapshots).
+- Add decoupled CAS cloud sync & atomic SQLite vector snapshot backups (`lmem sync` with `--target`, `--status`, `--pull`, `--restore`, `--backup-only`).
+- Support synchronous inline sync on memory creation when a sync target is configured (zero background daemon processes).
+- Add `--open` flag to `lmem recall` and `lmem inspect` to open materialized attachment media directly in the operating system default application.
+- Preserve backward-compatible fallback for text-only embedders (`OnnxEmbeddingProvider`, `HashEmbeddingProvider`).
+
 
 - Fix architecture mismatch crashes when scanning or running native binaries (e.g., ARM binaries on AMD/x86_64 processors).
 - Add strict ELF, Mach-O, and PE CPU architecture header validation in `_is_native_binary()` to prevent cross-architecture execution errors.

@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
-use colored::*;
-use lightmem::{parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use colored::Colorize;
+use lightmem::{
+    encode_base64, parse_ttl_duration, CliView, GoogleDriveClient, LightMem, LightMemConfig,
+    MemoryStatus, MemoryType, MultimodalInput,
+};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -110,6 +113,10 @@ enum Commands {
         #[arg(long = "no-entities", visible_alias = "no-extract-entities")]
         no_entities: bool,
 
+        /// Air-gap memory strictly to local machine; exempt from cloud sync and remote backup uploads
+        #[arg(long)]
+        local: bool,
+
         /// Output created memory as JSON
         #[arg(long)]
         json: bool,
@@ -117,8 +124,13 @@ enum Commands {
 
     /// Recall memories via hybrid semantic + keyword search
     Recall {
-        /// Search query string
+        /// Search query string (optional if --image is supplied)
+        #[arg(default_value = "")]
         query: String,
+
+        /// Search multimodal vector memory with an image query
+        #[arg(long = "image", visible_alias = "img")]
+        image: Option<PathBuf>,
 
         /// Filter by category
         #[arg(short = 't', long = "type")]
@@ -159,6 +171,10 @@ enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
+
+        /// Open recalled attachment file(s) immediately using system default application
+        #[arg(long)]
+        open: bool,
 
         /// Output results as JSON for agent consumption
         #[arg(long)]
@@ -226,6 +242,10 @@ enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
+
+        /// Open inspected attachment file(s) immediately using system default application
+        #[arg(long)]
+        open: bool,
 
         /// Output memory details as JSON
         #[arg(long)]
@@ -387,6 +407,14 @@ enum Commands {
         #[arg(long)]
         reranker: Option<String>,
 
+        /// Cloud / CAS sync & backup target directory (e.g. '~/Google Drive/My Drive/LightMem' or local archive)
+        #[arg(long = "sync-target")]
+        sync_target: Option<String>,
+
+        /// Toggle automatic synchronous inline sync on memory creation
+        #[arg(long = "sync-auto")]
+        sync_auto: Option<bool>,
+
         /// Delete / reset the active memory database
         #[arg(long)]
         reset_db: bool,
@@ -437,6 +465,113 @@ enum Commands {
     /// Display storage statistics and active database path
     Stats {
         /// Output statistics as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Synchronize CAS attachment blobs and create atomic vector database snapshots
+    Sync {
+        /// Target directory for sync (overrides config sync_target, e.g. '~/Google Drive/My Drive/LightMem' or 'gdrive')
+        #[arg(long)]
+        target: Option<PathBuf>,
+
+        /// Push local CAS blobs and save atomic vector snapshot to target (default action)
+        #[arg(long)]
+        push: bool,
+
+        /// Pull missing CAS blobs or inspect remote vault snapshot
+        #[arg(long)]
+        pull: bool,
+
+        /// Only backup the vector database snapshot, skipping attachment blob sync (alias: --skip-media)
+        #[arg(long, visible_alias = "skip-media")]
+        backup_only: bool,
+
+        /// Skip uploading the database snapshot (only sync CAS media attachments)
+        #[arg(long, visible_alias = "skip-snapshot")]
+        skip_db: bool,
+
+        /// Skip specific sync components ('media', 'db', or 'snapshot')
+        #[arg(long)]
+        skip: Option<String>,
+
+        /// Run sync continuously in a detached background daemon
+        #[arg(short = 'd', long)]
+        daemon: bool,
+
+        /// Stop any currently running background sync daemon
+        #[arg(long)]
+        stop: bool,
+
+        /// Internal worker loop for sync daemon process
+        #[arg(long, hide = true)]
+        daemon_worker: bool,
+
+        /// Automatically proceed without confirmation prompts
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Show sync status, blob counts, and storage metrics without modifying files
+        #[arg(long)]
+        status: bool,
+
+        /// Restore local database from the latest remote snapshot in sync target
+        #[arg(long)]
+        restore: bool,
+
+        /// Output sync results as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Open offline interactive documentation and landing page in browser
+    #[command(visible_alias = "doc", visible_alias = "web")]
+    Docs {
+        /// Port to serve documentation on (default: 8080)
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
+
+        /// Open root landing page instead of documentation
+        #[arg(long)]
+        landing: bool,
+
+        /// Do not automatically open browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Disconnect and log out of Google Drive, invalidating OAuth tokens
+    Logout {
+        /// Skip revoking token on Google's authorization servers
+        #[arg(long)]
+        no_revoke: bool,
+
+        /// Also delete saved client credentials file (gdrive_credentials.json)
+        #[arg(long)]
+        purge_credentials: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Authenticate with Google Drive for cloud CAS attachment and vector snapshot sync
+    Login {
+        /// Optional path to downloaded Google OAuth client credentials JSON
+        #[arg(short = 'c', long)]
+        credentials: Option<PathBuf>,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage Google Drive cloud storage authentication
+    Auth {
+        #[command(subcommand)]
+        command: Option<AuthCommands>,
+
+        /// Output result as JSON
         #[arg(long)]
         json: bool,
     },
@@ -632,6 +767,34 @@ enum Commands {
         yes: bool,
 
         /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum AuthCommands {
+    /// Show current Google Drive authentication status and connected account
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Log in to Google Drive via browser OAuth flow
+    Login {
+        /// Optional path to downloaded Google OAuth client credentials JSON
+        #[arg(short = 'c', long)]
+        credentials: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Log out from Google Drive and revoke tokens
+    Logout {
+        /// Skip revoking token on Google's authorization servers
+        #[arg(long)]
+        no_revoke: bool,
+        /// Also delete saved client credentials file (gdrive_credentials.json)
+        #[arg(long)]
+        purge_credentials: bool,
         #[arg(long)]
         json: bool,
     },
@@ -851,6 +1014,31 @@ fn migrate_embeddings(lm: &LightMem, yes: bool, machine_output: bool, force: boo
     Ok(true)
 }
 
+fn open_file_in_default_app(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("Failed to open {} with 'open'", path.display()))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .spawn()
+            .with_context(|| format!("Failed to open {} with 'start'", path.display()))?;
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("Failed to open {} with 'xdg-open'", path.display()))?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     #[cfg(windows)]
     {
@@ -934,6 +1122,7 @@ fn main() -> Result<()> {
             supersede,
             provenance,
             no_entities,
+            local,
             json,
         } => {
             let has_text = content
@@ -972,6 +1161,7 @@ fn main() -> Result<()> {
                 ttl,
                 supersede,
                 provenance,
+                local,
             )?;
             CliView::render_remembered_full(
                 &memory,
@@ -981,10 +1171,23 @@ fn main() -> Result<()> {
                 json,
                 entity_warning.as_deref(),
             )?;
+
+            // Inline synchronous sync on memory creation (No daemon)
+            if !local
+                && (lm.config().effective_sync_target().is_some()
+                    || lm.config().sync_auto == Some(true))
+            {
+                if let Ok(Some(ref report)) = lm.sync_memory_inline(&memory) {
+                    if !json {
+                        CliView::render_inline_sync(report);
+                    }
+                }
+            }
         }
 
         Commands::Recall {
             query,
+            image,
             category,
             media,
             as_of,
@@ -995,6 +1198,7 @@ fn main() -> Result<()> {
             multi_hop,
             save_to,
             path,
+            open,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
@@ -1009,14 +1213,27 @@ fn main() -> Result<()> {
                     lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
                 CliView::render_answer(&result, json)?;
             } else {
-                let filter_attachments = media.is_some() || path || save_to.is_some();
+                let filter_attachments = media.is_some() || path || save_to.is_some() || open;
                 let fetch_limit = if filter_attachments {
                     limit.max(100)
                 } else {
                     limit
                 };
-                let mut results = lm.recall_expanded(
-                    &query,
+                let img_b64 = if let Some(ref img_path) = image {
+                    let data = std::fs::read(img_path).with_context(|| {
+                        format!("Failed to read query image file: {}", img_path.display())
+                    })?;
+                    Some(encode_base64(&data))
+                } else {
+                    None
+                };
+                let mm_input = if let Some(ref b64) = img_b64 {
+                    MultimodalInput::with_image(&query, b64)
+                } else {
+                    MultimodalInput::text_only(&query)
+                };
+                let mut results = lm.recall_multimodal_expanded(
+                    &mm_input,
                     cat,
                     as_of_dt,
                     date,
@@ -1038,17 +1255,26 @@ fn main() -> Result<()> {
                     results.truncate(limit);
                 }
                 let ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
-                if path {
+                if open || path {
                     let all_paths =
                         lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&all_paths)?);
-                    } else {
-                        for p in all_paths {
-                            println!("{}", p.display());
+                    if open {
+                        for p in &all_paths {
+                            let _ = open_file_in_default_app(p);
                         }
                     }
-                } else if let Some(ref target) = save_to {
+                    if path {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                        } else {
+                            for p in all_paths {
+                                println!("{}", p.display());
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+                if let Some(ref target) = save_to {
                     let all_saved = lm.save_memories_attachments_to(&ids, target)?;
                     if json {
                         let mut offset = 0usize;
@@ -1213,10 +1439,11 @@ fn main() -> Result<()> {
             terms,
             save_to,
             path,
+            open,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
-            if path {
+            if open || path {
                 let mut ids = Vec::new();
                 for term in &terms {
                     let Some(record) = lm.get(term)? else {
@@ -1228,20 +1455,28 @@ fn main() -> Result<()> {
                     ids.push(record.id);
                 }
                 let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
-                if all_paths.is_empty() {
-                    if json {
-                        println!("[]");
-                    } else {
-                        eprintln!("No attachments found for: {}", terms.join(", "));
+                if open {
+                    for p in &all_paths {
+                        let _ = open_file_in_default_app(p);
                     }
-                    std::process::exit(1);
                 }
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&all_paths)?);
-                } else {
-                    for p in all_paths {
-                        println!("{}", p.display());
+                if path {
+                    if all_paths.is_empty() {
+                        if json {
+                            println!("[]");
+                        } else {
+                            eprintln!("No attachments found for: {}", terms.join(", "));
+                        }
+                        std::process::exit(1);
                     }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                    } else {
+                        for p in all_paths {
+                            println!("{}", p.display());
+                        }
+                    }
+                    return Ok(());
                 }
             } else if terms.len() == 1 {
                 let term = &terms[0];
@@ -1503,6 +1738,8 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
+            sync_target,
+            sync_auto,
             reset_db,
             yes,
             json,
@@ -1521,6 +1758,8 @@ fn main() -> Result<()> {
                     && url.is_none()
                     && model.is_none()
                     && reranker.is_none()
+                    && sync_target.is_none()
+                    && sync_auto.is_none()
                 {
                     return Ok(());
                 }
@@ -1641,6 +1880,15 @@ fn main() -> Result<()> {
                         r
                     );
                 }
+            }
+
+            if let Some(target) = sync_target {
+                cfg.sync_target = Some(target);
+                changed = true;
+            }
+            if let Some(auto) = sync_auto {
+                cfg.sync_auto = Some(auto);
+                changed = true;
             }
 
             if changed {
@@ -1793,6 +2041,149 @@ fn main() -> Result<()> {
             let stats = lm.stats()?;
             CliView::render_stats(&stats, lm.db_path(), json)?;
         }
+
+        Commands::Sync {
+            target,
+            push: _,
+            pull,
+            backup_only,
+            skip_db,
+            skip,
+            daemon,
+            stop,
+            daemon_worker,
+            yes: _,
+            status,
+            restore,
+            json,
+        } => {
+            let lm = open_controller(effective_db, global, connection)?;
+            let mut effective_backup_only = backup_only;
+            let mut effective_skip_db = skip_db;
+
+            if let Some(ref s) = skip {
+                let s_lower = s.trim().to_lowercase();
+                if s_lower == "media" || s_lower == "blobs" || s_lower == "attachments" {
+                    effective_backup_only = true;
+                } else if s_lower == "db"
+                    || s_lower == "database"
+                    || s_lower == "snapshot"
+                    || s_lower == "snapshots"
+                {
+                    effective_skip_db = true;
+                }
+            }
+
+            if stop {
+                let stopped_pid = lightmem::SyncService::stop_daemon()?;
+                CliView::render_daemon_stop(stopped_pid, json)?;
+            } else if daemon {
+                let target_path = target
+                    .clone()
+                    .or_else(|| lm.config().effective_sync_target());
+                let sync_options = lightmem::SyncOptions {
+                    backup_only: effective_backup_only,
+                    skip_db: effective_skip_db,
+                };
+                let pid =
+                    lightmem::SyncService::spawn_daemon(target_path.as_deref(), sync_options)?;
+                let display_target = target_path.unwrap_or_else(|| PathBuf::from("gdrive"));
+                CliView::render_daemon_start(
+                    pid,
+                    &lightmem::SyncService::daemon_log_path(),
+                    &display_target,
+                    json,
+                )?;
+            } else if daemon_worker {
+                let sync_options = lightmem::SyncOptions {
+                    backup_only: effective_backup_only,
+                    skip_db: effective_skip_db,
+                };
+                lightmem::SyncService::run_daemon_worker(
+                    lm.storage(),
+                    lm.config(),
+                    target.as_deref(),
+                    sync_options,
+                )?;
+            } else if status {
+                let report = lm.sync_status(target.as_deref())?;
+                CliView::render_sync_status(&report, json)?;
+            } else if pull || restore {
+                let report = lm.sync_pull(target.as_deref(), restore)?;
+                CliView::render_sync_pull(&report, json)?;
+            } else if json {
+                let report = lm.sync_push_with_options(
+                    target.as_deref(),
+                    effective_backup_only,
+                    effective_skip_db,
+                    |_| {},
+                )?;
+                CliView::render_sync_report(&report, true)?;
+            } else {
+                let report = lm.sync_push_with_options(
+                    target.as_deref(),
+                    effective_backup_only,
+                    effective_skip_db,
+                    |p| {
+                        CliView::render_sync_progress(&p);
+                    },
+                )?;
+                CliView::render_sync_report(&report, false)?;
+            }
+        }
+
+        Commands::Docs {
+            port,
+            landing,
+            no_browser,
+        } => {
+            let options = lightmem::DocsOptions {
+                port,
+                open_landing: landing,
+                no_browser,
+            };
+            lightmem::serve_docs(options)?;
+        }
+
+        Commands::Logout {
+            no_revoke,
+            purge_credentials,
+            json,
+        } => {
+            let report = GoogleDriveClient::logout(!no_revoke, purge_credentials)?;
+            CliView::render_auth_logout(&report, json)?;
+        }
+
+        Commands::Login { credentials, json } => {
+            let status = GoogleDriveClient::login(credentials.as_deref())?;
+            CliView::render_auth_status(&status, json)?;
+        }
+
+        Commands::Auth { command, json } => match command {
+            Some(AuthCommands::Status { json: sub_json }) => {
+                let status = GoogleDriveClient::get_status()?;
+                CliView::render_auth_status(&status, json || sub_json)?;
+            }
+            Some(AuthCommands::Login {
+                credentials,
+                json: sub_json,
+            }) => {
+                let status = GoogleDriveClient::login(credentials.as_deref())?;
+                CliView::render_auth_status(&status, json || sub_json)?;
+            }
+            Some(AuthCommands::Logout {
+                no_revoke,
+                purge_credentials,
+                json: sub_json,
+            }) => {
+                let report = GoogleDriveClient::logout(!no_revoke, purge_credentials)?;
+                CliView::render_auth_logout(&report, json || sub_json)?;
+            }
+            None => {
+                let status = GoogleDriveClient::get_status()?;
+                CliView::render_auth_status(&status, json)?;
+            }
+        },
 
         Commands::Conflicts {
             yes,

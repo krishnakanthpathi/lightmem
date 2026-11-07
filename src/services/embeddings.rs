@@ -7,11 +7,59 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultimodalInput<'a> {
+    pub text: &'a str,
+    pub image_b64: Option<&'a str>,
+    pub audio_b64: Option<&'a str>,
+}
+
+impl<'a> MultimodalInput<'a> {
+    pub fn text_only(text: &'a str) -> Self {
+        Self {
+            text,
+            image_b64: None,
+            audio_b64: None,
+        }
+    }
+
+    pub fn with_image(text: &'a str, image_b64: &'a str) -> Self {
+        Self {
+            text,
+            image_b64: Some(image_b64),
+            audio_b64: None,
+        }
+    }
+
+    pub fn with_audio(text: &'a str, audio_b64: &'a str) -> Self {
+        Self {
+            text,
+            image_b64: None,
+            audio_b64: Some(audio_b64),
+        }
+    }
+}
+
 pub trait EmbeddingProvider: Send + Sync {
     fn name(&self) -> &str;
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
     fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|text| self.embed(text)).collect()
+    }
+    /// Whether this provider natively supports multimodal embeddings (images/audio)
+    fn supports_multimodal(&self) -> bool {
+        false
+    }
+    /// Multimodal embedding for joint text + image/audio inputs (falls back to embed(input.text) by default)
+    fn embed_multimodal(&self, input: &MultimodalInput<'_>) -> Result<Vec<f32>> {
+        self.embed(input.text)
+    }
+    /// Batch multimodal embedding
+    fn embed_multimodal_batch(&self, inputs: &[MultimodalInput<'_>]) -> Result<Vec<Vec<f32>>> {
+        inputs
+            .iter()
+            .map(|inp| self.embed_multimodal(inp))
+            .collect()
     }
 }
 
@@ -148,6 +196,14 @@ impl OllamaEmbeddingProvider {
             api_key: clean_key,
         }
     }
+
+    pub fn is_multimodal_model(&self) -> bool {
+        let m = self.model.to_lowercase();
+        m.contains("embeddinggemma-2")
+            || m.contains("embedding-gemma-2")
+            || m.contains("clip")
+            || m.contains("multimodal")
+    }
 }
 
 #[derive(Serialize)]
@@ -165,6 +221,146 @@ struct OllamaEmbedResponse {
 impl EmbeddingProvider for OllamaEmbeddingProvider {
     fn name(&self) -> &str {
         "ollama"
+    }
+
+    fn supports_multimodal(&self) -> bool {
+        self.is_multimodal_model()
+    }
+
+    fn embed_multimodal(&self, input: &MultimodalInput<'_>) -> Result<Vec<f32>> {
+        if (input.image_b64.is_none() && input.audio_b64.is_none()) || !self.is_multimodal_model() {
+            return self.embed(input.text);
+        }
+
+        let endpoint = format!("{}/api/embed", self.url);
+        let mut input_obj = serde_json::Map::new();
+        input_obj.insert(
+            "text".to_string(),
+            serde_json::Value::String(input.text.to_string()),
+        );
+        if let Some(img) = input.image_b64 {
+            input_obj.insert(
+                "image".to_string(),
+                serde_json::Value::String(img.to_string()),
+            );
+        } else if let Some(aud) = input.audio_b64 {
+            input_obj.insert(
+                "audio".to_string(),
+                serde_json::Value::String(aud.to_string()),
+            );
+        }
+
+        let body = serde_json::json!({
+            "model": &self.model,
+            "input": serde_json::Value::Object(input_obj),
+        });
+
+        let mut req = ureq::post(&endpoint).timeout(std::time::Duration::from_secs(60));
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+
+        match req.send_json(&body) {
+            Ok(resp) => {
+                let parsed: OllamaEmbedResponse = resp.into_json().with_context(|| {
+                    format!(
+                        "Failed to parse Ollama multimodal response from {}",
+                        endpoint
+                    )
+                })?;
+                if let Some(emb) = parsed.embedding {
+                    return Ok(emb);
+                }
+                if let Some(mut embs) = parsed.embeddings {
+                    if !embs.is_empty() {
+                        return Ok(embs.remove(0));
+                    }
+                }
+                anyhow::bail!("Ollama returned 200 OK but embedding array was empty");
+            }
+            Err(_) => {
+                // Fallback to text-only embedding
+                self.embed(input.text)
+            }
+        }
+    }
+
+    fn embed_multimodal_batch(&self, inputs: &[MultimodalInput<'_>]) -> Result<Vec<Vec<f32>>> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.is_multimodal_model() {
+            let texts: Vec<String> = inputs.iter().map(|i| i.text.to_string()).collect();
+            return self.embed_batch(&texts);
+        }
+
+        let endpoint = format!("{}/api/embed", self.url);
+        let input_array: Vec<serde_json::Value> = inputs
+            .iter()
+            .map(|inp| {
+                if inp.image_b64.is_none() && inp.audio_b64.is_none() {
+                    serde_json::json!(inp.text)
+                } else {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert(
+                        "text".to_string(),
+                        serde_json::Value::String(inp.text.to_string()),
+                    );
+                    if let Some(img) = inp.image_b64 {
+                        obj.insert(
+                            "image".to_string(),
+                            serde_json::Value::String(img.to_string()),
+                        );
+                    } else if let Some(aud) = inp.audio_b64 {
+                        obj.insert(
+                            "audio".to_string(),
+                            serde_json::Value::String(aud.to_string()),
+                        );
+                    }
+                    serde_json::Value::Object(obj)
+                }
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "model": &self.model,
+            "input": input_array,
+        });
+
+        let mut req = ureq::post(&endpoint).timeout(std::time::Duration::from_secs(120));
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+
+        match req.send_json(&body) {
+            Ok(resp) => {
+                let parsed: OllamaEmbedResponse = resp.into_json().with_context(|| {
+                    format!(
+                        "Failed to parse Ollama batch multimodal response from {}",
+                        endpoint
+                    )
+                })?;
+                if let Some(embs) = parsed.embeddings {
+                    if embs.len() == inputs.len() {
+                        return Ok(embs);
+                    }
+                }
+                inputs
+                    .iter()
+                    .map(|inp| self.embed_multimodal(inp))
+                    .collect()
+            }
+            Err(_) => inputs
+                .iter()
+                .map(|inp| self.embed_multimodal(inp))
+                .collect(),
+        }
     }
 
     fn embed(&self, text: &str) -> Result<Vec<f32>> {

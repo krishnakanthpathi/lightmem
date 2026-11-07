@@ -1108,7 +1108,7 @@ impl ObserverService {
 
     /// Extract a single representative JPEG keyframe from raw video bytes using `ffmpeg` (if installed)
     /// so single-model vision LLMs can describe `.mp4`/`.mov`/`.webm` attachments when `--extract` is used.
-    fn extract_video_keyframe_jpeg(video_bytes: &[u8]) -> Option<Vec<u8>> {
+    pub fn extract_video_keyframe_jpeg(video_bytes: &[u8]) -> Option<Vec<u8>> {
         let tmp_dir = std::env::temp_dir();
         let uid = uuid::Uuid::new_v4();
         let in_path = tmp_dir.join(format!("lmem_vid_{}.mp4", uid));

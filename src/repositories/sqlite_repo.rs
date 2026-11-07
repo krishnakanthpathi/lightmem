@@ -1,9 +1,11 @@
 use crate::models::{
-    compute_sha256_hex, extract_wikilinks, AttachmentInput, AttachmentMetadata, EntityRecord,
-    GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
-    PaginatedMemories, RelatedMemory, StorageStats,
+    compute_sha256_hex, encode_base64, extract_wikilinks, AttachmentInput, AttachmentMetadata,
+    EntityRecord, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus,
+    MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
 };
-use crate::services::embeddings::{cosine_similarity, validate_vector, EmbeddingProvider};
+use crate::services::embeddings::{
+    cosine_similarity, validate_vector, EmbeddingProvider, MultimodalInput,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -469,7 +471,29 @@ impl Storage {
         let final_records: Vec<_> = unique.into_values().collect();
         for batch in final_records.chunks(32) {
             let texts: Vec<_> = batch.iter().map(MemoryRecord::to_card_text).collect();
-            let vectors = embedder.embed_batch(&texts)?;
+            let vectors = if embedder.supports_multimodal() {
+                let mut media_payloads = Vec::with_capacity(batch.len());
+                for rec in batch {
+                    let media = if !rec.attachments.is_empty() {
+                        load_primary_multimodal_payload(&tx, &rec.id)?
+                    } else {
+                        None
+                    };
+                    media_payloads.push(media);
+                }
+                let inputs: Vec<MultimodalInput> = texts
+                    .iter()
+                    .zip(&media_payloads)
+                    .map(|(text, media)| match media.as_ref() {
+                        Some((Some(img), _)) => MultimodalInput::with_image(text, img.as_str()),
+                        Some((_, Some(aud))) => MultimodalInput::with_audio(text, aud.as_str()),
+                        _ => MultimodalInput::text_only(text),
+                    })
+                    .collect();
+                embedder.embed_multimodal_batch(&inputs)?
+            } else {
+                embedder.embed_batch(&texts)?
+            };
             anyhow::ensure!(
                 vectors.len() == batch.len(),
                 "Embedding provider returned the wrong batch size"
@@ -740,6 +764,15 @@ impl Storage {
             out.push((meta, data));
         }
         Ok(out)
+    }
+
+    /// Retrieve primary multimodal payload (image base64 or audio base64) for memory embedding
+    pub fn primary_multimodal_payload(
+        &self,
+        memory_id: &str,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        load_primary_multimodal_payload(&conn, memory_id)
     }
 
     /// Snapshot and defragment database into a standalone single SQLite file (flushing WAL)
@@ -1392,6 +1425,20 @@ impl Storage {
             )
             .unwrap_or(false);
         Ok(exists)
+    }
+
+    /// Find all memories referencing a given attachment SHA-256 digest: returns Vec<(memory_id, filename)>
+    pub fn find_attachments_by_sha256(&self, sha256: &str) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT memory_id, filename FROM memory_attachments WHERE sha256 = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut results = Vec::new();
+        for item in rows {
+            results.push(item?);
+        }
+        Ok(results)
     }
 
     pub fn add_link(
@@ -2787,6 +2834,36 @@ fn load_attachments_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<Att
     )?;
     let rows = stmt.query_map([memory_id], row_to_attachment_metadata)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn load_primary_multimodal_payload(
+    conn: &Connection,
+    memory_id: &str,
+) -> Result<Option<(Option<String>, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT data, media_kind, duration_secs FROM memory_attachments \
+         WHERE memory_id = ?1 \
+         ORDER BY (media_kind='image') DESC, (media_kind='video') DESC, (media_kind='audio') DESC \
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([memory_id])?;
+    if let Some(row) = rows.next()? {
+        let blob: Vec<u8> = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let dur: Option<f64> = row.get(2)?;
+        if kind == "image" {
+            return Ok(Some((Some(encode_base64(&blob)), None)));
+        } else if kind == "video" {
+            if let Some(frame) =
+                crate::services::observer::ObserverService::extract_video_keyframe_jpeg(&blob)
+            {
+                return Ok(Some((Some(encode_base64(&frame)), None)));
+            }
+        } else if kind == "audio" && dur.unwrap_or(0.0) >= 0.5 {
+            return Ok(Some((None, Some(encode_base64(&blob)))));
+        }
+    }
+    Ok(None)
 }
 
 fn load_entities_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<EntityRecord>> {

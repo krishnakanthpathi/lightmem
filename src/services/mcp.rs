@@ -530,6 +530,7 @@ impl McpServer {
                     .get("provenance")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                let local = args.get("local").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 let (record, conflicts, warning) = lm.remember_with_attachments_and_entities(
                     content,
@@ -544,6 +545,7 @@ impl McpServer {
                     ttl,
                     supersede,
                     provenance,
+                    local,
                 )?;
 
                 let mut resp_map = serde_json::Map::new();

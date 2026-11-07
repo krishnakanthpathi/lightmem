@@ -12,6 +12,7 @@ fn hash_config() -> LightMemConfig {
         ollama_api_key: None,
         embedding_model: "nomic-embed-text".to_string(),
         reranker: "top1".to_string(),
+        ..Default::default()
     }
 }
 

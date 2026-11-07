@@ -5,7 +5,8 @@ use crate::models::{
 use crate::services::{AnswerResult, ObservedCandidate};
 
 use anyhow::Result;
-use colored::*;
+use colored::{ColoredString, Colorize};
+use std::io::Write;
 use std::path::Path;
 
 /// 22x38 pixel matrix of the LightMem Crimson Cloud emblem (`W` = White outline/swirl, `R` = Crimson fill, ` ` = Transparent).
@@ -357,9 +358,14 @@ impl CliView {
                 )
             })
             .unwrap_or_default();
+        let local_suffix = if memory.is_local() {
+            format!(" {}", Self::gold("[local-only]"))
+        } else {
+            String::new()
+        };
 
         println!(
-            "{} {} [{}] {} {} {} {}{}",
+            "{} {} [{}] {} {} {} {}{}{}",
             Self::crimson_bold("◈"),
             Self::emerald_bold("Stored"),
             Self::violet_bold(memory.category.as_str()),
@@ -367,8 +373,17 @@ impl CliView {
             Self::gold(&format!("({})", short_id)),
             Self::slate("in"),
             Self::slate(&db_str),
-            ttl_suffix
+            ttl_suffix,
+            local_suffix
         );
+
+        if memory.is_local() {
+            println!(
+                "  {} {}",
+                Self::gold("🔒 Privacy:"),
+                Self::slate("Marked as local-only (exempt from cloud sync & remote backup)")
+            );
+        }
 
         if let Some(w) = warning {
             println!("  {} {}", Self::rose("⚠ Notice:"), Self::rose(w));
@@ -1278,6 +1293,26 @@ impl CliView {
             Self::slate(&Self::format_path(&active_db)),
             Self::slate(db_mode)
         );
+        if let Some(target) = cfg.effective_sync_target() {
+            println!(
+                "  {} {:<20} {}",
+                Self::slate("├─"),
+                Self::slate("Sync Target"),
+                Self::emerald_bold(&Self::format_path(&target))
+            );
+        }
+        if let Some(auto) = cfg.sync_auto {
+            println!(
+                "  {} {:<20} {}",
+                Self::slate("├─"),
+                Self::slate("Sync Auto (inline)"),
+                if auto {
+                    Self::emerald_bold("enabled")
+                } else {
+                    Self::slate("disabled")
+                }
+            );
+        }
         println!(
             "  {} {:<20} {}",
             Self::slate("╰─"),
@@ -1844,6 +1879,490 @@ impl CliView {
                 Self::emerald_bold("✦"),
                 Self::emerald_bold(&saved.to_string()),
                 Self::slate(&skipped.to_string())
+            );
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_sync_progress(p: &crate::services::SyncProgress) {
+        match p {
+            crate::services::SyncProgress::Starting { target } => {
+                println!();
+                println!(
+                    "{} {} {}",
+                    Self::crimson_bold("◈"),
+                    Self::emerald_bold("Initiating sync to"),
+                    Self::white_bold(&Self::format_path(target))
+                );
+            }
+            crate::services::SyncProgress::Scanning {
+                total_memories,
+                local_exempt,
+            } => {
+                println!(
+                    "  {} Discovered {} active memories ({} local-only exempt)",
+                    Self::slate("├─"),
+                    Self::white_bold(&total_memories.to_string()),
+                    Self::gold(&local_exempt.to_string())
+                );
+            }
+            crate::services::SyncProgress::SyncingBlob {
+                current,
+                total,
+                filename,
+                size_bytes,
+                already_exists,
+                ..
+            } => {
+                let size_str = if *size_bytes >= 1024 * 1024 {
+                    format!("{:.2} MB", *size_bytes as f64 / (1024.0 * 1024.0))
+                } else {
+                    format!("{:.1} KB", *size_bytes as f64 / 1024.0)
+                };
+                let status_badge = if *already_exists {
+                    Self::slate("already in CAS (skipped)")
+                } else {
+                    Self::emerald_bold("uploaded to CAS ✓")
+                };
+                print!(
+                    "\r  {} [{}/{}] {} ({}) · {}\x1b[K\n",
+                    Self::slate("├─"),
+                    current,
+                    total,
+                    Self::white_bold(filename),
+                    Self::slate(&size_str),
+                    status_badge
+                );
+                let _ = std::io::stdout().flush();
+            }
+            crate::services::SyncProgress::BlobTransferProgress {
+                filename,
+                bytes_sent,
+                total_bytes,
+            } => {
+                Self::render_live_transfer(filename, *bytes_sent, *total_bytes);
+            }
+            crate::services::SyncProgress::CreatingSnapshot => {
+                println!(
+                    "  {} Generating atomic SQLite vector snapshot...",
+                    Self::slate("├─")
+                );
+            }
+            crate::services::SyncProgress::SnapshotTransferProgress {
+                filename,
+                bytes_sent,
+                total_bytes,
+            } => {
+                Self::render_live_transfer(filename, *bytes_sent, *total_bytes);
+            }
+            crate::services::SyncProgress::SnapshotCreated { filename, bytes } => {
+                let size_str = if *bytes >= 1024 * 1024 {
+                    format!("{:.2} MB", *bytes as f64 / (1024.0 * 1024.0))
+                } else {
+                    format!("{:.1} KB", *bytes as f64 / 1024.0)
+                };
+                print!(
+                    "\r  {} Snapshot {} ({}) created & synced ✓\x1b[K\n",
+                    Self::slate("├─"),
+                    Self::white_bold(filename),
+                    Self::slate(&size_str)
+                );
+                let _ = std::io::stdout().flush();
+            }
+            crate::services::SyncProgress::WritingManifest => {
+                print!(
+                    "\r  {} Finalizing CAS manifest...\x1b[K\n",
+                    Self::slate("╰─")
+                );
+                let _ = std::io::stdout().flush();
+            }
+            crate::services::SyncProgress::Complete => {}
+        }
+    }
+
+    pub fn render_live_transfer(filename: &str, sent: usize, total: usize) {
+        use std::io::IsTerminal;
+        if !std::io::stdout().is_terminal() {
+            return;
+        }
+        let pct = if total > 0 {
+            (sent as f64 / total as f64 * 100.0).min(100.0) as usize
+        } else {
+            100
+        };
+        let bar_width = 16;
+        let filled = (bar_width * pct) / 100;
+        let empty = bar_width.saturating_sub(filled);
+        let bar = format!("{}{}", "▓".repeat(filled), "░".repeat(empty));
+
+        let sent_mb = sent as f64 / (1024.0 * 1024.0);
+        let total_mb = total as f64 / (1024.0 * 1024.0);
+
+        print!(
+            "\r  \x1b[38;2;148;163;184m├─\x1b[0m Uploading \x1b[1;37m{}\x1b[0m [{}] {:.1}/{:.1} MB ({}%)\x1b[K",
+            filename,
+            bar.cyan(),
+            sent_mb,
+            total_mb,
+            pct
+        );
+        let _ = std::io::stdout().flush();
+    }
+
+    pub fn render_inline_sync(report: &crate::services::SyncReport) {
+        println!(
+            "  {} {} {} {}",
+            Self::emerald_bold("⟳ Synced to"),
+            Self::white_bold(&Self::format_path(&report.target)),
+            Self::slate(&format!(
+                "({} CAS blobs, snapshot {} bytes)",
+                report.blobs_written, report.snapshot_bytes
+            )),
+            Self::slate("[inline synchronous]")
+        );
+    }
+
+    pub fn render_sync_report(report: &crate::services::SyncReport, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(report)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "{} {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold("Cloud / CAS Sync Complete")
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Target:"),
+            Self::white_bold(&Self::format_path(&report.target))
+        );
+        println!(
+            "  {} {} newly written, {} already present (deduplicated), {} transferred",
+            Self::slate("CAS Blobs:"),
+            Self::emerald_bold(&report.blobs_written.to_string()),
+            Self::slate(&report.blobs_skipped_existing.to_string()),
+            Self::gold(&format!(
+                "{:.2} KB",
+                report.blob_bytes_transferred as f64 / 1024.0
+            ))
+        );
+        if let Some(ref snap) = report.snapshot_path {
+            println!(
+                "  {} {} ({:.2} KB)",
+                Self::slate("Vector Snapshot:"),
+                Self::white_bold(
+                    snap.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("vault_latest.db")
+                ),
+                report.snapshot_bytes as f64 / 1024.0
+            );
+        }
+        println!(
+            "  {} {} active synced, {} local-only exempt",
+            Self::slate("Memories:"),
+            Self::emerald_bold(&report.total_active_memories.to_string()),
+            Self::gold(&report.local_only_memories.to_string())
+        );
+        println!();
+        Ok(())
+    }
+
+    pub fn render_sync_status(
+        status: &crate::services::SyncStatusReport,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(status)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "{} {}",
+            Self::crimson_bold("◈"),
+            Self::violet_bold("Cloud / CAS Sync Status")
+        );
+        println!(
+            "  {} {} {}",
+            Self::slate("Target:"),
+            Self::white_bold(&Self::format_path(&status.target)),
+            if status.configured {
+                Self::emerald_bold("[configured]")
+            } else {
+                Self::gold("[default / unconfigured]")
+            }
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Target Exists:"),
+            if status.target_exists {
+                Self::emerald_bold("yes")
+            } else {
+                Self::rose("no (will be created on first sync)")
+            }
+        );
+        println!(
+            "  {} {} blobs ({:.2} MB)",
+            Self::slate("CAS Blobs:"),
+            Self::emerald_bold(&status.blobs_count.to_string()),
+            status.total_blob_bytes as f64 / (1024.0 * 1024.0)
+        );
+        let latest_snap_str = status
+            .latest_snapshot_date
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "none".to_string());
+        println!(
+            "  {} {} snapshots (latest: {})",
+            Self::slate("Snapshots:"),
+            Self::emerald_bold(&status.snapshots_count.to_string()),
+            Self::white_bold(&latest_snap_str)
+        );
+        println!(
+            "  {} {} syncable, {} local-only air-gapped",
+            Self::slate("Vault Memories:"),
+            Self::emerald_bold(&status.syncable_memories_count.to_string()),
+            Self::gold(&status.local_only_memories_count.to_string())
+        );
+        if let Some(pid) = status.daemon_pid {
+            println!(
+                "  {} Running (PID: {}) · Log: ~/.lightmem/sync_daemon.log",
+                Self::slate("Sync Daemon:"),
+                Self::emerald_bold(&pid.to_string())
+            );
+        } else {
+            println!(
+                "  {} Inactive (start with 'lmem sync -d')",
+                Self::slate("Sync Daemon:")
+            );
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_daemon_start(pid: u32, log_path: &Path, target: &Path, json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "status": "started",
+                "daemon_pid": pid,
+                "log_path": log_path.display().to_string(),
+                "target": target.display().to_string(),
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "{} {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold("LightMem Sync Daemon Started in Background")
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Process ID:"),
+            Self::white_bold(&pid.to_string())
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Log Output:"),
+            Self::white_bold(&Self::format_path(log_path))
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Target:"),
+            Self::white_bold(&Self::format_path(target))
+        );
+        println!(
+            "  {} Check status with {} or stop with {}",
+            Self::slate("Commands:"),
+            Self::white_bold("lmem sync --status"),
+            Self::white_bold("lmem sync --stop")
+        );
+        println!();
+        Ok(())
+    }
+
+    pub fn render_daemon_stop(stopped_pid: Option<u32>, json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "status": if stopped_pid.is_some() { "stopped" } else { "not_running" },
+                "stopped_pid": stopped_pid,
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        println!();
+        if let Some(pid) = stopped_pid {
+            println!(
+                "{} Stopped background sync daemon (PID: {})",
+                Self::emerald_bold("✓"),
+                Self::white_bold(&pid.to_string())
+            );
+        } else {
+            println!("{} No active sync daemon was running", Self::slate("ℹ"));
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_sync_pull(pull: &crate::services::SyncPullReport, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(pull)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "{} {}",
+            Self::crimson_bold("◈"),
+            Self::emerald_bold("Cloud / CAS Pull Complete")
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Target:"),
+            Self::white_bold(&Self::format_path(&pull.target))
+        );
+        println!(
+            "  {} {} verified blobs available in CAS archive",
+            Self::slate("Blobs:"),
+            Self::emerald_bold(&pull.blobs_found_in_target.to_string())
+        );
+        if pull.restored_db {
+            if let Some(ref p) = pull.restored_snapshot_path {
+                println!(
+                    "  {} Local database restored from {}",
+                    Self::emerald_bold("✓"),
+                    Self::white_bold(&Self::format_path(p))
+                );
+            }
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_auth_status(status: &crate::services::DriveAuthStatus, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(status)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "{} {}",
+            Self::crimson_bold("☁"),
+            Self::white_bold("Google Drive Authentication Status")
+        );
+        if status.connected {
+            println!(
+                "  {} {}",
+                Self::slate("Status:"),
+                Self::emerald_bold("Connected & Authorized")
+            );
+            if let Some(ref email) = status.user_email {
+                println!("  {} {}", Self::slate("Account:"), Self::white_bold(email));
+            }
+            if !status.scopes.is_empty() {
+                println!(
+                    "  {} {}",
+                    Self::slate("Scopes:"),
+                    Self::slate(&status.scopes.join(", "))
+                );
+            }
+            if let Some(ref exp) = status.expires_at {
+                println!(
+                    "  {} {}",
+                    Self::slate("Token Expiry:"),
+                    Self::slate(&exp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                );
+            }
+            if let Some(ref f) = status.folders {
+                println!(
+                    "  {} Root: {}, Blobs: {}, Snapshots: {}",
+                    Self::slate("Drive Folders:"),
+                    Self::slate(&f.root_id),
+                    Self::slate(&f.blobs_id),
+                    Self::slate(&f.snapshots_id)
+                );
+            }
+        } else {
+            println!(
+                "  {} {}",
+                Self::slate("Status:"),
+                Self::gold("Not Connected")
+            );
+            println!(
+                "  {} Client credentials: {}",
+                Self::slate("Config:"),
+                if status.credentials_present {
+                    Self::emerald_bold("Present")
+                } else {
+                    Self::slate("Missing")
+                }
+            );
+            println!(
+                "  {} Run {} to connect your Google account",
+                Self::slate("Next Step:"),
+                Self::white_bold("lmem auth login")
+            );
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_auth_logout(
+        report: &crate::services::DriveLogoutReport,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(report)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "{} {}",
+            Self::crimson_bold("⏻"),
+            Self::emerald_bold("Logged out of Google Drive")
+        );
+        if let Some(ref email) = report.user_email {
+            println!("  {} {}", Self::slate("Account:"), Self::white_bold(email));
+        }
+        println!(
+            "  {} {}",
+            Self::slate("Remote Token Revoked:"),
+            if report.remote_revoked {
+                Self::emerald_bold("Yes (Google OAuth token invalidated)")
+            } else {
+                Self::slate("No (or already revoked)")
+            }
+        );
+        println!(
+            "  {} {}",
+            Self::slate("Local Tokens Deleted:"),
+            if report.token_removed {
+                Self::emerald_bold("gdrive_token.json removed")
+            } else {
+                Self::slate("None found")
+            }
+        );
+        if report.folders_cache_removed {
+            println!(
+                "  {} {}",
+                Self::slate("Folder Cache:"),
+                Self::slate("gdrive_folders.json removed")
+            );
+        }
+        if report.credentials_removed {
+            println!(
+                "  {} {}",
+                Self::slate("Credentials:"),
+                Self::gold("gdrive_credentials.json purged")
             );
         }
         println!();

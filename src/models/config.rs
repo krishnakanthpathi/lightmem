@@ -22,6 +22,10 @@ pub struct LightMemConfig {
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_auto: Option<bool>,
 }
 
 fn default_reranker() -> String {
@@ -37,6 +41,8 @@ impl Default for LightMemConfig {
             ollama_api_key: None,
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
+            sync_target: None,
+            sync_auto: None,
         }
     }
 }
@@ -174,6 +180,45 @@ impl LightMemConfig {
                     .map(|k| k.trim().to_string())
                     .filter(|k| !k.is_empty())
             })
+    }
+
+    /// Resolves effective cloud/CAS sync and backup target directory path from environment variable (LIGHTMEM_SYNC_TARGET) or config.
+    pub fn effective_sync_target(&self) -> Option<PathBuf> {
+        let raw = std::env::var("LIGHTMEM_SYNC_TARGET")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.sync_target.clone())?;
+
+        let trimmed = raw.trim();
+        let lower = trimmed.to_lowercase();
+        if lower == "gdrive"
+            || lower == "google-drive"
+            || lower == "googledrive"
+            || lower == "drive"
+        {
+            return Some(PathBuf::from("gdrive"));
+        }
+
+        let path = if trimmed.starts_with('~') {
+            if let Some(home) = dirs::home_dir() {
+                home.join(trimmed.trim_start_matches("~/").trim_start_matches('~'))
+            } else {
+                PathBuf::from(trimmed)
+            }
+        } else {
+            PathBuf::from(trimmed)
+        };
+        Some(path)
+    }
+
+    /// Check whether auto-sync on memory creation is enabled (defaults to true if target is configured)
+    pub fn is_sync_auto_enabled(&self) -> bool {
+        if let Ok(val) = std::env::var("LIGHTMEM_SYNC_AUTO") {
+            let v = val.trim().to_lowercase();
+            return v == "1" || v == "true" || v == "yes";
+        }
+        self.sync_auto.unwrap_or(true)
     }
 
     /// Stable embedding-space identity, including card preprocessing and engine version.
