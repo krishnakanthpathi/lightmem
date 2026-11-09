@@ -1,7 +1,7 @@
 use crate::models::{
-    compute_sha256_hex, encode_base64, extract_wikilinks, AttachmentInput, AttachmentMetadata,
-    EntityRecord, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus,
-    MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
+    cas_blob_filename, compute_sha256_hex, encode_base64, extract_wikilinks, AttachmentInput,
+    AttachmentMetadata, EntityRecord, GraphEdge, GraphNode, GraphSnapshot, MemoryLink,
+    MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
 };
 use crate::services::embeddings::{
     cosine_similarity, validate_vector, EmbeddingProvider, MultimodalInput,
@@ -795,6 +795,369 @@ impl Storage {
         Ok(())
     }
 
+    /// Snapshot database into a standalone single SQLite file, dehydrating attachments
+    /// whose CAS blobs (`<sha256>.<ext>`) are already verified in `dehydrated_blobs`
+    /// without reading those BLOBs from SQLite.
+    pub fn backup_slim_snapshot_to_file(
+        &self,
+        target_path: &Path,
+        dehydrated_blobs: &std::collections::HashSet<String>,
+    ) -> Result<()> {
+        let _ = std::fs::remove_file(target_path);
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = target_path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(sidecar));
+        }
+
+        let dst = Storage::open(target_path)?;
+        {
+            let src_conn = self.conn.lock().unwrap();
+            let mut dst_conn = dst.conn.lock().unwrap();
+            let tx =
+                dst_conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+            if let Some((identity, dims)) = src_conn
+                .query_row(
+                    "SELECT identity, dims FROM embedding_state WHERE singleton = 1",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?
+            {
+                tx.execute(
+                    "INSERT OR REPLACE INTO embedding_state (singleton, identity, dims) VALUES (1, ?1, ?2)",
+                    params![identity, dims],
+                )?;
+            }
+
+            {
+                let mut src_stmt = src_conn.prepare(
+                    "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key
+                     FROM memories ORDER BY rowid ASC",
+                )?;
+                let mut dst_stmt = tx.prepare(
+                    "INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                )?;
+                let rows = src_stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, f64>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, String>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                        r.get::<_, Option<String>>(11)?,
+                        r.get::<_, String>(12)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (
+                        id,
+                        category,
+                        title,
+                        content,
+                        tags,
+                        confidence,
+                        status,
+                        provenance,
+                        created_at,
+                        updated_at,
+                        expired_at,
+                        context_json,
+                        dedup_key,
+                    ) = row?;
+                    dst_stmt.execute(params![
+                        id,
+                        category,
+                        title,
+                        content,
+                        tags,
+                        confidence,
+                        status,
+                        provenance,
+                        created_at,
+                        updated_at,
+                        expired_at,
+                        context_json,
+                        dedup_key
+                    ])?;
+                }
+            }
+
+            {
+                let mut src_stmt = src_conn
+                    .prepare("SELECT id, embedding, dims FROM memory_vectors ORDER BY rowid ASC")?;
+                let mut dst_stmt = tx.prepare(
+                    "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
+                )?;
+                let rows = src_stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (id, emb, dims) = row?;
+                    dst_stmt.execute(params![id, emb, dims])?;
+                }
+            }
+
+            {
+                let mut src_stmt = src_conn.prepare(
+                    "SELECT source_id, target_id, relation, weight, created_at FROM memory_links ORDER BY rowid ASC",
+                )?;
+                let mut dst_stmt = tx.prepare(
+                    "INSERT INTO memory_links (source_id, target_id, relation, weight, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                let rows = src_stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, f64>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (source_id, target_id, relation, weight, created_at) = row?;
+                    dst_stmt
+                        .execute(params![source_id, target_id, relation, weight, created_at])?;
+                }
+            }
+
+            {
+                let mut src_stmt = src_conn.prepare(
+                    "SELECT id, memory_id, entity_name, entity_val, created_at FROM memory_entities ORDER BY id ASC",
+                )?;
+                let mut dst_stmt = tx.prepare(
+                    "INSERT INTO memory_entities (id, memory_id, entity_name, entity_val, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                let rows = src_stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (id, memory_id, entity_name, entity_val, created_at) = row?;
+                    dst_stmt.execute(params![
+                        id,
+                        memory_id,
+                        entity_name,
+                        entity_val,
+                        created_at
+                    ])?;
+                }
+            }
+
+            {
+                let mut src_meta_stmt = src_conn.prepare(
+                    "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at
+                     FROM memory_attachments ORDER BY rowid ASC",
+                )?;
+                let mut src_blob_stmt =
+                    src_conn.prepare("SELECT data FROM memory_attachments WHERE id = ?1")?;
+                let mut dst_stmt = tx.prepare(
+                    "INSERT INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                )?;
+                let rows = src_meta_stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<f64>>(8)?,
+                        r.get::<_, String>(9)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (
+                        id,
+                        memory_id,
+                        filename,
+                        mime_type,
+                        media_kind,
+                        size_bytes,
+                        sha256,
+                        dimensions,
+                        duration_secs,
+                        created_at,
+                    ) = row?;
+                    let blob_name = cas_blob_filename(&sha256, &filename);
+                    let should_dehydrate = size_bytes > 0 && dehydrated_blobs.contains(&blob_name);
+                    if should_dehydrate {
+                        let empty: &[u8] = &[];
+                        dst_stmt.execute(params![
+                            id,
+                            memory_id,
+                            filename,
+                            mime_type,
+                            media_kind,
+                            size_bytes,
+                            sha256,
+                            dimensions,
+                            duration_secs,
+                            empty,
+                            created_at
+                        ])?;
+                    } else {
+                        let data: Vec<u8> = src_blob_stmt.query_row([&id], |r| r.get(0))?;
+                        dst_stmt.execute(params![
+                            id,
+                            memory_id,
+                            filename,
+                            mime_type,
+                            media_kind,
+                            size_bytes,
+                            sha256,
+                            dimensions,
+                            duration_secs,
+                            data,
+                            created_at
+                        ])?;
+                    }
+                }
+            }
+
+            let src_revision: i64 = src_conn
+                .query_row(
+                    "SELECT revision FROM storage_revision WHERE singleton = 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            tx.execute(
+                "INSERT OR REPLACE INTO storage_revision (singleton, revision) VALUES (1, ?1)",
+                [src_revision],
+            )?;
+
+            tx.commit()?;
+            dst_conn
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
+        }
+        drop(dst);
+
+        #[cfg(unix)]
+        if target_path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(target_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        Ok(())
+    }
+
+    /// Checkpoint WAL and switch journal mode to DELETE so all data resides in the main `.db` file.
+    pub fn flush_to_single_file(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
+        Ok(())
+    }
+
+    /// Check read-only whether an external SQLite database file contains dehydrated CAS attachments.
+    pub fn file_has_dehydrated_attachments(db_path: &Path) -> Result<bool> {
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let table_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_attachments')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !table_exists {
+            return Ok(false);
+        }
+        let has_dehydrated: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM memory_attachments WHERE size_bytes > 0 AND length(data) = 0)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(has_dehydrated)
+    }
+
+    /// List attachments in this vault whose binary payload was dehydrated into CAS storage.
+    pub fn list_dehydrated_attachments(&self) -> Result<Vec<AttachmentMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at
+             FROM memory_attachments
+             WHERE size_bytes > 0 AND length(data) = 0
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map([], row_to_attachment_metadata)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Rehydrate a dehydrated attachment row after verifying byte length and SHA-256 integrity,
+    /// preserving the immutability trigger on `memory_attachments`.
+    pub fn rehydrate_attachment(
+        &self,
+        attachment_id: &str,
+        expected_sha256: &str,
+        expected_size: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            data.len() as u64 == expected_size,
+            "Rehydration size mismatch for attachment '{}': expected {} bytes, got {} bytes",
+            attachment_id,
+            expected_size,
+            data.len()
+        );
+        let actual_sha = compute_sha256_hex(data);
+        anyhow::ensure!(
+            actual_sha == expected_sha256,
+            "Rehydration SHA-256 mismatch for attachment '{}': expected {}, got {}",
+            attachment_id,
+            expected_sha256,
+            actual_sha
+        );
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch("DROP TRIGGER IF EXISTS trg_attachments_immutable;")?;
+        let updated = tx.execute(
+            "UPDATE memory_attachments
+             SET data = ?1
+             WHERE id = ?2 AND sha256 = ?3 AND size_bytes > 0 AND length(data) = 0",
+            params![data, attachment_id, expected_sha256],
+        )?;
+        tx.execute_batch(
+            r#"
+            CREATE TRIGGER IF NOT EXISTS trg_attachments_immutable
+            BEFORE UPDATE ON memory_attachments
+            BEGIN
+                SELECT RAISE(ABORT, 'Attachment binary payload is immutable; only LightMem may delete and replace attachments');
+            END;
+            "#,
+        )?;
+        anyhow::ensure!(
+            updated == 1,
+            "Failed to rehydrate attachment '{}' (missing row or already populated)",
+            attachment_id
+        );
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Restore and replace active database completely from an external SQLite file
     pub fn restore_from_db_file(&self, src_db_path: &Path) -> Result<()> {
         let src_conn = rusqlite::Connection::open_with_flags(
@@ -1133,6 +1496,48 @@ impl Storage {
         Ok(count)
     }
 
+    /// Retrieve verified binary attachment payload `(AttachmentMetadata, Vec<u8>)` for a single attachment ID.
+    pub fn get_attachment_data_by_id(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<(AttachmentMetadata, Vec<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at, data
+                 FROM memory_attachments
+                 WHERE id = ?1",
+                [attachment_id],
+                |r| {
+                    let meta = row_to_attachment_metadata(r)?;
+                    let data: Vec<u8> = r.get(10)?;
+                    Ok((meta, data))
+                },
+            )
+            .optional()?;
+        match row {
+            Some((meta, data)) => {
+                if meta.size_bytes > 0 && data.is_empty() {
+                    anyhow::bail!(
+                        "Attachment integrity verification failed for '{}' (sha256:{}): payload is dehydrated; run 'lmem sync --restore' to rehydrate from CAS blobs",
+                        meta.filename,
+                        meta.sha256
+                    );
+                }
+                let actual_sha = compute_sha256_hex(&data);
+                anyhow::ensure!(
+                    actual_sha == meta.sha256 && data.len() as u64 == meta.size_bytes,
+                    "Attachment integrity verification failed for '{}' (expected sha256:{}, got sha256:{})",
+                    meta.filename,
+                    meta.sha256,
+                    actual_sha
+                );
+                Ok(Some((meta, data)))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
     pub fn get_memory_attachments_data(
         &self,
@@ -1155,6 +1560,13 @@ impl Storage {
         let mut out = Vec::new();
         for item in rows {
             let (meta, data) = item?;
+            if meta.size_bytes > 0 && data.is_empty() {
+                anyhow::bail!(
+                    "Attachment integrity verification failed for '{}' (sha256:{}): payload is dehydrated; run 'lmem sync --restore' to rehydrate from CAS blobs",
+                    meta.filename,
+                    meta.sha256
+                );
+            }
             let actual_sha = compute_sha256_hex(&data);
             anyhow::ensure!(
                 actual_sha == meta.sha256 && data.len() as u64 == meta.size_bytes,

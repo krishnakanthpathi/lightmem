@@ -16,11 +16,11 @@ pub use models::identity::{
     MemoryScope, ResolvedConnection, VaultConnectionStatus, VaultStatusOverview,
 };
 pub use models::{
-    compute_sha256_hex, decode_base64, detect_memory_conflict,
-    detect_memory_conflict_with_similarity, detect_mime_and_kind, encode_base64,
-    extract_meaningful_tokens, parse_ttl_duration, AttachmentInput, AttachmentMetadata,
-    EntityRecord, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
-    PaginatedMemories, ScoredMemory, StorageStats,
+    cas_blob_filename, compute_file_sha256_hex, compute_sha256_hex, decode_base64,
+    detect_memory_conflict, detect_memory_conflict_with_similarity, detect_mime_and_kind,
+    encode_base64, extract_meaningful_tokens, parse_ttl_duration, AttachmentInput,
+    AttachmentMetadata, EntityRecord, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus,
+    MemoryType, PaginatedMemories, ScoredMemory, Sha256Hasher, StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]

@@ -1,10 +1,14 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::models::{compute_sha256_hex, LightMemConfig, MemoryRecord, MemoryStatus};
+use crate::models::{
+    cas_blob_filename, compute_file_sha256_hex, AttachmentMetadata, LightMemConfig, MemoryRecord,
+    MemoryStatus,
+};
 use crate::services::GoogleDriveClient;
 use crate::storage::Storage;
 
@@ -230,25 +234,27 @@ impl SyncService {
         let mut blobs_written = 0;
         let mut blobs_skipped_existing = 0;
         let mut blob_bytes_transferred = 0u64;
+        let mut synced_blob_filenames: HashSet<String> = HashSet::new();
 
         if !backup_only {
-            let mut attachments_to_sync = Vec::new();
-            for mem in &syncable_memories {
-                let attachments_data = storage.get_memory_attachments_data(&mem.id)?;
-                attachments_to_sync.extend(attachments_data);
-            }
-            let total_attachments = attachments_to_sync.len();
+            let all_attachments: Vec<&AttachmentMetadata> = syncable_memories
+                .iter()
+                .flat_map(|m| m.attachments.iter())
+                .collect();
+            let total_attachments = all_attachments.len();
 
-            for (idx, (meta, data)) in attachments_to_sync.iter().enumerate() {
-                let ext = Path::new(&meta.filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("bin");
-                let blob_filename = format!("{}.{}", meta.sha256, ext);
+            for (idx, meta) in all_attachments.iter().enumerate() {
+                let blob_filename = cas_blob_filename(&meta.sha256, &meta.filename);
                 let blob_path = blobs_dir.join(&blob_filename);
 
-                if blob_path.exists() {
+                let already_cached = blob_path.exists()
+                    && fs::metadata(&blob_path)
+                        .map(|m| m.len() == meta.size_bytes)
+                        .unwrap_or(false);
+
+                if already_cached {
                     blobs_skipped_existing += 1;
+                    synced_blob_filenames.insert(blob_filename);
                     on_progress(SyncProgress::SyncingBlob {
                         current: idx + 1,
                         total: total_attachments,
@@ -260,10 +266,20 @@ impl SyncService {
                     continue;
                 }
 
+                let (_, data) =
+                    storage
+                        .get_attachment_data_by_id(&meta.id)?
+                        .with_context(|| {
+                            format!(
+                                "Attachment '{}' ({}) missing from vault during CAS sync",
+                                meta.filename, meta.id
+                            )
+                        })?;
+
                 // Write to temp file then atomic rename
                 let tmp_path =
                     blobs_dir.join(format!("{}.tmp.{}", meta.sha256, uuid::Uuid::new_v4()));
-                fs::write(&tmp_path, data).with_context(|| {
+                fs::write(&tmp_path, &data).with_context(|| {
                     format!("Failed to write CAS blob to {}", tmp_path.display())
                 })?;
                 fs::rename(&tmp_path, &blob_path).with_context(|| {
@@ -272,6 +288,9 @@ impl SyncService {
 
                 blobs_written += 1;
                 blob_bytes_transferred += data.len() as u64;
+                drop(data);
+                synced_blob_filenames.insert(blob_filename);
+
                 on_progress(SyncProgress::SyncingBlob {
                     current: idx + 1,
                     total: total_attachments,
@@ -294,12 +313,25 @@ impl SyncService {
             let timestamped_db = snapshots_dir.join(format!("vault_{}.db", timestamp_str));
             let latest_db = snapshots_dir.join("vault_latest.db");
 
-            storage.backup_to_file(&timestamped_db)?;
+            if backup_only {
+                storage.backup_to_file(&timestamped_db)?;
+            } else {
+                storage.backup_slim_snapshot_to_file(&timestamped_db, &synced_blob_filenames)?;
+            }
             snapshot_bytes = fs::metadata(&timestamped_db)?.len();
-            let _ = fs::copy(&timestamped_db, &latest_db);
 
-            let db_bytes = fs::read(&timestamped_db)?;
-            vault_db_sha256 = compute_sha256_hex(&db_bytes);
+            let latest_tmp =
+                snapshots_dir.join(format!("vault_latest.db.tmp.{}", uuid::Uuid::new_v4()));
+            if fs::copy(&timestamped_db, &latest_tmp).is_ok() {
+                if fs::rename(&latest_tmp, &latest_db).is_err() {
+                    let _ = fs::remove_file(&latest_tmp);
+                    let _ = fs::copy(&timestamped_db, &latest_db);
+                }
+            } else {
+                let _ = fs::copy(&timestamped_db, &latest_db);
+            }
+
+            vault_db_sha256 = compute_file_sha256_hex(&timestamped_db)?;
             on_progress(SyncProgress::SnapshotCreated {
                 filename: "vault_latest.db",
                 bytes: snapshot_bytes,
@@ -383,25 +415,22 @@ impl SyncService {
         let mut blobs_written = 0;
         let mut blobs_skipped_existing = 0;
         let mut blob_bytes_transferred = 0u64;
+        let mut synced_blob_filenames: HashSet<String> = HashSet::new();
 
         if !backup_only {
-            let existing_blobs = client.list_existing_blobs(&folders.blobs_id)?;
-            let mut attachments_to_sync = Vec::new();
-            for mem in &syncable_memories {
-                let attachments_data = storage.get_memory_attachments_data(&mem.id)?;
-                attachments_to_sync.extend(attachments_data);
-            }
-            let total_attachments = attachments_to_sync.len();
+            let mut existing_blobs = client.list_existing_blobs(&folders.blobs_id)?;
+            let all_attachments: Vec<&AttachmentMetadata> = syncable_memories
+                .iter()
+                .flat_map(|m| m.attachments.iter())
+                .collect();
+            let total_attachments = all_attachments.len();
 
-            for (idx, (meta, data)) in attachments_to_sync.iter().enumerate() {
-                let ext = Path::new(&meta.filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("bin");
-                let blob_filename = format!("{}.{}", meta.sha256, ext);
+            for (idx, meta) in all_attachments.iter().enumerate() {
+                let blob_filename = cas_blob_filename(&meta.sha256, &meta.filename);
 
                 if existing_blobs.contains(&blob_filename) {
                     blobs_skipped_existing += 1;
+                    synced_blob_filenames.insert(blob_filename);
                     on_progress(SyncProgress::SyncingBlob {
                         current: idx + 1,
                         total: total_attachments,
@@ -413,11 +442,21 @@ impl SyncService {
                     continue;
                 }
 
+                let (_, data) =
+                    storage
+                        .get_attachment_data_by_id(&meta.id)?
+                        .with_context(|| {
+                            format!(
+                                "Attachment '{}' ({}) missing from vault during Drive sync",
+                                meta.filename, meta.id
+                            )
+                        })?;
+
                 client.upload_file_multipart_with_progress(
                     &blob_filename,
                     &folders.blobs_id,
                     &meta.mime_type,
-                    data,
+                    &data,
                     |sent, total| {
                         on_progress(SyncProgress::BlobTransferProgress {
                             filename: &meta.filename,
@@ -427,8 +466,13 @@ impl SyncService {
                     },
                 )?;
 
+                let uploaded_bytes = data.len() as u64;
+                drop(data);
+
+                existing_blobs.insert(blob_filename.clone());
+                synced_blob_filenames.insert(blob_filename);
                 blobs_written += 1;
-                blob_bytes_transferred += data.len() as u64;
+                blob_bytes_transferred += uploaded_bytes;
                 on_progress(SyncProgress::SyncingBlob {
                     current: idx + 1,
                     total: total_attachments,
@@ -450,19 +494,21 @@ impl SyncService {
             let tmp_dir = tempfile::tempdir()?;
             let timestamp_str = now.format("%Y%m%d_%H%M%S").to_string();
             let tmp_db = tmp_dir.path().join(format!("vault_{}.db", timestamp_str));
-            storage.backup_to_file(&tmp_db)?;
+            if backup_only {
+                storage.backup_to_file(&tmp_db)?;
+            } else {
+                storage.backup_slim_snapshot_to_file(&tmp_db, &synced_blob_filenames)?;
+            }
             snapshot_bytes = fs::metadata(&tmp_db)?.len();
-
-            let db_data = fs::read(&tmp_db)?;
-            vault_sha256 = compute_sha256_hex(&db_data);
+            vault_sha256 = compute_file_sha256_hex(&tmp_db)?;
             let snapshot_filename = format!("vault_{}.db", timestamp_str);
 
-            // Upload or update in-place vault_latest.db with live transfer progress
-            client.upload_or_update_file_with_progress(
+            // Upload or update in-place vault_latest.db by streaming from disk
+            client.upload_or_update_file_from_path_with_progress(
                 "vault_latest.db",
                 &folders.snapshots_id,
                 "application/x-sqlite3",
-                &db_data,
+                &tmp_db,
                 |sent, total| {
                     on_progress(SyncProgress::SnapshotTransferProgress {
                         filename: "vault_latest.db",
@@ -742,7 +788,24 @@ impl SyncService {
                 "No vault_latest.db found in '{}' to restore from",
                 snapshots_dir.display()
             );
-            storage.restore_from_db_file(&latest_db)?;
+            if Storage::file_has_dehydrated_attachments(&latest_db)? {
+                let tmp_dir = tempfile::tempdir()?;
+                let staged_db = tmp_dir.path().join("vault_latest_staged.db");
+                fs::copy(&latest_db, &staged_db).with_context(|| {
+                    format!(
+                        "Failed to stage snapshot {} for CAS rehydration",
+                        latest_db.display()
+                    )
+                })?;
+                {
+                    let staged = Storage::open(&staged_db)?;
+                    Self::rehydrate_local_staged_db(&staged, &blobs_dir)?;
+                    staged.flush_to_single_file()?;
+                }
+                storage.restore_from_db_file(&staged_db)?;
+            } else {
+                storage.restore_from_db_file(&latest_db)?;
+            }
             restored = true;
             restored_path = Some(latest_db);
         }
@@ -755,6 +818,60 @@ impl SyncService {
         })
     }
 
+    fn find_local_blob_path(blobs_dir: &Path, sha256: &str, filename: &str) -> Option<PathBuf> {
+        let exact = blobs_dir.join(cas_blob_filename(sha256, filename));
+        if exact.is_file() {
+            return Some(exact);
+        }
+        let prefix = format!("{}.", sha256);
+        let entries = fs::read_dir(blobs_dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with(&prefix) && !name.contains(".tmp.") {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn rehydrate_local_staged_db(staged: &Storage, blobs_dir: &Path) -> Result<()> {
+        let dehydrated = staged.list_dehydrated_attachments()?;
+        if dehydrated.is_empty() {
+            return Ok(());
+        }
+
+        let mut grouped: BTreeMap<String, Vec<AttachmentMetadata>> = BTreeMap::new();
+        for att in dehydrated {
+            let key = cas_blob_filename(&att.sha256, &att.filename);
+            grouped.entry(key).or_default().push(att);
+        }
+
+        for (blob_name, atts) in grouped {
+            let blob_path =
+                Self::find_local_blob_path(blobs_dir, &atts[0].sha256, &atts[0].filename)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Missing CAS blob '{}' in '{}' to rehydrate attachment '{}'",
+                            blob_name,
+                            blobs_dir.display(),
+                            atts[0].filename
+                        )
+                    })?;
+            let data = fs::read(&blob_path)
+                .with_context(|| format!("Failed to read CAS blob from {}", blob_path.display()))?;
+            for att in &atts {
+                staged.rehydrate_attachment(&att.id, &att.sha256, att.size_bytes, &data)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Pull / restore latest database snapshot from Google Drive
     pub fn pull_gdrive(storage: &Storage, restore_db: bool) -> Result<SyncPullReport> {
         let client = GoogleDriveClient::try_load()?.ok_or_else(|| {
@@ -763,9 +880,8 @@ impl SyncService {
         let folders = client.ensure_folders()?;
         let target_display = PathBuf::from(format!("gdrive://LightMem ({})", client.user_email));
 
-        let blobs = client
-            .list_existing_blobs(&folders.blobs_id)
-            .unwrap_or_default();
+        let blobs_result = client.list_existing_blobs_with_ids(&folders.blobs_id);
+        let blobs_found_in_target = blobs_result.as_ref().map(|m| m.len()).unwrap_or(0);
         let mut restored = false;
         let mut restored_path = None;
 
@@ -775,11 +891,54 @@ impl SyncService {
                 .ok_or_else(|| {
                     anyhow::anyhow!("No vault_latest.db found in Google Drive snapshots folder")
                 })?;
-            let db_bytes = client.download_file(&file_id)?;
 
             let tmp_dir = tempfile::tempdir()?;
             let tmp_db = tmp_dir.path().join("vault_latest_downloaded.db");
-            fs::write(&tmp_db, &db_bytes)?;
+            client.download_file_to_path(&file_id, &tmp_db)?;
+
+            if Storage::file_has_dehydrated_attachments(&tmp_db)? {
+                let blob_ids = blobs_result?;
+                {
+                    let staged = Storage::open(&tmp_db)?;
+                    let dehydrated = staged.list_dehydrated_attachments()?;
+                    if !dehydrated.is_empty() {
+                        let mut grouped: BTreeMap<String, Vec<AttachmentMetadata>> =
+                            BTreeMap::new();
+                        for att in dehydrated {
+                            let key = cas_blob_filename(&att.sha256, &att.filename);
+                            grouped.entry(key).or_default().push(att);
+                        }
+                        for (blob_name, atts) in grouped {
+                            let sha_prefix = format!("{}.", atts[0].sha256);
+                            let blob_file_id = blob_ids
+                                .get(&blob_name)
+                                .or_else(|| {
+                                    blob_ids
+                                        .iter()
+                                        .find(|(k, _)| k.starts_with(&sha_prefix))
+                                        .map(|(_, v)| v)
+                                })
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "Missing CAS blob '{}' in Google Drive blobs folder to rehydrate attachment '{}'",
+                                        blob_name,
+                                        atts[0].filename
+                                    )
+                                })?;
+                            let blob_bytes = client.download_file(blob_file_id)?;
+                            for att in &atts {
+                                staged.rehydrate_attachment(
+                                    &att.id,
+                                    &att.sha256,
+                                    att.size_bytes,
+                                    &blob_bytes,
+                                )?;
+                            }
+                        }
+                    }
+                    staged.flush_to_single_file()?;
+                }
+            }
 
             storage.restore_from_db_file(&tmp_db)?;
             restored = true;
@@ -788,7 +947,7 @@ impl SyncService {
 
         Ok(SyncPullReport {
             target: target_display,
-            blobs_found_in_target: blobs.len(),
+            blobs_found_in_target,
             restored_db: restored,
             restored_snapshot_path: restored_path,
         })

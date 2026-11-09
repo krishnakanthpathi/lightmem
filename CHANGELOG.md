@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0
+
+- Fix multi-hundred-MB memory spikes and redundant media uploads during `lmem remember` inline auto-sync and `lmem sync`.
+- Generate slim CAS-backed SQLite snapshots (`vault_latest.db`) during normal sync by dehydrating attachment BLOBs whose `<sha256>.<ext>` payload is already verified in `blobs/`, avoiding re-copying and re-uploading 100s of MBs of immutable media on every new text memory (`--backup-only` / `--skip-media` continues to produce self-contained full snapshots).
+- Lazily check attachment existence by metadata (`sha256` and `size_bytes`) before reading any single missing BLOB payload from SQLite, freeing each uploaded payload buffer immediately after transfer.
+- Replace full-file RAM buffering (`fs::read` + double multipart copies) with streaming 64 KB chunked SHA-256 hashing (`compute_file_sha256_hex`) and disk-streamed Google Drive uploads/updates/downloads (`upload_file_multipart_from_path_with_progress`, `upload_or_update_file_from_path_with_progress`, `download_file_to_path`).
+- Automatically rehydrate CAS-dehydrated attachments from `blobs/` into a staged temporary vault with full byte-length and SHA-256 verification before atomically restoring on `lmem sync --restore`.
+
 ## 0.6.1
 
 - Add unified visual memory vault & connection dashboard (`lmem status`, `lmem vaults`, and `lmem identity status`) displaying default vault path, active/total memory telemetry, and registered harness connections with physical database paths.

@@ -342,3 +342,316 @@ fn test_gdrive_auth_status_and_logout() {
 
     std::env::remove_var("LIGHTMEM_HOME");
 }
+
+#[test]
+fn test_slim_snapshot_dehydrates_cas_blobs_and_rehydrates_on_restore() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("source_vault.db");
+    let sync_target = dir.path().join("CloudSync");
+
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+    let lm = LightMem::open_at(&db_path, cfg.clone()).unwrap();
+
+    // Large synthetic attachment (~600 KB) + 0-byte attachment + local-only attachment
+    let large_payload: Vec<u8> = (0..600_000).map(|i| ((i * 73 + 19) % 251) as u8).collect();
+    let large_file = dir.path().join("clip.mp4");
+    fs::write(&large_file, &large_payload).unwrap();
+
+    let empty_file = dir.path().join("empty_marker.txt");
+    fs::write(&empty_file, b"").unwrap();
+
+    let local_payload = vec![0xAAu8; 40_000];
+    let local_file = dir.path().join("local_secret.bin");
+    fs::write(&local_file, &local_payload).unwrap();
+
+    let (rec_media, _, _) = lm
+        .remember_with_attachments_and_entities(
+            Some("Recorded 4K demo session with NeonVector graph"),
+            &[large_file, empty_file],
+            false,
+            false,
+            None,
+            Some(MemoryType::Artifact),
+            Some("Demo Session".to_string()),
+            vec!["video".to_string(), "demo".to_string()],
+            Some(0.95),
+            None,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+
+    let rec_note = lm
+        .remember(
+            "Connected architecture note referencing [[Demo Session]]",
+            Some(MemoryType::Decision),
+            Some("Architecture Note".to_string()),
+            vec!["arch".to_string()],
+            Some(0.9),
+        )
+        .unwrap();
+    lm.link(&rec_note.id, &rec_media.id, Some("documents"), Some(1.5))
+        .unwrap();
+
+    let (rec_local, _, _) = lm
+        .remember_with_attachments_and_entities(
+            Some("Local offline key material"),
+            &[local_file],
+            false,
+            false,
+            None,
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+
+    // 1. Push normal slim CAS sync
+    let report1 = lm.sync_push(None, false).unwrap();
+    assert_eq!(report1.blobs_written, 2); // clip.mp4 + empty_marker.txt
+    assert_eq!(report1.local_only_memories, 1);
+
+    let latest_db = sync_target.join("snapshots").join("vault_latest.db");
+    assert!(latest_db.exists());
+    assert!(
+        report1.snapshot_bytes < 250_000,
+        "Slim CAS snapshot must dehydrate the 600 KB video BLOB; got {} bytes",
+        report1.snapshot_bytes
+    );
+
+    // Inspect vault_latest.db directly: synced video payload must be empty x'', local payload retained
+    {
+        let conn = rusqlite::Connection::open(&latest_db).unwrap();
+        let (dehydrated_len, stored_size): (i64, i64) = conn
+            .query_row(
+                "SELECT length(data), size_bytes FROM memory_attachments WHERE memory_id = ?1 AND filename = 'clip.mp4'",
+                [&rec_media.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dehydrated_len, 0);
+        assert_eq!(stored_size, large_payload.len() as i64);
+
+        let local_len: i64 = conn
+            .query_row(
+                "SELECT length(data) FROM memory_attachments WHERE memory_id = ?1",
+                [&rec_local.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(local_len, local_payload.len() as i64);
+    }
+
+    // 2. Second push skips reading & uploading existing blobs lazily
+    let report2 = lm.sync_push(None, false).unwrap();
+    assert_eq!(report2.blobs_written, 0);
+    assert_eq!(report2.blobs_skipped_existing, 2);
+    assert_eq!(report2.blob_bytes_transferred, 0);
+
+    // 3. Restore into fresh vault & verify byte-for-byte rehydration + metadata + FTS5 + graph + immutability trigger
+    let restored_path = dir.path().join("restored.db");
+    let restored_lm = LightMem::open_at(&restored_path, cfg).unwrap();
+    let pull_rep = restored_lm.sync_pull(Some(&sync_target), true).unwrap();
+    assert!(pull_rep.restored_db);
+
+    let att_data = restored_lm
+        .storage()
+        .get_memory_attachments_data(&rec_media.id)
+        .unwrap();
+    assert_eq!(att_data.len(), 2);
+    let clip_entry = att_data
+        .iter()
+        .find(|(m, _)| m.filename == "clip.mp4")
+        .unwrap();
+    assert_eq!(clip_entry.1, large_payload);
+    let empty_entry = att_data
+        .iter()
+        .find(|(m, _)| m.filename == "empty_marker.txt")
+        .unwrap();
+    assert!(empty_entry.1.is_empty());
+
+    // Graph links (auto-wikilink + explicit link) & FTS search intact on restored vault
+    let links = restored_lm
+        .storage()
+        .get_links_for_memory(&rec_note.id)
+        .unwrap();
+    assert_eq!(links.len(), 2);
+    assert!(links
+        .iter()
+        .any(|l| l.target_id == rec_media.id && l.relation == "references"));
+    assert!(links
+        .iter()
+        .any(|l| l.target_id == rec_media.id && l.relation == "documents"));
+    let fts_hits = restored_lm
+        .storage()
+        .search_bm25(
+            "clip.mp4",
+            None,
+            Some(lightmem::MemoryStatus::Active),
+            None,
+            5,
+        )
+        .unwrap();
+    assert!(fts_hits.iter().any(|(id, _)| id == &rec_media.id));
+
+    // Hybrid vector + FTS5 recall intact on restored vault without re-embedding
+    let recall_hits = restored_lm
+        .recall("Recorded 4K demo session", None, None, 5, None)
+        .unwrap();
+    assert!(
+        recall_hits.iter().any(|r| r.memory.id == rec_media.id),
+        "Restored vault must preserve vectors and recall synced memories"
+    );
+
+    // Rehydration must leave trg_attachments_immutable enforced
+    {
+        let conn = rusqlite::Connection::open(&restored_path).unwrap();
+        let update_res = conn.execute(
+            "UPDATE memory_attachments SET data = x'00' WHERE memory_id = ?1",
+            [&rec_media.id],
+        );
+        assert!(
+            update_res.is_err(),
+            "Immutability trigger must still block direct UPDATE after CAS rehydration"
+        );
+    }
+}
+
+#[test]
+fn test_backup_only_snapshot_stays_self_contained_and_restores_without_blobs() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("backup_only_src.db");
+    let sync_target = dir.path().join("BackupOnlyTarget");
+
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+    let lm = LightMem::open_at(&db_path, cfg.clone()).unwrap();
+
+    let payload = vec![0x5Au8; 180_000];
+    let file = dir.path().join("recording.mp4");
+    fs::write(&file, &payload).unwrap();
+
+    let (rec, _, _) = lm
+        .remember_with_attachments_and_entities(
+            Some("Self-contained DB backup check"),
+            &[file],
+            false,
+            false,
+            None,
+            Some(MemoryType::Artifact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+
+    let report = lm.sync_push(None, true).unwrap();
+    assert_eq!(report.blobs_written, 0);
+    assert!(
+        report.snapshot_bytes >= payload.len() as u64,
+        "--backup-only snapshot must retain full attachment BLOBs"
+    );
+
+    // Delete empty blobs directory and verify full restore still works
+    let _ = fs::remove_dir_all(sync_target.join("blobs"));
+    let restored_path = dir.path().join("restored_backup_only.db");
+    let restored = LightMem::open_at(&restored_path, cfg).unwrap();
+    let pull = restored.sync_pull(Some(&sync_target), true).unwrap();
+    assert!(pull.restored_db);
+    let items = restored
+        .storage()
+        .get_memory_attachments_data(&rec.id)
+        .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].1, payload);
+}
+
+#[test]
+fn test_restore_aborts_atomically_on_missing_or_corrupt_cas_blob() {
+    let dir = tempdir().unwrap();
+    let src_db = dir.path().join("src.db");
+    let sync_target = dir.path().join("CAS");
+
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+    let src = LightMem::open_at(&src_db, cfg.clone()).unwrap();
+
+    let payload = vec![0x7Cu8; 50_000];
+    let file = dir.path().join("asset.bin");
+    fs::write(&file, &payload).unwrap();
+    let (rec, _, _) = src
+        .remember_with_attachments_and_entities(
+            Some("Important remote asset"),
+            &[file],
+            false,
+            false,
+            None,
+            Some(MemoryType::Artifact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+    src.sync_push(None, false).unwrap();
+
+    let blob_path = sync_target
+        .join("blobs")
+        .join(format!("{}.bin", rec.attachments[0].sha256));
+    assert!(blob_path.exists());
+
+    // Target vault already has valuable local memory
+    let dst_db = dir.path().join("dst.db");
+    let dst = LightMem::open_at(&dst_db, cfg).unwrap();
+    let keep_rec = dst
+        .remember(
+            "Pre-existing vault memory that must not be lost",
+            Some(MemoryType::Fact),
+            Some("Keep Me Safe".to_string()),
+            vec![],
+            Some(1.0),
+        )
+        .unwrap();
+
+    // Case 1: Corrupt blob in CAS -> restore must fail & keep dst intact
+    let mut corrupted = payload.clone();
+    corrupted[1234] ^= 0xFF;
+    fs::write(&blob_path, &corrupted).unwrap();
+    let corrupt_err = dst.sync_pull(Some(&sync_target), true).unwrap_err();
+    assert!(
+        corrupt_err.to_string().contains("SHA-256 mismatch"),
+        "Unexpected error for corrupt blob: {}",
+        corrupt_err
+    );
+    assert!(
+        dst.get(&keep_rec.id).unwrap().is_some(),
+        "Existing vault must stay intact if rehydration fails"
+    );
+
+    // Case 2: Missing blob in CAS -> restore must fail & keep dst intact
+    fs::remove_file(&blob_path).unwrap();
+    let missing_err = dst.sync_pull(Some(&sync_target), true).unwrap_err();
+    assert!(
+        missing_err.to_string().contains("Missing CAS blob"),
+        "Unexpected error for missing blob: {}",
+        missing_err
+    );
+    assert!(
+        dst.get(&keep_rec.id).unwrap().is_some(),
+        "Existing vault must stay intact when CAS blob is missing"
+    );
+}

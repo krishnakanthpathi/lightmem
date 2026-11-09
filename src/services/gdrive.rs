@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -105,16 +105,26 @@ fn extract_code_from_http_request(req_line: &str) -> Option<String> {
     None
 }
 
+const GDRIVE_API_BASE: &str = "https://www.googleapis.com";
+
+fn escape_drive_query(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 pub struct ProgressStream<R, F> {
     inner: R,
-    total: usize,
-    sent: usize,
-    last_reported: usize,
+    total: u64,
+    sent: u64,
+    last_reported: u64,
     on_progress: F,
 }
 
 impl<R: std::io::Read, F: FnMut(usize, usize)> ProgressStream<R, F> {
     pub fn new(inner: R, total: usize, on_progress: F) -> Self {
+        Self::new_u64(inner, total as u64, on_progress)
+    }
+
+    pub fn new_u64(inner: R, total: u64, on_progress: F) -> Self {
         Self {
             inner,
             total,
@@ -129,9 +139,12 @@ impl<R: std::io::Read, F: FnMut(usize, usize)> std::io::Read for ProgressStream<
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
         if n > 0 {
-            self.sent += n;
+            self.sent += n as u64;
             if self.sent - self.last_reported >= 64 * 1024 || self.sent == self.total {
-                (self.on_progress)(self.sent, self.total);
+                (self.on_progress)(
+                    self.sent.min(usize::MAX as u64) as usize,
+                    self.total.min(usize::MAX as u64) as usize,
+                );
                 self.last_reported = self.sent;
             }
         }
@@ -698,16 +711,40 @@ impl GoogleDriveClient {
 
     /// List all existing CAS blob filenames in the Google Drive blobs folder
     pub fn list_existing_blobs(&self, blobs_folder_id: &str) -> Result<HashSet<String>> {
+        Ok(self
+            .list_existing_blobs_with_ids(blobs_folder_id)?
+            .into_keys()
+            .collect())
+    }
+
+    /// List all existing CAS blob filenames mapped to their Google Drive file IDs.
+    pub fn list_existing_blobs_with_ids(
+        &self,
+        blobs_folder_id: &str,
+    ) -> Result<HashMap<String, String>> {
+        self.list_existing_blobs_with_ids_with_base(GDRIVE_API_BASE, blobs_folder_id)
+    }
+
+    pub(crate) fn list_existing_blobs_with_ids_with_base(
+        &self,
+        api_base: &str,
+        blobs_folder_id: &str,
+    ) -> Result<HashMap<String, String>> {
         let token = self.get_access_token()?;
         let auth_hdr = format!("Bearer {}", token);
+        let base = api_base.trim_end_matches('/');
 
-        let q = format!("'{}' in parents and trashed = false", blobs_folder_id);
-        let mut out = HashSet::new();
+        let q = format!(
+            "'{}' in parents and trashed = false",
+            escape_drive_query(blobs_folder_id)
+        );
+        let mut out = HashMap::new();
         let mut page_token: Option<String> = None;
 
         loop {
             let mut url = format!(
-                "https://www.googleapis.com/drive/v3/files?q={}&fields=nextPageToken,files(name)&pageSize=1000",
+                "{}/drive/v3/files?q={}&fields=nextPageToken,files(id,name)&pageSize=1000",
+                base,
                 url_encode(&q)
             );
             if let Some(ref pt) = page_token {
@@ -723,8 +760,11 @@ impl GoogleDriveClient {
             let val: serde_json::Value = resp.into_json()?;
             if let Some(files) = val.get("files").and_then(|f| f.as_array()) {
                 for file in files {
-                    if let Some(name) = file.get("name").and_then(|n| n.as_str()) {
-                        out.insert(name.to_string());
+                    if let (Some(name), Some(id)) = (
+                        file.get("name").and_then(|n| n.as_str()),
+                        file.get("id").and_then(|i| i.as_str()),
+                    ) {
+                        out.insert(name.to_string(), id.to_string());
                     }
                 }
             }
@@ -739,6 +779,97 @@ impl GoogleDriveClient {
         }
 
         Ok(out)
+    }
+
+    pub(crate) fn upload_multipart_reader_with_base<R: Read, F: FnMut(usize, usize)>(
+        &self,
+        api_base: &str,
+        name: &str,
+        parent_id: &str,
+        mime_type: &str,
+        payload_len: u64,
+        payload_reader: R,
+        on_progress: F,
+    ) -> Result<String> {
+        let token = self.get_access_token()?;
+        let auth_hdr = format!("Bearer {}", token);
+        let base = api_base.trim_end_matches('/');
+
+        let boundary = "-------314159265358979323846LightMemBoundary";
+        let metadata = serde_json::json!({
+            "name": name,
+            "parents": [parent_id]
+        });
+
+        let header = format!(
+            "--{}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n--{}\r\nContent-Type: {}\r\n\r\n",
+            boundary, metadata, boundary, mime_type
+        )
+        .into_bytes();
+        let footer = format!("\r\n--{}--\r\n", boundary).into_bytes();
+
+        let total_bytes = header.len() as u64 + payload_len + footer.len() as u64;
+        // Dynamic timeout: at least 600 seconds, plus time based on 20 KB/s transfer floor
+        let timeout_secs = std::cmp::max(600, (payload_len / (20 * 1024)) + 120);
+
+        let chained = Cursor::new(header)
+            .chain(payload_reader)
+            .chain(Cursor::new(footer));
+        let stream = ProgressStream::new_u64(chained, total_bytes, on_progress);
+
+        let url = format!("{}/upload/drive/v3/files?uploadType=multipart", base);
+        let resp = ureq::post(&url)
+            .set("Authorization", &auth_hdr)
+            .set(
+                "Content-Type",
+                &format!("multipart/related; boundary={}", boundary),
+            )
+            .set("Content-Length", &total_bytes.to_string())
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .send(stream)
+            .with_context(|| format!("Failed to upload '{}' to Google Drive", name))?;
+
+        let res_json: serde_json::Value = resp.into_json()?;
+        let id = res_json["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Upload response missing file ID"))?
+            .to_string();
+
+        Ok(id)
+    }
+
+    pub(crate) fn patch_media_reader_with_base<R: Read, F: FnMut(usize, usize)>(
+        &self,
+        api_base: &str,
+        file_id: &str,
+        name: &str,
+        mime_type: &str,
+        payload_len: u64,
+        payload_reader: R,
+        on_progress: F,
+    ) -> Result<String> {
+        let token = self.get_access_token()?;
+        let auth_hdr = format!("Bearer {}", token);
+        let base = api_base.trim_end_matches('/');
+
+        let update_url = format!(
+            "{}/upload/drive/v3/files/{}?uploadType=media",
+            base, file_id
+        );
+        let timeout_secs = std::cmp::max(600, (payload_len / (20 * 1024)) + 120);
+        let stream = ProgressStream::new_u64(payload_reader, payload_len, on_progress);
+
+        let update_resp = ureq::patch(&update_url)
+            .set("Authorization", &auth_hdr)
+            .set("Content-Type", mime_type)
+            .set("Content-Length", &payload_len.to_string())
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .send(stream)
+            .with_context(|| format!("Failed to update '{}' on Google Drive", name))?;
+
+        let update_json: serde_json::Value = update_resp.into_json()?;
+        let id = update_json["id"].as_str().unwrap_or(file_id).to_string();
+        Ok(id)
     }
 
     /// Upload a binary payload via multipart upload to a Google Drive folder
@@ -764,53 +895,71 @@ impl GoogleDriveClient {
     where
         F: FnMut(usize, usize),
     {
-        let token = self.get_access_token()?;
-        let auth_hdr = format!("Bearer {}", token);
+        self.upload_multipart_reader_with_base(
+            GDRIVE_API_BASE,
+            name,
+            parent_id,
+            mime_type,
+            data.len() as u64,
+            Cursor::new(data),
+            on_progress,
+        )
+    }
 
-        let boundary = "-------314159265358979323846LightMemBoundary";
-        let metadata = serde_json::json!({
-            "name": name,
-            "parents": [parent_id]
-        });
+    /// Stream a file directly from disk via multipart upload to a Google Drive folder
+    pub fn upload_file_multipart_from_path_with_progress<F>(
+        &self,
+        name: &str,
+        parent_id: &str,
+        mime_type: &str,
+        file_path: &Path,
+        on_progress: F,
+    ) -> Result<String>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.upload_file_multipart_from_path_with_base(
+            GDRIVE_API_BASE,
+            name,
+            parent_id,
+            mime_type,
+            file_path,
+            on_progress,
+        )
+    }
 
-        let mut body = Vec::new();
-        body.extend_from_slice(
+    pub(crate) fn upload_file_multipart_from_path_with_base<F>(
+        &self,
+        api_base: &str,
+        name: &str,
+        parent_id: &str,
+        mime_type: &str,
+        file_path: &Path,
+        on_progress: F,
+    ) -> Result<String>
+    where
+        F: FnMut(usize, usize),
+    {
+        let file = fs::File::open(file_path).with_context(|| {
             format!(
-                "--{}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{}\r\n--{}\r\nContent-Type: {}\r\n\r\n",
-                boundary,
-                metadata,
-                boundary,
-                mime_type
+                "Failed to open file for Drive upload: {}",
+                file_path.display()
             )
-            .as_bytes(),
-        );
-        body.extend_from_slice(data);
-        body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
-
-        let total_bytes = body.len();
-        // Dynamic timeout: at least 600 seconds, plus time based on 20 KB/s transfer floor
-        let timeout_secs = std::cmp::max(600, (data.len() as u64 / (20 * 1024)) + 120);
-        let stream = ProgressStream::new(std::io::Cursor::new(body), total_bytes, on_progress);
-
-        let url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
-        let resp = ureq::post(url)
-            .set("Authorization", &auth_hdr)
-            .set(
-                "Content-Type",
-                &format!("multipart/related; boundary={}", boundary),
-            )
-            .set("Content-Length", &total_bytes.to_string())
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .send(stream)
-            .with_context(|| format!("Failed to upload '{}' to Google Drive", name))?;
-
-        let res_json: serde_json::Value = resp.into_json()?;
-        let id = res_json["id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Upload response missing file ID"))?
-            .to_string();
-
-        Ok(id)
+        })?;
+        let payload_len = file
+            .metadata()
+            .with_context(|| format!("Failed to inspect size of {}", file_path.display()))?
+            .len();
+        let reader = BufReader::with_capacity(64 * 1024, file);
+        self.upload_multipart_reader_with_base(
+            api_base,
+            name,
+            parent_id,
+            mime_type,
+            payload_len,
+            reader,
+            on_progress,
+        )
     }
 
     /// Upload or update an existing file (e.g. vault_latest.db, manifest.json)
@@ -836,58 +985,85 @@ impl GoogleDriveClient {
     where
         F: FnMut(usize, usize),
     {
-        let token = self.get_access_token()?;
-        let auth_hdr = format!("Bearer {}", token);
-
-        // Check if file exists in parent
-        let q = format!(
-            "name = '{}' and '{}' in parents and trashed = false",
-            name, parent_id
-        );
-        let url = format!(
-            "https://www.googleapis.com/drive/v3/files?q={}&fields=files(id)",
-            url_encode(&q)
-        );
-
-        let resp = ureq::get(&url)
-            .set("Authorization", &auth_hdr)
-            .timeout(std::time::Duration::from_secs(15))
-            .call()
-            .with_context(|| format!("Failed to search Google Drive for '{}'", name))?;
-
-        let res_json: serde_json::Value = resp.into_json()?;
-        let existing_id = res_json
-            .get("files")
-            .and_then(|f| f.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|item| item.get("id"))
-            .and_then(|id| id.as_str())
-            .map(String::from);
-
-        if let Some(file_id) = existing_id {
-            // Update media in-place via PATCH
-            let update_url = format!(
-                "https://www.googleapis.com/upload/drive/v3/files/{}?uploadType=media",
-                file_id
-            );
-            let total_bytes = data.len();
-            let timeout_secs = std::cmp::max(600, (total_bytes as u64 / (20 * 1024)) + 120);
-            let stream = ProgressStream::new(std::io::Cursor::new(data), total_bytes, on_progress);
-
-            let update_resp = ureq::patch(&update_url)
-                .set("Authorization", &auth_hdr)
-                .set("Content-Type", mime_type)
-                .set("Content-Length", &total_bytes.to_string())
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .send(stream)
-                .with_context(|| format!("Failed to update '{}' on Google Drive", name))?;
-
-            let update_json: serde_json::Value = update_resp.into_json()?;
-            let id = update_json["id"].as_str().unwrap_or(&file_id).to_string();
-            Ok(id)
+        if let Some(file_id) = self.find_file_with_base(GDRIVE_API_BASE, name, parent_id)? {
+            self.patch_media_reader_with_base(
+                GDRIVE_API_BASE,
+                &file_id,
+                name,
+                mime_type,
+                data.len() as u64,
+                Cursor::new(data),
+                on_progress,
+            )
         } else {
-            // Upload new
             self.upload_file_multipart_with_progress(name, parent_id, mime_type, data, on_progress)
+        }
+    }
+
+    /// Stream an upload or in-place update directly from a file on disk without loading it into RAM.
+    pub fn upload_or_update_file_from_path_with_progress<F>(
+        &self,
+        name: &str,
+        parent_id: &str,
+        mime_type: &str,
+        file_path: &Path,
+        on_progress: F,
+    ) -> Result<String>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.upload_or_update_file_from_path_with_base(
+            GDRIVE_API_BASE,
+            name,
+            parent_id,
+            mime_type,
+            file_path,
+            on_progress,
+        )
+    }
+
+    pub(crate) fn upload_or_update_file_from_path_with_base<F>(
+        &self,
+        api_base: &str,
+        name: &str,
+        parent_id: &str,
+        mime_type: &str,
+        file_path: &Path,
+        on_progress: F,
+    ) -> Result<String>
+    where
+        F: FnMut(usize, usize),
+    {
+        if let Some(file_id) = self.find_file_with_base(api_base, name, parent_id)? {
+            let file = fs::File::open(file_path).with_context(|| {
+                format!(
+                    "Failed to open file for Drive update: {}",
+                    file_path.display()
+                )
+            })?;
+            let payload_len = file
+                .metadata()
+                .with_context(|| format!("Failed to inspect size of {}", file_path.display()))?
+                .len();
+            let reader = BufReader::with_capacity(64 * 1024, file);
+            self.patch_media_reader_with_base(
+                api_base,
+                &file_id,
+                name,
+                mime_type,
+                payload_len,
+                reader,
+                on_progress,
+            )
+        } else {
+            self.upload_file_multipart_from_path_with_base(
+                api_base,
+                name,
+                parent_id,
+                mime_type,
+                file_path,
+                on_progress,
+            )
         }
     }
 
@@ -895,14 +1071,11 @@ impl GoogleDriveClient {
     pub fn download_file(&self, file_id: &str) -> Result<Vec<u8>> {
         let token = self.get_access_token()?;
         let auth_hdr = format!("Bearer {}", token);
-        let url = format!(
-            "https://www.googleapis.com/drive/v3/files/{}?alt=media",
-            file_id
-        );
+        let url = format!("{}/drive/v3/files/{}?alt=media", GDRIVE_API_BASE, file_id);
 
         let resp = ureq::get(&url)
             .set("Authorization", &auth_hdr)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(300))
             .call()
             .with_context(|| format!("Failed to download file '{}' from Google Drive", file_id))?;
 
@@ -911,16 +1084,65 @@ impl GoogleDriveClient {
         Ok(bytes)
     }
 
-    /// Search for a file by name inside a parent folder
-    pub fn find_file(&self, name: &str, parent_id: &str) -> Result<Option<String>> {
+    /// Stream a Google Drive file download directly to `dest_path` without buffering the payload in RAM.
+    pub fn download_file_to_path(&self, file_id: &str, dest_path: &Path) -> Result<u64> {
+        self.download_file_to_path_with_base(GDRIVE_API_BASE, file_id, dest_path)
+    }
+
+    pub(crate) fn download_file_to_path_with_base(
+        &self,
+        api_base: &str,
+        file_id: &str,
+        dest_path: &Path,
+    ) -> Result<u64> {
         let token = self.get_access_token()?;
         let auth_hdr = format!("Bearer {}", token);
+        let base = api_base.trim_end_matches('/');
+        let url = format!("{}/drive/v3/files/{}?alt=media", base, file_id);
+
+        let resp = ureq::get(&url)
+            .set("Authorization", &auth_hdr)
+            .timeout(std::time::Duration::from_secs(1800))
+            .call()
+            .with_context(|| format!("Failed to download file '{}' from Google Drive", file_id))?;
+
+        let mut reader = resp.into_reader();
+        let file = fs::File::create(dest_path)
+            .with_context(|| format!("Failed to create download target {}", dest_path.display()))?;
+        let mut writer = BufWriter::with_capacity(64 * 1024, file);
+        let written = std::io::copy(&mut reader, &mut writer).with_context(|| {
+            format!(
+                "Failed to stream Google Drive file '{}' to {}",
+                file_id,
+                dest_path.display()
+            )
+        })?;
+        writer.flush()?;
+        Ok(written)
+    }
+
+    /// Search for a file by name inside a parent folder
+    pub fn find_file(&self, name: &str, parent_id: &str) -> Result<Option<String>> {
+        self.find_file_with_base(GDRIVE_API_BASE, name, parent_id)
+    }
+
+    pub(crate) fn find_file_with_base(
+        &self,
+        api_base: &str,
+        name: &str,
+        parent_id: &str,
+    ) -> Result<Option<String>> {
+        let token = self.get_access_token()?;
+        let auth_hdr = format!("Bearer {}", token);
+        let base = api_base.trim_end_matches('/');
         let q = format!(
             "name = '{}' and '{}' in parents and trashed = false",
-            name, parent_id
+            escape_drive_query(name),
+            escape_drive_query(parent_id)
         );
         let url = format!(
-            "https://www.googleapis.com/drive/v3/files?q={}&fields=files(id)",
+            "{}/drive/v3/files?q={}&fields=files(id)",
+            base,
             url_encode(&q)
         );
 
@@ -940,5 +1162,240 @@ impl GoogleDriveClient {
             .map(String::from);
 
         Ok(file_id)
+    }
+}
+
+#[cfg(test)]
+mod streaming_http_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    fn mock_client() -> GoogleDriveClient {
+        GoogleDriveClient {
+            client_id: "test-client".to_string(),
+            client_secret: "test-secret".to_string(),
+            refresh_token: "test-refresh".to_string(),
+            user_email: "test@example.com".to_string(),
+            token_cache: Mutex::new(Some((
+                "ya29.mock-access-token".to_string(),
+                Utc::now() + Duration::hours(1),
+            ))),
+        }
+    }
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        method_path: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let method_path = request_line
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut headers = HashMap::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = trimmed.split_once(':') {
+                let key = k.trim().to_ascii_lowercase();
+                let val = v.trim().to_string();
+                if key == "content-length" {
+                    content_length = val.parse::<usize>().unwrap_or(0);
+                }
+                headers.insert(key, val);
+            }
+        }
+
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut body).unwrap();
+        }
+        CapturedRequest {
+            method_path,
+            headers,
+            body,
+        }
+    }
+
+    #[test]
+    fn test_stream_multipart_and_patch_from_path_with_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("snapshot.db");
+        let payload: Vec<u8> = (0..150_000).map(|i| ((i * 17 + 3) % 251) as u8).collect();
+        fs::write(&src_path, &payload).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let api_base = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            let mut captured = Vec::new();
+            for idx in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let req = read_http_request(&mut stream);
+                let resp_json = if req.method_path.starts_with("GET /drive/v3/files") {
+                    if idx == 2 {
+                        r#"{"files":[{"id":"existing-db-id"}]}"#.to_string()
+                    } else {
+                        r#"{"files":[]}"#.to_string()
+                    }
+                } else if req.method_path.starts_with("PATCH ") {
+                    r#"{"id":"existing-db-id"}"#.to_string()
+                } else {
+                    r#"{"id":"created-db-id"}"#.to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    resp_json.len(),
+                    resp_json
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                captured.push(req);
+            }
+            captured
+        });
+
+        let client = mock_client();
+
+        // 1. Multipart upload (not yet on Drive: GET -> empty -> POST multipart)
+        let mut create_progress = Vec::new();
+        let created_id = client
+            .upload_or_update_file_from_path_with_base(
+                &api_base,
+                "vault_latest.db",
+                "snap-folder",
+                "application/x-sqlite3",
+                &src_path,
+                |sent, total| create_progress.push((sent, total)),
+            )
+            .unwrap();
+        assert_eq!(created_id, "created-db-id");
+        assert!(create_progress.len() >= 2);
+        let last_create = *create_progress.last().unwrap();
+        assert_eq!(last_create.0, last_create.1);
+        assert!(last_create.1 > payload.len());
+
+        // 2. Patch update (exists on Drive: GET -> id -> PATCH media)
+        let mut patch_progress = Vec::new();
+        let patched_id = client
+            .upload_or_update_file_from_path_with_base(
+                &api_base,
+                "vault_latest.db",
+                "snap-folder",
+                "application/x-sqlite3",
+                &src_path,
+                |sent, total| patch_progress.push((sent, total)),
+            )
+            .unwrap();
+        assert_eq!(patched_id, "existing-db-id");
+        assert_eq!(
+            patch_progress.last().copied(),
+            Some((payload.len(), payload.len()))
+        );
+
+        let captured = handle.join().unwrap();
+        assert_eq!(captured.len(), 4);
+        // Request 1: POST multipart containing verbatim payload
+        assert_eq!(
+            captured[1].method_path,
+            "POST /upload/drive/v3/files?uploadType=multipart"
+        );
+        assert_eq!(
+            captured[1].headers.get("content-length").unwrap(),
+            &captured[1].body.len().to_string()
+        );
+        assert!(captured[1]
+            .body
+            .windows(payload.len())
+            .any(|w| w == payload.as_slice()));
+
+        // Request 3: PATCH media equals exact payload bytes
+        assert_eq!(
+            captured[3].method_path,
+            "PATCH /upload/drive/v3/files/existing-db-id?uploadType=media"
+        );
+        assert_eq!(
+            captured[3].headers.get("content-length").unwrap(),
+            &payload.len().to_string()
+        );
+        assert_eq!(captured[3].body, payload);
+    }
+
+    #[test]
+    fn test_list_blobs_paginates_and_download_streams_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest_path = dir.path().join("downloaded.bin");
+        let payload: Vec<u8> = (0..140_000).map(|i| ((i * 29 + 11) % 251) as u8).collect();
+        let payload_clone = payload.clone();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let api_base = format!("http://{}", addr);
+
+        let handle = std::thread::spawn(move || {
+            for idx in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let req = read_http_request(&mut stream);
+                if idx == 0 {
+                    assert!(!req.method_path.contains("pageToken"));
+                    let body =
+                        r#"{"nextPageToken":"page2","files":[{"id":"id-a","name":"shaA.png"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(resp.as_bytes()).unwrap();
+                } else if idx == 1 {
+                    assert!(req.method_path.contains("pageToken=page2"));
+                    let body = r#"{"files":[{"id":"id-b","name":"shaB.mp4"}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    stream.write_all(resp.as_bytes()).unwrap();
+                } else {
+                    assert_eq!(req.method_path, "GET /drive/v3/files/id-b?alt=media");
+                    let hdr = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload_clone.len()
+                    );
+                    stream.write_all(hdr.as_bytes()).unwrap();
+                    stream.write_all(&payload_clone).unwrap();
+                }
+                stream.flush().unwrap();
+            }
+        });
+
+        let client = mock_client();
+        let map = client
+            .list_existing_blobs_with_ids_with_base(&api_base, "blobs-dir")
+            .unwrap();
+        assert_eq!(map.get("shaA.png").map(String::as_str), Some("id-a"));
+        assert_eq!(map.get("shaB.mp4").map(String::as_str), Some("id-b"));
+
+        let written = client
+            .download_file_to_path_with_base(&api_base, "id-b", &dest_path)
+            .unwrap();
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(fs::read(&dest_path).unwrap(), payload);
+
+        handle.join().unwrap();
     }
 }
