@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
 $Branch = "main"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.6.0" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.6.1" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
 $Target = "$Arch-pc-windows-msvc"

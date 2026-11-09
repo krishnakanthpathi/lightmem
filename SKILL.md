@@ -148,6 +148,17 @@ lmem connect cursor                                # Deploy to Cursor (.cursor/r
 lmem connect all                                   # Deploy to all supported agent platforms
 lmem connect --list                                # Inspect detected agent platforms on the system
 lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
+
+# 11. Vault Dashboard, Identity Topology & Cloud Sync
+lmem status                                        # Visual dashboard of all managed vaults, active connections, and storage
+lmem vaults                                        # Alias for lmem status (or lmem identity status)
+lmem status --json                                 # Machine-readable vault and connection topology
+lmem auth login                                    # Authenticate with Google Drive via OAuth2 loopback (alias: lmem login)
+lmem auth status                                   # Inspect authenticated Google Drive account and storage quota
+lmem sync                                          # Synchronize CAS media blobs & atomic vector snapshots
+lmem sync -d                                       # Start detached background sync daemon (5-minute cycle)
+lmem sync --status                                 # Check running background sync daemon status and logs
+lmem sync --stop                                   # Cleanly terminate the background sync daemon
 ```
 
 ---
@@ -279,7 +290,7 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 
 When a harness supplies a registered connection, pass `--connection <id>` on every memory command (or set `LIGHTMEM_CONNECTION`). Inspect `lmem --connection <id> context --json` before writing. Use the selected user/project scope for shared decisions, `--scope user` for personal preferences, and `--scope agent` for dedicated agent context. Each command uses one vault; query other scopes explicitly when their context is needed. Use `--session <id>` when the harness supplies a session ID. Never combine a connection with `--db`, `LIGHTMEM_DB`, or `--global`.
 
-Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` to inspect bindings. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.
+Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` or `lmem status` (`lmem vaults`, `lmem identity status`) to inspect bindings and vault storage telemetry. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.
 
 ---
 

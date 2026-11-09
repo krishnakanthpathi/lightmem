@@ -12,7 +12,8 @@ pub use services::{bundle, connect, embeddings, exporter, importer, observer, re
 // Primary SDK Re-exports
 pub use controllers::{LightMem, MemoryController};
 pub use models::identity::{
-    IdentityEntry, IdentityRegistry, MemoryContext, MemoryScope, ResolvedConnection,
+    inspect_vault_db, DefaultVaultStatus, IdentityEntry, IdentityRegistry, MemoryContext,
+    MemoryScope, ResolvedConnection, VaultConnectionStatus, VaultStatusOverview,
 };
 pub use models::{
     compute_sha256_hex, decode_base64, detect_memory_conflict,

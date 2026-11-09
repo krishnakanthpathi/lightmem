@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Add unified visual memory vault & connection dashboard (`lmem status`, `lmem vaults`, and `lmem identity status`) displaying default vault path, active/total memory telemetry, and registered harness connections with physical database paths.
+- Add `--json` output support to `lmem status` and `lmem identity status` for machine-readable vault topologies.
+- Add `vault_status()` method to Python SDK `LightMem` client returning structured vault status overview.
+
 ## 0.6.0
 
 - Add background sync daemon support via `lmem sync -d` / `--daemon`, with process tracking (`~/.lightmem/sync_daemon.pid`), status inspection (`lmem sync --status`), and graceful termination (`lmem sync --stop`).

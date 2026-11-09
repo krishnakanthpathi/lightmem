@@ -183,6 +183,8 @@ lmem identity connection-add codex --user alice --agent coding --harness codex -
 lmem --connection agy --session chat-123 remember "Decision: use SQLite WAL" -t decision
 lmem --connection codex recall "database decision"
 lmem --connection codex context --json
+lmem status                          # Visual dashboard of all managed vaults, active tools, and storage
+lmem vaults                          # Alias for lmem status (or lmem identity status)
 lmem --connection codex --scope agent remember "Current debugging checkpoint"
 lmem --connection agy connect
 lmem --connection agy connect --mcp
@@ -220,7 +222,7 @@ print(saved.context)
 print(memory.context())
 ```
 
-Python also exposes `register_harness`, `identities`, `connection_info`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
+Python also exposes `register_harness`, `identities`, `connection_info`, `vault_status`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
 
 ---
 

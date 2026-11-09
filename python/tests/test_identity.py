@@ -12,6 +12,14 @@ PYTHON_SRC = REPO_ROOT / "python" / "src"
 if str(PYTHON_SRC) not in sys.path:
     sys.path.insert(0, str(PYTHON_SRC))
 
+DEBUG_BIN = REPO_ROOT / "target" / "debug" / ("lmem.exe" if os.name == "nt" else "lmem")
+RELEASE_BIN = REPO_ROOT / "target" / "release" / ("lmem.exe" if os.name == "nt" else "lmem")
+if "LMEM_BINARY_PATH" not in os.environ:
+    if DEBUG_BIN.is_file():
+        os.environ["LMEM_BINARY_PATH"] = str(DEBUG_BIN)
+    elif RELEASE_BIN.is_file():
+        os.environ["LMEM_BINARY_PATH"] = str(RELEASE_BIN)
+
 from lmem import LightMem
 from lmem.binary import ensure_binary_downloaded
 
@@ -50,6 +58,8 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(agy.context()["db_path"], codex.context()["db_path"])
         self.assertEqual(self.admin.connection_info("agy")["user_id"], "alice")
         self.assertEqual(len(self.admin.identities()), 2)
+        vstatus = self.admin.vault_status()
+        self.assertEqual(len(vstatus["connections"]), 2)
 
     def test_custom_harness_binding(self):
         target = self.root / "custom-skills"
@@ -65,7 +75,7 @@ class IdentityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 ensure_binary_downloaded()
             self.assertEqual(download.call_count, 1)
-            self.assertIn("v0.6.0", download.call_args.args[0])
+            self.assertIn("v0.6.1", download.call_args.args[0])
 
     def test_invalid_identity_and_ambiguous_options(self):
         with self.assertRaises(RuntimeError):

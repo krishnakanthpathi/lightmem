@@ -52,6 +52,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// View all managed memory vaults, active connections, and storage telemetry
+    #[command(visible_alias = "vaults")]
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Register and inspect users, agents, harnesses, and named connections
     Identity {
         #[command(subcommand)]
@@ -905,19 +911,29 @@ enum IdentityCommand {
     Show {
         id: String,
     },
+    /// View all managed memory vaults, active connections, and storage telemetry
+    Status,
 }
 
-fn run_identity(action: &IdentityCommand) -> Result<()> {
+fn run_identity(action: &IdentityCommand, json: bool, default_db: PathBuf) -> Result<()> {
     let registry = lightmem::IdentityRegistry::open_default()?;
-    let value = match action {
+    match action {
+        IdentityCommand::Status => {
+            let overview = registry.status_overview(default_db)?;
+            CliView::render_vault_status_overview(&overview, json)?;
+        }
         IdentityCommand::UserAdd { id, name } => {
-            serde_json::to_value(registry.add_user(id, name.as_deref())?)?
+            let value = serde_json::to_value(registry.add_user(id, name.as_deref())?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         IdentityCommand::AgentAdd { id, user, name } => {
-            serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?
+            let value = serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         IdentityCommand::HarnessAdd { id, path, name } => {
-            serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?
+            let value =
+                serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         IdentityCommand::ConnectionAdd {
             id,
@@ -926,18 +942,26 @@ fn run_identity(action: &IdentityCommand) -> Result<()> {
             harness,
             project,
             memory_scope,
-        } => serde_json::to_value(registry.add_connection(
-            id,
-            user,
-            agent,
-            harness,
-            project.clone(),
-            memory_scope.clone(),
-        )?)?,
-        IdentityCommand::List { kind } => registry.list(kind)?,
-        IdentityCommand::Show { id } => serde_json::to_value(registry.resolve(id, None, None)?)?,
-    };
-    println!("{}", serde_json::to_string_pretty(&value)?);
+        } => {
+            let value = serde_json::to_value(registry.add_connection(
+                id,
+                user,
+                agent,
+                harness,
+                project.clone(),
+                memory_scope.clone(),
+            )?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        IdentityCommand::List { kind } => {
+            let value = registry.list(kind)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        IdentityCommand::Show { id } => {
+            let value = serde_json::to_value(registry.resolve(id, None, None)?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+    }
     Ok(())
 }
 
@@ -1048,18 +1072,30 @@ fn main() -> Result<()> {
     if cli.version {
         return CliView::render_version(cli.json);
     }
-    if let Some(Commands::Identity { action, .. }) = &cli.command {
-        return run_identity(action);
+    let env_db = std::env::var("LIGHTMEM_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    let default_db = cli
+        .db
+        .as_deref()
+        .map(Path::to_path_buf)
+        .or_else(|| env_db.clone())
+        .unwrap_or_else(|| LightMemConfig::resolve_db_path(cli.global));
+
+    if let Some(Commands::Identity { action, json }) = &cli.command {
+        return run_identity(action, *json || cli.json, default_db);
+    }
+    if let Some(Commands::Status { json }) = &cli.command {
+        let registry = lightmem::IdentityRegistry::open_default()?;
+        let overview = registry.status_overview(default_db)?;
+        return CliView::render_vault_status_overview(&overview, *json || cli.json);
     }
     let connection_id = cli.connection.clone().or_else(|| {
         std::env::var("LIGHTMEM_CONNECTION")
             .ok()
             .filter(|v| !v.trim().is_empty())
     });
-    let env_db = std::env::var("LIGHTMEM_DB")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from);
     anyhow::ensure!(
         connection_id.is_some() || (cli.scope.is_none() && cli.session.is_none()),
         "--scope and --session require --connection"
@@ -1099,7 +1135,7 @@ fn main() -> Result<()> {
     };
 
     match command {
-        Commands::Identity { .. } => unreachable!(),
+        Commands::Identity { .. } | Commands::Status { .. } => unreachable!(),
         Commands::Context { .. } => {
             let value = match connection {
                 Some(connection) => serde_json::to_value(connection)?,
