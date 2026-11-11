@@ -276,6 +276,10 @@ impl McpServer {
                         "provenance": {
                             "type": "string",
                             "description": "Origin or verification level (e.g. 'explicit_statement', 'validated', 'observed')"
+                        },
+                        "local": {
+                            "type": "boolean",
+                            "description": "Air-gap memory strictly to local machine; exempt from cloud sync and remote backup (default: false)"
                         }
                     }
                 }
@@ -412,6 +416,10 @@ impl McpServer {
                         "preset": {
                             "type": "string",
                             "description": "Apply setup preset: 'local', 'ollama-cloud', or 'ollama-local'"
+                        },
+                        "offline": {
+                            "type": "boolean",
+                            "description": "Pause or resume cloud and automatic sync (true = offline, false = online)"
                         }
                     }
                 }
@@ -459,7 +467,7 @@ impl McpServer {
                 }
             }
         }
-        let lm = match &connection {
+        let mut lm = match &connection {
             Some(connection) => LightMem::open_resolved(connection)?,
             None => self.open_controller()?,
         };
@@ -532,6 +540,7 @@ impl McpServer {
                     .map(|s| s.to_string());
                 let local = args.get("local").and_then(|v| v.as_bool()).unwrap_or(false);
 
+                lm.sync_before_write_inline(local);
                 let (record, conflicts, warning) = lm.remember_with_attachments_and_entities(
                     content,
                     &files,
@@ -547,6 +556,7 @@ impl McpServer {
                     provenance,
                     local,
                 )?;
+                lm.sync_after_write_inline(local);
 
                 let mut resp_map = serde_json::Map::new();
                 resp_map.insert("status".to_string(), json!("stored"));
@@ -705,7 +715,13 @@ impl McpServer {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
+                if resolve {
+                    lm.sync_before_write_inline(false);
+                }
                 let conflicts = lm.find_conflicts_with_options(resolve, min_sim, None)?;
+                if resolve && !conflicts.is_empty() {
+                    lm.sync_after_write_inline(false);
+                }
                 Ok(json!({
                     "threshold": min_sim,
                     "resolved": resolve,
@@ -738,6 +754,10 @@ impl McpServer {
                     cfg.apply_preset(preset)?;
                     updated = true;
                 }
+                if let Some(off) = args.get("offline").and_then(|v| v.as_bool()) {
+                    cfg.sync_offline = Some(off);
+                    updated = true;
+                }
 
                 if updated {
                     cfg.save()?;
@@ -749,6 +769,7 @@ impl McpServer {
                     "onnx_model": cfg.onnx_model,
                     "reranker": cfg.reranker,
                     "ollama_url": cfg.ollama_url,
+                    "sync_offline": cfg.is_offline(),
                     "active_db": lm.db_path().display().to_string()
                 }))
             }
@@ -760,7 +781,11 @@ impl McpServer {
                     .context("Missing required parameter: id")?;
                 let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
 
+                lm.sync_before_write_inline(false);
                 let forgotten = lm.forget(id, hard)?;
+                if forgotten {
+                    lm.sync_after_write_inline(false);
+                }
                 Ok(json!({
                     "id": id,
                     "forgotten": forgotten,

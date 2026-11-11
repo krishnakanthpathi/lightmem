@@ -15,13 +15,16 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 pub struct LightMem {
     storage: Arc<Storage>,
-    embedder: OnceLock<Arc<dyn EmbeddingProvider>>,
+    embedder: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     config: LightMemConfig,
     embedding_identity: String,
+    config_from_disk: bool,
+    is_global_default: bool,
+    explicit_db_or_connection: bool,
 }
 
 pub type MemoryController = LightMem;
@@ -31,19 +34,28 @@ impl LightMem {
     pub fn open_default(force_global: bool) -> Result<Self> {
         let config = LightMemConfig::try_load()?;
         let db_path = LightMemConfig::resolve_db_path(force_global);
-        Self::open_at(&db_path, config)
+        let is_global_default = db_path == LightMemConfig::global_db_path();
+        let mut ctrl = Self::open_at(&db_path, config)?;
+        ctrl.config_from_disk = true;
+        ctrl.is_global_default = is_global_default;
+        ctrl.explicit_db_or_connection = false;
+        Ok(ctrl)
     }
 
     /// Open database at a specific path (embedding model is loaded lazily on first use)
     pub fn open_at(db_path: &Path, config: LightMemConfig) -> Result<Self> {
         let embedding_identity = config.embedding_identity()?;
+        let is_global_default = db_path == LightMemConfig::global_db_path();
         let storage = Storage::open(db_path)?;
 
         Ok(Self {
             storage: Arc::new(storage),
-            embedder: OnceLock::new(),
+            embedder: Mutex::new(None),
             config,
             embedding_identity,
+            config_from_disk: false,
+            is_global_default,
+            explicit_db_or_connection: true,
         })
     }
 
@@ -64,15 +76,38 @@ impl LightMem {
         let storage = Storage::open(&connection.db_path)?.with_context(connection.context.clone());
         Ok(Self {
             storage: Arc::new(storage),
-            embedder: OnceLock::new(),
+            embedder: Mutex::new(None),
             config,
             embedding_identity,
+            config_from_disk: true,
+            is_global_default: false,
+            explicit_db_or_connection: true,
         })
     }
 
-    fn embedder(&self) -> Result<&Arc<dyn EmbeddingProvider>> {
-        if let Some(emb) = self.embedder.get() {
-            return Ok(emb);
+    /// Override explicit/default vault sync context flags.
+    pub fn with_sync_context(
+        mut self,
+        is_global_default: bool,
+        explicit_db_or_connection: bool,
+    ) -> Self {
+        self.is_global_default = is_global_default;
+        self.explicit_db_or_connection = explicit_db_or_connection;
+        self
+    }
+
+    /// Mark whether this controller loaded its config from disk (`config.json`).
+    pub fn with_config_from_disk(mut self, config_from_disk: bool) -> Self {
+        self.config_from_disk = config_from_disk;
+        self
+    }
+
+    fn embedder(&self) -> Result<Arc<dyn EmbeddingProvider>> {
+        {
+            let guard = self.embedder.lock().unwrap();
+            if let Some(ref emb) = *guard {
+                return Ok(Arc::clone(emb));
+            }
         }
 
         let created: Arc<dyn EmbeddingProvider> = match self.config.backend.as_str() {
@@ -94,13 +129,72 @@ impl LightMem {
             other => anyhow::bail!("Unknown embedding backend: {}", other),
         };
 
-        let _ = self.embedder.set(created);
-        Ok(self.embedder.get().unwrap())
+        let mut guard = self.embedder.lock().unwrap();
+        let cached = guard.get_or_insert_with(|| created);
+        Ok(Arc::clone(cached))
     }
 
     pub fn embedding_migration_needed(&self) -> Result<bool> {
-        Ok(self.storage.count_memories(None, None, None)? > 0
-            && self.storage.embedding_identity()?.as_deref() != Some(&self.embedding_identity))
+        let count = self.storage.count_memories(None, None, None)?;
+        if count == 0 {
+            return Ok(false);
+        }
+        let compatible = self
+            .storage
+            .embedding_identity()?
+            .as_deref()
+            .map(|stored| {
+                LightMemConfig::embedding_identities_compatible(stored, &self.embedding_identity)
+            })
+            .unwrap_or(false);
+        Ok(!compatible)
+    }
+
+    /// Adopt synced portable configuration fields if compatible with the local vault.
+    pub fn apply_synced_portable_config(
+        &mut self,
+        synced: &crate::models::PortableSyncConfig,
+    ) -> bool {
+        let mut candidate = self.config.clone();
+        if !candidate.apply_portable_sync_config(synced) {
+            return false;
+        }
+        let Ok(candidate_emb) = candidate.embedding_identity() else {
+            return false;
+        };
+
+        let count = self.storage.count_memories(None, None, None).unwrap_or(0);
+        if count > 0 {
+            if let Ok(Some(stored)) = self.storage.embedding_identity() {
+                if !LightMemConfig::embedding_identities_compatible(&stored, &candidate_emb) {
+                    // Vault has incompatible vectors already; only adopt compatible reranker if current embedding stays intact.
+                    let norm_reranker = LightMemConfig::normalize_reranker(&synced.reranker, None);
+                    if LightMemConfig::normalize_reranker(&self.config.reranker, None)
+                        != norm_reranker
+                    {
+                        self.config.reranker = norm_reranker;
+                        if self.config_from_disk
+                            && self.is_global_default
+                            && !self.explicit_db_or_connection
+                        {
+                            let _ = self.config.save();
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        }
+
+        if !self.config.apply_portable_sync_config(synced) {
+            return false;
+        }
+        self.embedding_identity = candidate_emb;
+        *self.embedder.lock().unwrap() = None;
+        if self.config_from_disk && self.is_global_default && !self.explicit_db_or_connection {
+            let _ = self.config.save();
+        }
+        true
     }
 
     pub fn stored_embedding_identity(&self) -> Result<Option<String>> {
@@ -1591,13 +1685,28 @@ impl LightMem {
         )
     }
 
-    /// Pull / inspect remote snapshot or restore database from sync target
+    /// Pull / inspect remote snapshot or merge/restore database from sync target
     pub fn sync_pull(
         &self,
         custom_target: Option<&Path>,
         restore_db: bool,
     ) -> Result<crate::services::SyncPullReport> {
         crate::services::SyncService::pull(&self.storage, &self.config, custom_target, restore_db)
+    }
+
+    /// Pull & merge/restore database from sync target and adopt synced portable config if compatible
+    pub fn sync_pull_and_adopt(
+        &mut self,
+        custom_target: Option<&Path>,
+        restore_db: bool,
+    ) -> Result<(crate::services::SyncPullReport, bool)> {
+        let report = self.sync_pull(custom_target, restore_db)?;
+        let config_adopted = if let Some(ref portable) = report.remote_portable_config {
+            self.apply_synced_portable_config(portable)
+        } else {
+            false
+        };
+        Ok((report, config_adopted))
     }
 
     /// Retrieve sync status, blob metrics, and snapshot information
@@ -1614,5 +1723,61 @@ impl LightMem {
         memory: &MemoryRecord,
     ) -> Result<Option<crate::services::SyncReport>> {
         crate::services::SyncService::sync_memory_inline(&self.storage, &self.config, memory)
+    }
+
+    /// Inline pre-write pull: if auto-sync applies and remote is ahead, pull & merge updates
+    /// and adopt synced portable config before mutating the vault. Warns on stderr on error.
+    pub fn sync_before_write_inline(
+        &mut self,
+        local_write: bool,
+    ) -> Option<crate::services::InlinePullOutcome> {
+        if local_write {
+            return None;
+        }
+        match crate::services::SyncService::pull_if_remote_ahead(
+            &self.storage,
+            &self.config,
+            self.is_global_default,
+            self.explicit_db_or_connection,
+        ) {
+            Ok(outcome) => {
+                if let Some(ref cfg) = outcome.remote_portable_config {
+                    self.apply_synced_portable_config(cfg);
+                }
+                if outcome.pulled {
+                    Some(outcome)
+                } else {
+                    None
+                }
+            }
+            Err(err) => {
+                eprintln!("◈ Sync notice (pre-write pull skipped): {:#}", err);
+                None
+            }
+        }
+    }
+
+    /// Inline post-write push: pushes CAS blobs and compressed SQLite snapshot when auto-sync applies.
+    /// Warns on stderr without failing the local mutation if cloud is unreachable.
+    pub fn sync_after_write_inline(
+        &self,
+        local_write: bool,
+    ) -> Option<crate::services::SyncReport> {
+        if local_write {
+            return None;
+        }
+        match crate::services::SyncService::push_inline_if_enabled_for_vault(
+            &self.storage,
+            &self.config,
+            local_write,
+            self.is_global_default,
+            self.explicit_db_or_connection,
+        ) {
+            Ok(report) => report,
+            Err(err) => {
+                eprintln!("◈ Sync notice (post-write push deferred): {:#}", err);
+                None
+            }
+        }
     }
 }

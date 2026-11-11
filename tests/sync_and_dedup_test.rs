@@ -1,5 +1,7 @@
-use lightmem::{LightMem, LightMemConfig, MemoryType};
+use lightmem::{LightMem, LightMemConfig, MemoryRecord, MemoryStatus, MemoryType, Storage};
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 use tempfile::tempdir;
 
 fn hash_config() -> LightMemConfig {
@@ -12,6 +14,27 @@ fn hash_config() -> LightMemConfig {
         reranker: "top1".to_string(),
         ..Default::default()
     }
+}
+
+fn extract_memories_db_from_zip(zip_path: &Path, dest_db_path: &Path) {
+    let file = fs::File::open(zip_path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut found_idx = None;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).unwrap();
+        if entry
+            .name()
+            .map(|n| n.as_ref() == "memories.db")
+            .unwrap_or(false)
+        {
+            found_idx = Some(i);
+            break;
+        }
+    }
+    let idx = found_idx.expect("vault_latest.db.zip must contain memories.db entry");
+    let mut entry = archive.by_index(idx).unwrap();
+    let mut out = fs::File::create(dest_db_path).unwrap();
+    std::io::copy(&mut entry, &mut out).unwrap();
 }
 
 #[test]
@@ -245,10 +268,14 @@ fn test_cas_cloud_sync_and_vector_snapshots() {
         "Local-only blob must NEVER be written to CAS target"
     );
 
-    // Verify vector snapshot was created
-    let latest_db = snapshots_dir.join("vault_latest.db");
-    assert!(latest_db.exists(), "vault_latest.db snapshot must exist");
+    // Verify compressed vector snapshot was created
+    let latest_zip = snapshots_dir.join("vault_latest.db.zip");
+    assert!(
+        latest_zip.exists(),
+        "vault_latest.db.zip snapshot must exist"
+    );
     assert!(report.snapshot_bytes > 0);
+    assert!(report.snapshot_uncompressed_bytes >= report.snapshot_bytes);
 
     // 4. Test Deduplication on secondary sync (0 blobs re-written)
     let report2 = lm.sync_push(None, false).unwrap();
@@ -418,17 +445,22 @@ fn test_slim_snapshot_dehydrates_cas_blobs_and_rehydrates_on_restore() {
     assert_eq!(report1.blobs_written, 2); // clip.mp4 + empty_marker.txt
     assert_eq!(report1.local_only_memories, 1);
 
-    let latest_db = sync_target.join("snapshots").join("vault_latest.db");
-    assert!(latest_db.exists());
+    let latest_zip = sync_target.join("snapshots").join("vault_latest.db.zip");
     assert!(
-        report1.snapshot_bytes < 250_000,
-        "Slim CAS snapshot must dehydrate the 600 KB video BLOB; got {} bytes",
-        report1.snapshot_bytes
+        latest_zip.exists(),
+        "vault_latest.db.zip snapshot must exist"
+    );
+    assert!(
+        report1.snapshot_uncompressed_bytes < 250_000,
+        "Slim CAS snapshot must dehydrate the 600 KB video BLOB; got {} uncompressed bytes",
+        report1.snapshot_uncompressed_bytes
     );
 
-    // Inspect vault_latest.db directly: synced video payload must be empty x'', local payload retained
+    // Extract vault_latest.db.zip and inspect SQLite directly: synced video payload must be empty x'', local payload retained
     {
-        let conn = rusqlite::Connection::open(&latest_db).unwrap();
+        let extracted_db = dir.path().join("extracted_slim.db");
+        extract_memories_db_from_zip(&latest_zip, &extracted_db);
+        let conn = rusqlite::Connection::open(&extracted_db).unwrap();
         let (dehydrated_len, stored_size): (i64, i64) = conn
             .query_row(
                 "SELECT length(data), size_bytes FROM memory_attachments WHERE memory_id = ?1 AND filename = 'clip.mp4'",
@@ -559,8 +591,9 @@ fn test_backup_only_snapshot_stays_self_contained_and_restores_without_blobs() {
     let report = lm.sync_push(None, true).unwrap();
     assert_eq!(report.blobs_written, 0);
     assert!(
-        report.snapshot_bytes >= payload.len() as u64,
-        "--backup-only snapshot must retain full attachment BLOBs"
+        report.snapshot_uncompressed_bytes >= payload.len() as u64,
+        "--backup-only snapshot must retain full attachment BLOBs before compression (got {} bytes)",
+        report.snapshot_uncompressed_bytes
     );
 
     // Delete empty blobs directory and verify full restore still works
@@ -654,4 +687,699 @@ fn test_restore_aborts_atomically_on_missing_or_corrupt_cas_blob() {
         dst.get(&keep_rec.id).unwrap().is_some(),
         "Existing vault must stay intact when CAS blob is missing"
     );
+}
+
+#[test]
+fn test_bidirectional_merge_preserves_concurrent_device_writes_lww_and_links() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("SharedCloudDrive");
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+
+    let mac_db = dir.path().join("mac.db");
+    let linux_db = dir.path().join("linux.db");
+    let mac = LightMem::open_at(&mac_db, cfg.clone()).unwrap();
+    let linux = LightMem::open_at(&linux_db, cfg).unwrap();
+
+    // 1. Mac writes M1 + M2 with explicit link M1 -> M2 and pushes
+    let m1 = mac
+        .remember(
+            "Core API gateway binds port 8080",
+            Some(MemoryType::Fact),
+            Some("API Gateway".to_string()),
+            vec!["infra".to_string()],
+            Some(0.95),
+        )
+        .unwrap();
+    let m2 = mac
+        .remember(
+            "Primary PostgreSQL cluster runs on port 5432",
+            Some(MemoryType::Fact),
+            Some("PostgreSQL DB".to_string()),
+            vec!["db".to_string()],
+            Some(0.95),
+        )
+        .unwrap();
+    mac.link(&m1.id, &m2.id, Some("depends_on"), Some(1.5))
+        .unwrap();
+    mac.sync_push(None, false).unwrap();
+
+    // 2. Linux non-destructively pulls and gets M1, M2, and link
+    let p1 = linux.sync_pull(None, false).unwrap();
+    assert!(!p1.restored_db);
+    assert!(!p1.skipped_up_to_date);
+    assert_eq!(p1.merged_memories, 2);
+    assert!(linux.get(&m1.id).unwrap().is_some());
+    let linux_links = linux.get_links(&m1.id).unwrap();
+    assert_eq!(linux_links.len(), 1);
+    assert_eq!(linux_links[0].target_id, m2.id);
+
+    // 3. Divergent writes while offline: Mac adds M_mac, Linux adds M_linux and updates M1 with a newer timestamp
+    let m_mac = mac
+        .remember(
+            "macOS daemon uses 64KB chunked streaming",
+            Some(MemoryType::Decision),
+            Some("Mac Stream".to_string()),
+            vec!["mac".to_string()],
+            Some(0.9),
+        )
+        .unwrap();
+
+    let mut m1_updated = linux.get(&m1.id).unwrap().unwrap();
+    m1_updated.content = "Core API gateway binds port 8443 with TLS".to_string();
+    m1_updated.updated_at += chrono::Duration::seconds(30);
+    linux
+        .storage()
+        .insert_indexed_batch(
+            &[m1_updated.clone()],
+            &lightmem::HashEmbeddingProvider,
+            linux.requested_embedding_identity(),
+            false,
+        )
+        .unwrap();
+
+    let m_linux = linux
+        .remember(
+            "Linux systemd service runs on ubuntu-box referencing [[API Gateway]]",
+            Some(MemoryType::Event),
+            Some("Linux Node".to_string()),
+            vec!["linux".to_string()],
+            Some(0.9),
+        )
+        .unwrap();
+
+    // Linux pushes -> pull-first sees nothing new (or Linux is pushed as new snapshot) -> push succeeds cleanly
+    let linux_push = linux.sync_push(None, false).unwrap();
+    assert!(linux_push.sequence >= 2);
+
+    // Mac pulls -> merges M_linux and newer M1 WITHOUT deleting M_mac or breaking existing M1->M2 link!
+    let mac_pull = mac.sync_pull(None, false).unwrap();
+    assert!(!mac_pull.skipped_up_to_date);
+    assert_eq!(mac_pull.merged_memories, 1);
+    assert_eq!(mac_pull.updated_memories, 1);
+    assert_eq!(
+        mac.get(&m1.id).unwrap().unwrap().content,
+        "Core API gateway binds port 8443 with TLS"
+    );
+    assert!(
+        mac.get(&m_mac.id).unwrap().is_some(),
+        "Unsynced concurrent local memory on Mac must survive pull merge"
+    );
+    assert!(mac.get(&m_linux.id).unwrap().is_some());
+    assert!(
+        mac.get_links(&m1.id)
+            .unwrap()
+            .iter()
+            .any(|l| l.target_id == m2.id && l.relation == "depends_on"),
+        "Graph links on updated memory M1 must survive LWW update"
+    );
+
+    // Mac pushes combined vault -> Linux pulls -> converges to identical 4 active memories
+    mac.sync_push(None, false).unwrap();
+    let linux_pull = linux.sync_pull(None, false).unwrap();
+    assert!(!linux_pull.skipped_up_to_date);
+    assert_eq!(linux_pull.merged_memories, 1);
+
+    let mac_all = mac.list(None, Some(MemoryStatus::Active), None, 0).unwrap();
+    let linux_all = linux
+        .list(None, Some(MemoryStatus::Active), None, 0)
+        .unwrap();
+    assert_eq!(mac_all.len(), 4);
+    assert_eq!(linux_all.len(), 4);
+    assert!(linux.get(&m_mac.id).unwrap().is_some());
+}
+
+#[test]
+fn test_sync_pull_status_first_skips_when_in_sync_and_merges_when_remote_ahead() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("StatusFirstTarget");
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+
+    let dev_a = LightMem::open_at(&dir.path().join("dev_a.db"), cfg.clone()).unwrap();
+    let dev_b = LightMem::open_at(&dir.path().join("dev_b.db"), cfg).unwrap();
+
+    dev_a
+        .remember(
+            "Initial shared fact from Device A",
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+        )
+        .unwrap();
+    dev_a.sync_push(None, false).unwrap();
+
+    // Device A is already at remote sha256 -> status reports in_sync and pull skips download
+    let st_a = dev_a.sync_status(None).unwrap();
+    assert!(st_a.in_sync);
+    assert!(!st_a.remote_ahead);
+    let pull_a_noop = dev_a.sync_pull(None, false).unwrap();
+    assert!(pull_a_noop.skipped_up_to_date);
+
+    // Device B pulls -> gets Device A's memory, then adds a memory and pushes
+    let pull_b = dev_b.sync_pull(None, false).unwrap();
+    assert!(!pull_b.skipped_up_to_date);
+    assert_eq!(pull_b.merged_memories, 1);
+
+    let rec_b = dev_b
+        .remember(
+            "Second shared fact from Device B",
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+        )
+        .unwrap();
+    dev_b.sync_push(None, false).unwrap();
+
+    // Now Device A status must detect remote_ahead and sync_pull merges cleanly
+    let st_a2 = dev_a.sync_status(None).unwrap();
+    assert!(st_a2.remote_ahead);
+    assert!(!st_a2.in_sync);
+
+    let pull_a2 = dev_a.sync_pull(None, false).unwrap();
+    assert!(!pull_a2.skipped_up_to_date);
+    assert_eq!(pull_a2.merged_memories, 1);
+    assert!(dev_a.get(&rec_b.id).unwrap().is_some());
+
+    // Subsequent pull is a fast skip again
+    let pull_a3 = dev_a.sync_pull(None, false).unwrap();
+    assert!(pull_a3.skipped_up_to_date);
+}
+
+#[test]
+fn test_sync_hard_delete_tombstone_propagation_and_resurrection_across_devices() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("TombstoneTarget");
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+
+    let mac = LightMem::open_at(&dir.path().join("mac.db"), cfg.clone()).unwrap();
+    let linux = LightMem::open_at(&dir.path().join("linux.db"), cfg).unwrap();
+
+    let m_delete = mac
+        .remember(
+            "Temporary secret token to hard-delete later",
+            Some(MemoryType::Fact),
+            Some("Temp Secret".to_string()),
+            vec![],
+            Some(0.9),
+        )
+        .unwrap();
+    let m_keep = mac
+        .remember(
+            "Permanent config record",
+            Some(MemoryType::Fact),
+            Some("Keep Record".to_string()),
+            vec![],
+            Some(0.95),
+        )
+        .unwrap();
+    mac.sync_push(None, false).unwrap();
+
+    linux.sync_pull(None, false).unwrap();
+    assert!(linux.get(&m_delete.id).unwrap().is_some());
+
+    // Linux hard-deletes m_delete and pushes tombstone
+    assert!(linux.forget(&m_delete.id, true).unwrap());
+    assert!(linux.storage().tombstone_count().unwrap() >= 1);
+    linux.sync_push(None, false).unwrap();
+
+    // Mac pulls: m_delete must disappear from Mac while m_keep stays intact
+    let pull_del = mac.sync_pull(None, false).unwrap();
+    assert_eq!(pull_del.deleted_memories, 1);
+    assert!(mac.get(&m_delete.id).unwrap().is_none());
+    assert!(mac.get(&m_keep.id).unwrap().is_some());
+
+    // Resurrection: later write reusing the deleted ID with newer timestamp overrides older tombstone
+    let mut resurrected = MemoryRecord::new(
+        MemoryType::Fact,
+        "Resurrected Secret".to_string(),
+        "Fresh rotated secret value".to_string(),
+        vec!["rotated".to_string()],
+        0.95,
+        None,
+    );
+    resurrected.id = m_delete.id.clone();
+    resurrected.created_at = chrono::Utc::now() + chrono::Duration::seconds(30);
+    resurrected.updated_at = resurrected.created_at;
+    mac.storage()
+        .insert_indexed_batch(
+            &[resurrected.clone()],
+            &lightmem::HashEmbeddingProvider,
+            mac.requested_embedding_identity(),
+            false,
+        )
+        .unwrap();
+    mac.sync_push(None, false).unwrap();
+
+    let pull_res = linux.sync_pull(None, false).unwrap();
+    assert_eq!(pull_res.merged_memories, 1);
+    let linux_fetched = linux.get(&m_delete.id).unwrap().unwrap();
+    assert_eq!(linux_fetched.content, "Fresh rotated secret value");
+}
+
+#[test]
+fn test_sync_local_memory_never_leaks_and_survives_bidirectional_pull() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("LocalIsolationTarget");
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+
+    let dev_a = LightMem::open_at(&dir.path().join("a.db"), cfg.clone()).unwrap();
+    let dev_b = LightMem::open_at(&dir.path().join("b.db"), cfg).unwrap();
+
+    let secret_file = dir.path().join("private_key.txt");
+    fs::write(&secret_file, b"SSH PRIVATE KEY MATERIAL").unwrap();
+
+    let (local_rec, _, _) = dev_a
+        .remember_with_attachments_and_entities(
+            Some("Device A private ssh key"),
+            &[secret_file],
+            false,
+            false,
+            None,
+            Some(MemoryType::Password),
+            Some("Local SSH Key".to_string()),
+            vec![],
+            Some(1.0),
+            None,
+            false,
+            None,
+            true, // --local air-gap
+        )
+        .unwrap();
+
+    let shared_b = dev_b
+        .remember(
+            "Shared production hostname db.internal",
+            Some(MemoryType::Fact),
+            Some("Prod DB".to_string()),
+            vec![],
+            Some(0.95),
+        )
+        .unwrap();
+    dev_b.sync_push(None, false).unwrap();
+
+    // Device A pulls from Device B: local memory must stay intact while shared_b merges in
+    let pull_a = dev_a.sync_pull(None, false).unwrap();
+    assert_eq!(pull_a.merged_memories, 1);
+    assert!(dev_a.get(&local_rec.id).unwrap().is_some());
+    assert!(dev_a.get(&shared_b.id).unwrap().is_some());
+
+    // Device A pushes back: --local memory + its attachment must NOT leak to target or Device B
+    let shared_a = dev_a
+        .remember(
+            "Shared API rate limit is 1000 rpm",
+            Some(MemoryType::Fact),
+            Some("Rate Limit".to_string()),
+            vec![],
+            Some(0.9),
+        )
+        .unwrap();
+    let push_a = dev_a.sync_push(None, false).unwrap();
+    assert_eq!(push_a.local_only_memories, 1);
+    assert_eq!(push_a.blobs_written, 0);
+
+    dev_b.sync_pull(None, false).unwrap();
+    assert!(dev_b.get(&shared_a.id).unwrap().is_some());
+    assert!(
+        dev_b.get(&local_rec.id).unwrap().is_none(),
+        "--local memory from Device A must NEVER propagate to Device B"
+    );
+}
+
+#[test]
+fn test_sync_portable_config_adoption_preserves_secrets() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("PortableCfgTarget");
+
+    let mut cfg_mac = hash_config();
+    cfg_mac.sync_target = Some(sync_target.to_string_lossy().to_string());
+    cfg_mac.reranker = "ollama:gemma4:31b-cloud".to_string();
+    cfg_mac.ollama_url = "https://mac-private.local:11434".to_string();
+    cfg_mac.ollama_api_key = Some("super-secret-mac-token".to_string());
+
+    let mac = LightMem::open_at(&dir.path().join("mac.db"), cfg_mac).unwrap();
+    mac.remember(
+        "Portable config sync check",
+        Some(MemoryType::Fact),
+        None,
+        vec![],
+        Some(0.9),
+    )
+    .unwrap();
+    mac.sync_push(None, false).unwrap();
+
+    // Inspect manifest.json directly to ensure NO secrets or private Ollama URLs were uploaded
+    let manifest_raw = fs::read_to_string(sync_target.join("manifest.json")).unwrap();
+    assert!(
+        !manifest_raw.contains("super-secret-mac-token"),
+        "manifest.json must never leak ollama_api_key"
+    );
+    assert!(
+        !manifest_raw.contains("mac-private.local"),
+        "manifest.json must never leak machine-specific ollama_url"
+    );
+    let manifest_val: serde_json::Value = serde_json::from_str(&manifest_raw).unwrap();
+    assert_eq!(
+        manifest_val["portable_config"]["reranker"],
+        "ollama:gemma4:31b-cloud"
+    );
+
+    // Device B (Linux) pulls and adopts portable config while keeping its own local secrets/URL
+    let mut cfg_linux = hash_config();
+    cfg_linux.sync_target = Some(sync_target.to_string_lossy().to_string());
+    cfg_linux.reranker = "top1".to_string();
+    cfg_linux.ollama_url = "http://linux-ollama:11434".to_string();
+    cfg_linux.ollama_api_key = Some("linux-secret-token".to_string());
+
+    let mut linux = LightMem::open_at(&dir.path().join("linux.db"), cfg_linux).unwrap();
+    let (_pull, adopted) = linux.sync_pull_and_adopt(None, false).unwrap();
+    assert!(adopted);
+    assert_eq!(linux.config().reranker, "ollama:gemma4:31b-cloud");
+    assert_eq!(linux.config().ollama_url, "http://linux-ollama:11434");
+    assert_eq!(
+        linux.config().ollama_api_key.as_deref(),
+        Some("linux-secret-token")
+    );
+}
+
+#[test]
+fn test_sync_offline_online_mode_and_cli_auto_pre_pull_post_push() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("CliCloudTarget");
+    let sandbox_cwd = dir.path().join("empty_cwd");
+    let mac_home = dir.path().join("mac_home");
+    let mac_cfg_dir = mac_home.join(".lightmem");
+    let linux_home = dir.path().join("linux_home");
+    let linux_cfg_dir = linux_home.join(".lightmem");
+    fs::create_dir_all(&sandbox_cwd).unwrap();
+    fs::create_dir_all(&mac_cfg_dir).unwrap();
+    fs::create_dir_all(&linux_cfg_dir).unwrap();
+
+    let mut base_cfg = hash_config();
+    base_cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+    base_cfg.sync_auto = Some(true);
+    base_cfg.sync_offline = Some(false);
+    fs::write(
+        mac_cfg_dir.join("config.json"),
+        serde_json::to_string_pretty(&base_cfg).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        linux_cfg_dir.join("config.json"),
+        serde_json::to_string_pretty(&base_cfg).unwrap(),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_lmem");
+    let run_cli = |home: &Path, cfg_dir: &Path, args: &[&str]| {
+        Command::new(bin)
+            .current_dir(&sandbox_cwd)
+            .env("HOME", home)
+            .env("LIGHTMEM_HOME", cfg_dir)
+            .env("LIGHTMEM_CONFIG_DIR", cfg_dir)
+            .env("LIGHTMEM_QA_DISABLE", "1")
+            .env_remove("LIGHTMEM_DB")
+            .env_remove("LIGHTMEM_CONNECTION")
+            .env_remove("LIGHTMEM_SYNC_TARGET")
+            .env_remove("LIGHTMEM_SYNC_AUTO")
+            .env_remove("LIGHTMEM_OFFLINE")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    // 1. Mac remembers M1 with --json -> stdout must remain pure JSON AND auto-push to sync_target
+    let out_mac1 = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &["remember", "Decision from Mac Studio", "--json"],
+    );
+    assert!(
+        out_mac1.status.success(),
+        "Mac remember failed: {}",
+        String::from_utf8_lossy(&out_mac1.stderr)
+    );
+    let mac1_json: serde_json::Value = serde_json::from_slice(&out_mac1.stdout).unwrap();
+    let mac1_id = mac1_json["id"].as_str().unwrap().to_string();
+    assert!(
+        sync_target
+            .join("snapshots")
+            .join("vault_latest.db.zip")
+            .exists(),
+        "Auto post-write push must create vault_latest.db.zip"
+    );
+
+    // 2. Linux remembers M2 WITHOUT manually running sync first:
+    // pre-write pull must merge Mac's M1 before saving M2, and post-write push uploads both!
+    let out_lin1 = run_cli(
+        &linux_home,
+        &linux_cfg_dir,
+        &["remember", "Event from Linux Box", "--json"],
+    );
+    assert!(
+        out_lin1.status.success(),
+        "Linux remember failed: {}",
+        String::from_utf8_lossy(&out_lin1.stderr)
+    );
+    let lin_list_out = run_cli(&linux_home, &linux_cfg_dir, &["list", "--json"]);
+    assert!(lin_list_out.status.success());
+    let lin_list_json: serde_json::Value = serde_json::from_slice(&lin_list_out.stdout).unwrap();
+    assert_eq!(lin_list_json["total"], 2);
+    let lin_ids: Vec<&str> = lin_list_json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(lin_ids.contains(&mac1_id.as_str()));
+
+    // 3. Explicit --db vault must NOT sync to the global target unless LIGHTMEM_SYNC_TARGET is set
+    let explicit_db = dir.path().join("explicit_isolated.db");
+    let explicit_out = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &[
+            "--db",
+            explicit_db.to_str().unwrap(),
+            "remember",
+            "Isolated explicit DB note",
+            "--json",
+        ],
+    );
+    assert!(explicit_out.status.success());
+    let explicit_json: serde_json::Value = serde_json::from_slice(&explicit_out.stdout).unwrap();
+    let explicit_id = explicit_json["id"].as_str().unwrap().to_string();
+
+    // Verify Linux does NOT receive explicit_id on pull
+    let lin_pull_out = run_cli(&linux_home, &linux_cfg_dir, &["sync", "--pull", "--json"]);
+    assert!(lin_pull_out.status.success());
+    let lin_list_after_explicit = run_cli(&linux_home, &linux_cfg_dir, &["list", "--json"]);
+    let lin_after_val: serde_json::Value =
+        serde_json::from_slice(&lin_list_after_explicit.stdout).unwrap();
+    assert_eq!(lin_after_val["total"], 2);
+    assert!(!lin_after_val["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"].as_str() == Some(explicit_id.as_str())));
+
+    // 4. Toggle OFFLINE mode on Mac: writes stay local and sync --status is offline-safe
+    let off_out = run_cli(&mac_home, &mac_cfg_dir, &["sync", "--offline", "--json"]);
+    assert!(off_out.status.success());
+    let off_json: serde_json::Value = serde_json::from_slice(&off_out.stdout).unwrap();
+    assert_eq!(off_json["sync_offline"], true);
+
+    let off_note = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &["remember", "Offline note created on plane", "--json"],
+    );
+    assert!(off_note.status.success());
+
+    let status_off = run_cli(&mac_home, &mac_cfg_dir, &["sync", "--status", "--json"]);
+    assert!(status_off.status.success());
+    let status_off_json: serde_json::Value = serde_json::from_slice(&status_off.stdout).unwrap();
+    assert_eq!(status_off_json["offline"], true);
+    assert_eq!(status_off_json["remote_check_skipped_offline"], true);
+    assert_eq!(status_off_json["local_dirty"], true);
+
+    // Linux should NOT have seen Mac's offline note yet
+    let lin_pull_off = run_cli(&linux_home, &linux_cfg_dir, &["sync", "--pull", "--json"]);
+    assert!(lin_pull_off.status.success());
+    let lin_pull_off_json: serde_json::Value =
+        serde_json::from_slice(&lin_pull_off.stdout).unwrap();
+    assert_eq!(lin_pull_off_json["skipped_up_to_date"], true);
+
+    // 5. Resume ONLINE mode on Mac -> next remember auto-pulls Linux's M2 and pushes Mac's offline note
+    let on_out = run_cli(&mac_home, &mac_cfg_dir, &["sync", "--online", "--json"]);
+    assert!(on_out.status.success());
+    let on_json: serde_json::Value = serde_json::from_slice(&on_out.stdout).unwrap();
+    assert_eq!(on_json["sync_offline"], false);
+
+    let back_online = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &["remember", "Landed back online", "--json"],
+    );
+    assert!(back_online.status.success());
+
+    // Linux pulls and sees all 4 global memories!
+    let lin_pull_final = run_cli(&linux_home, &linux_cfg_dir, &["sync", "--pull", "--json"]);
+    assert!(lin_pull_final.status.success());
+    let lin_list_final = run_cli(&linux_home, &linux_cfg_dir, &["list", "--json"]);
+    let lin_final_json: serde_json::Value = serde_json::from_slice(&lin_list_final.stdout).unwrap();
+    assert_eq!(lin_final_json["total"], 4);
+
+    // 6. Test `lmem config --offline <bool> --json`
+    let cfg_off = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &["config", "--offline", "true", "--json"],
+    );
+    assert!(cfg_off.status.success());
+    let cfg_off_json: serde_json::Value = serde_json::from_slice(&cfg_off.stdout).unwrap();
+    assert_eq!(cfg_off_json["effective_sync_offline"], true);
+
+    let cfg_on = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &["config", "--offline", "false", "--json"],
+    );
+    assert!(cfg_on.status.success());
+    let cfg_on_json: serde_json::Value = serde_json::from_slice(&cfg_on.stdout).unwrap();
+    assert_eq!(cfg_on_json["effective_sync_offline"], false);
+
+    // 7. Linux hard-forgets mac1_id via CLI -> auto-pushes tombstone -> Mac auto-pulls tombstone on next write
+    let lin_forget = run_cli(
+        &linux_home,
+        &linux_cfg_dir,
+        &["forget", &mac1_id, "--hard", "--json"],
+    );
+    assert!(
+        lin_forget.status.success(),
+        "Linux forget failed: {}",
+        String::from_utf8_lossy(&lin_forget.stderr)
+    );
+
+    let mac_after_forget = run_cli(
+        &mac_home,
+        &mac_cfg_dir,
+        &["remember", "Post-delete Mac memory", "--json"],
+    );
+    assert!(mac_after_forget.status.success());
+
+    let mac_list_after = run_cli(&mac_home, &mac_cfg_dir, &["list", "--json"]);
+    let mac_list_val: serde_json::Value = serde_json::from_slice(&mac_list_after.stdout).unwrap();
+    assert_eq!(mac_list_val["total"], 4); // 4 - 1 deleted + 1 added = 4
+    assert!(!mac_list_val["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["id"].as_str() == Some(mac1_id.as_str())));
+}
+
+#[cfg(feature = "mcp")]
+#[test]
+fn test_mcp_offline_config_and_local_remember_with_auto_sync() {
+    let dir = tempdir().unwrap();
+    let sync_target = dir.path().join("McpCloudTarget");
+    let sandbox_cwd = dir.path().join("mcp_cwd");
+    let home = dir.path().join("mcp_home");
+    let cfg_dir = home.join(".lightmem");
+    fs::create_dir_all(&sandbox_cwd).unwrap();
+    fs::create_dir_all(&cfg_dir).unwrap();
+
+    let mut cfg = hash_config();
+    cfg.sync_target = Some(sync_target.to_string_lossy().to_string());
+    cfg.sync_auto = Some(true);
+    cfg.sync_offline = Some(false);
+    fs::write(
+        cfg_dir.join("config.json"),
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lmem"))
+        .current_dir(&sandbox_cwd)
+        .env("HOME", &home)
+        .env("LIGHTMEM_HOME", &cfg_dir)
+        .env("LIGHTMEM_CONFIG_DIR", &cfg_dir)
+        .env("LIGHTMEM_QA_DISABLE", "1")
+        .env_remove("LIGHTMEM_DB")
+        .env_remove("LIGHTMEM_CONNECTION")
+        .env_remove("LIGHTMEM_SYNC_TARGET")
+        .env_remove("LIGHTMEM_SYNC_AUTO")
+        .env_remove("LIGHTMEM_OFFLINE")
+        .arg("mcp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().unwrap();
+        for req in [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": "remember", "arguments": { "content": "Shared MCP fact", "category": "fact" } }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "remember", "arguments": { "content": "Air-gapped MCP secret", "category": "password", "local": true } }
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "config", "arguments": { "offline": true } }
+            }),
+        ] {
+            writeln!(stdin, "{}", req).unwrap();
+        }
+    }
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "MCP server failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3);
+
+    // Local remember returned #local provenance
+    let local_text = lines[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let local_val: serde_json::Value = serde_json::from_str(local_text).unwrap();
+    assert_eq!(local_val["memory"]["provenance"], "local");
+
+    // Config tool toggled sync_offline = true
+    let cfg_text = lines[2]["result"]["content"][0]["text"].as_str().unwrap();
+    let cfg_val: serde_json::Value = serde_json::from_str(cfg_text).unwrap();
+    assert_eq!(cfg_val["updated"], true);
+    assert_eq!(cfg_val["sync_offline"], true);
+
+    // Sync snapshot exists and does NOT contain the --local MCP secret!
+    let snap_zip = sync_target.join("snapshots").join("vault_latest.db.zip");
+    assert!(snap_zip.exists());
+    let extracted = dir.path().join("mcp_snap.db");
+    extract_memories_db_from_zip(&snap_zip, &extracted);
+    let snap_storage = Storage::open(&extracted).unwrap();
+    let snap_mems = snap_storage.list_memories(None, None, None, 0).unwrap();
+    assert_eq!(snap_mems.len(), 1);
+    assert_eq!(snap_mems[0].content, "Shared MCP fact");
 }

@@ -1185,6 +1185,10 @@ impl CliView {
                     serde_json::Value::String(cfg.active_reranker_summary()),
                 );
                 obj.insert(
+                    "effective_sync_offline".into(),
+                    serde_json::Value::Bool(cfg.is_offline()),
+                );
+                obj.insert(
                     "config_file".into(),
                     serde_json::Value::String(
                         LightMemConfig::config_file().to_string_lossy().to_string(),
@@ -1313,6 +1317,16 @@ impl CliView {
                 }
             );
         }
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("├─"),
+            Self::slate("Sync Offline Mode"),
+            if cfg.is_offline() {
+                Self::gold("offline (paused)")
+            } else {
+                Self::emerald_bold("online (active)")
+            }
+        );
         println!(
             "  {} {:<20} {}",
             Self::slate("╰─"),
@@ -2136,17 +2150,63 @@ impl CliView {
         let _ = std::io::stdout().flush();
     }
 
+    pub fn render_inline_pull(outcome: &crate::services::InlinePullOutcome) {
+        if !outcome.pulled {
+            return;
+        }
+        println!(
+            "  {} {} {}",
+            Self::violet_bold("⬇ Pulled remote updates"),
+            Self::slate(&format!(
+                "(+{} inserted, ~{} updated, -{} tombstoned)",
+                outcome.merged_memories, outcome.updated_memories, outcome.deleted_memories
+            )),
+            Self::slate("[pre-write sync]")
+        );
+    }
+
     pub fn render_inline_sync(report: &crate::services::SyncReport) {
         println!(
             "  {} {} {} {}",
             Self::emerald_bold("⟳ Synced to"),
             Self::white_bold(&Self::format_path(&report.target)),
             Self::slate(&format!(
-                "({} CAS blobs, snapshot {} bytes)",
-                report.blobs_written, report.snapshot_bytes
+                "(seq #{}, {} CAS blobs, zipped snapshot {} bytes)",
+                report.sequence, report.blobs_written, report.snapshot_bytes
             )),
             Self::slate("[inline synchronous]")
         );
+    }
+
+    pub fn render_sync_offline_mode(offline: bool, json: bool) -> Result<()> {
+        if json {
+            let obj = serde_json::json!({
+                "status": "ok",
+                "sync_offline": offline,
+                "mode": if offline { "offline" } else { "online" },
+            });
+            println!("{}", serde_json::to_string_pretty(&obj)?);
+            return Ok(());
+        }
+
+        println!();
+        if offline {
+            println!(
+                "{} {} {}",
+                Self::crimson_bold("◈"),
+                Self::gold("Cloud sync paused (OFFLINE mode active)"),
+                Self::slate("— local writes stay on this device until `lmem sync --online`")
+            );
+        } else {
+            println!(
+                "{} {} {}",
+                Self::crimson_bold("◈"),
+                Self::emerald_bold("Cloud sync resumed (ONLINE mode active)"),
+                Self::slate("— pre-write pull & post-write push enabled")
+            );
+        }
+        println!();
+        Ok(())
     }
 
     pub fn render_sync_report(report: &crate::services::SyncReport, json: bool) -> Result<()> {
@@ -2166,6 +2226,15 @@ impl CliView {
             Self::slate("Target:"),
             Self::white_bold(&Self::format_path(&report.target))
         );
+        if report.pulled_first {
+            println!(
+                "  {} +{} inserted, ~{} updated, -{} tombstoned (merged before push)",
+                Self::slate("Pre-Push Pull:"),
+                Self::emerald_bold(&report.merged_memories.to_string()),
+                Self::white_bold(&report.updated_memories.to_string()),
+                Self::gold(&report.deleted_memories.to_string())
+            );
+        }
         println!(
             "  {} {} newly written, {} already present (deduplicated), {} transferred",
             Self::slate("CAS Blobs:"),
@@ -2177,15 +2246,25 @@ impl CliView {
             ))
         );
         if let Some(ref snap) = report.snapshot_path {
+            let ratio_str = if report.snapshot_uncompressed_bytes > 0 {
+                format!(
+                    ", raw {:.2} KB",
+                    report.snapshot_uncompressed_bytes as f64 / 1024.0
+                )
+            } else {
+                String::new()
+            };
             println!(
-                "  {} {} ({:.2} KB)",
+                "  {} {} ({:.2} KB zipped{}) · seq #{}",
                 Self::slate("Vector Snapshot:"),
                 Self::white_bold(
                     snap.file_name()
                         .and_then(|s| s.to_str())
-                        .unwrap_or("vault_latest.db")
+                        .unwrap_or("vault_latest.db.zip")
                 ),
-                report.snapshot_bytes as f64 / 1024.0
+                report.snapshot_bytes as f64 / 1024.0,
+                ratio_str,
+                report.sequence
             );
         }
         println!(
@@ -2223,31 +2302,61 @@ impl CliView {
                 Self::gold("[default / unconfigured]")
             }
         );
+        let sync_state_label = if status.offline || status.remote_check_skipped_offline {
+            Self::gold("OFFLINE (remote check skipped — run 'lmem sync --online' to resume)")
+        } else if status.in_sync {
+            Self::emerald_bold("✓ In sync")
+        } else if status.remote_ahead && status.local_dirty {
+            Self::gold("⚠ Diverged (remote ahead + local unsynced changes — pull will merge)")
+        } else if status.remote_ahead {
+            Self::violet_bold("⬇ Remote ahead (run 'lmem sync --pull' to merge)")
+        } else if status.local_dirty {
+            Self::gold("⬆ Local changes pending push")
+        } else {
+            Self::slate("○ Uninitialized (no snapshots synced yet)")
+        };
+        println!("  {} {}", Self::slate("Sync State:"), sync_state_label);
+        if status.remote_sequence > 0 {
+            let synced_at_str = status
+                .last_synced_at
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "never".to_string());
+            println!(
+                "  {} #{} (last local sync: {})",
+                Self::slate("Sequence:"),
+                Self::white_bold(&status.remote_sequence.to_string()),
+                Self::slate(&synced_at_str)
+            );
+        }
         println!(
             "  {} {}",
             Self::slate("Target Exists:"),
             if status.target_exists {
                 Self::emerald_bold("yes")
+            } else if status.remote_check_skipped_offline {
+                Self::slate("unknown (offline)")
             } else {
                 Self::rose("no (will be created on first sync)")
             }
         );
-        println!(
-            "  {} {} blobs ({:.2} MB)",
-            Self::slate("CAS Blobs:"),
-            Self::emerald_bold(&status.blobs_count.to_string()),
-            status.total_blob_bytes as f64 / (1024.0 * 1024.0)
-        );
-        let latest_snap_str = status
-            .latest_snapshot_date
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-            .unwrap_or_else(|| "none".to_string());
-        println!(
-            "  {} {} snapshots (latest: {})",
-            Self::slate("Snapshots:"),
-            Self::emerald_bold(&status.snapshots_count.to_string()),
-            Self::white_bold(&latest_snap_str)
-        );
+        if !status.remote_check_skipped_offline {
+            println!(
+                "  {} {} blobs ({:.2} MB)",
+                Self::slate("CAS Blobs:"),
+                Self::emerald_bold(&status.blobs_count.to_string()),
+                status.total_blob_bytes as f64 / (1024.0 * 1024.0)
+            );
+            let latest_snap_str = status
+                .latest_snapshot_date
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "none".to_string());
+            println!(
+                "  {} {} snapshots (latest: {})",
+                Self::slate("Snapshots:"),
+                Self::emerald_bold(&status.snapshots_count.to_string()),
+                Self::white_bold(&latest_snap_str)
+            );
+        }
         println!(
             "  {} {} syncable, {} local-only air-gapped",
             Self::slate("Vault Memories:"),
@@ -2338,8 +2447,23 @@ impl CliView {
     }
 
     pub fn render_sync_pull(pull: &crate::services::SyncPullReport, json: bool) -> Result<()> {
+        Self::render_sync_pull_with_options(pull, false, json)
+    }
+
+    pub fn render_sync_pull_with_options(
+        pull: &crate::services::SyncPullReport,
+        config_adopted: bool,
+        json: bool,
+    ) -> Result<()> {
         if json {
-            println!("{}", serde_json::to_string_pretty(pull)?);
+            let mut val = serde_json::to_value(pull)?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert(
+                    "config_adopted".to_string(),
+                    serde_json::Value::Bool(config_adopted),
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(&val)?);
             return Ok(());
         }
 
@@ -2347,26 +2471,52 @@ impl CliView {
         println!(
             "{} {}",
             Self::crimson_bold("◈"),
-            Self::emerald_bold("Cloud / CAS Pull Complete")
+            Self::emerald_bold(if pull.skipped_up_to_date {
+                "Cloud / CAS Sync Already Up-to-Date"
+            } else {
+                "Cloud / CAS Pull Complete"
+            })
         );
         println!(
             "  {} {}",
             Self::slate("Target:"),
             Self::white_bold(&Self::format_path(&pull.target))
         );
-        println!(
-            "  {} {} verified blobs available in CAS archive",
-            Self::slate("Blobs:"),
-            Self::emerald_bold(&pull.blobs_found_in_target.to_string())
-        );
-        if pull.restored_db {
-            if let Some(ref p) = pull.restored_snapshot_path {
+        if pull.skipped_up_to_date {
+            println!(
+                "  {} Local vault already matches latest remote snapshot (skipped download)",
+                Self::slate("Status:"),
+            );
+        } else {
+            println!(
+                "  {} {} verified blobs available in CAS archive",
+                Self::slate("Blobs:"),
+                Self::emerald_bold(&pull.blobs_found_in_target.to_string())
+            );
+            if pull.restored_db {
+                if let Some(ref p) = pull.restored_snapshot_path {
+                    println!(
+                        "  {} Local database restored from {}",
+                        Self::emerald_bold("✓"),
+                        Self::white_bold(&Self::format_path(p))
+                    );
+                }
+            } else {
                 println!(
-                    "  {} Local database restored from {}",
-                    Self::emerald_bold("✓"),
-                    Self::white_bold(&Self::format_path(p))
+                    "  {} +{} inserted, ~{} updated, -{} tombstoned, {} kept newer local",
+                    Self::slate("Merged:"),
+                    Self::emerald_bold(&pull.merged_memories.to_string()),
+                    Self::white_bold(&pull.updated_memories.to_string()),
+                    Self::gold(&pull.deleted_memories.to_string()),
+                    Self::slate(&pull.local_kept_newer.to_string())
                 );
             }
+        }
+        if config_adopted {
+            println!(
+                "  {} Portable model/reranker configuration synced from remote manifest",
+                Self::emerald_bold("✓"),
+            );
         }
         println!();
         Ok(())

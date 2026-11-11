@@ -149,16 +149,21 @@ lmem connect all                                   # Deploy to all supported age
 lmem connect --list                                # Inspect detected agent platforms on the system
 lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
 
-# 11. Vault Dashboard, Identity Topology & Cloud Sync
+# 11. Vault Dashboard, Identity Topology & Multi-Device Cloud Sync
 lmem status                                        # Visual dashboard of all managed vaults, active connections, and storage
 lmem vaults                                        # Alias for lmem status (or lmem identity status)
 lmem status --json                                 # Machine-readable vault and connection topology
 lmem auth login                                    # Authenticate with Google Drive via OAuth2 loopback (alias: lmem login)
 lmem auth status                                   # Inspect authenticated Google Drive account and storage quota
-lmem sync                                          # Synchronize CAS media blobs & atomic vector snapshots
-lmem sync -d                                       # Start detached background sync daemon (5-minute cycle)
-lmem sync --status                                 # Check running background sync daemon status and logs
+lmem sync                                          # Pull & merge remote updates if ahead, then push CAS blobs & zipped vault snapshot
+lmem sync --pull                                   # Check sync status first; skip if in sync, else pull & non-destructively merge remote changes
+lmem sync --restore                                # Full destructive replacement of local vault from latest remote snapshot + CAS rehydration
+lmem sync --offline                                # Pause cloud auto-sync offline (local SQLite stays full-featured)
+lmem sync --online                                 # Resume online pre-write pull & post-write push auto-sync
+lmem sync -d                                       # Start detached background sync daemon (5-minute pull/push cycle, live config reload)
+lmem sync --status                                 # Inspect sync state (In sync / Remote ahead / Local dirty / Diverged / OFFLINE) & daemon PID
 lmem sync --stop                                   # Cleanly terminate the background sync daemon
+lmem remember "Secret offline key" --local         # Air-gap memory locally (#local tag; exempt from push and preserved during pull merges)
 ```
 
 ---
@@ -284,6 +289,10 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
    - `lmem recall`, `lmem answer`, `lmem list`, `lmem inspect`, `lmem stats`, and `lmem conflicts` all support `--json` with clean, deterministic schemas, and `inspect`/`recall`/`list` support `--path` (`--paths`) for raw file path output.
 4. **Scope Project vs Global Memories**:
    - By default, `lmem` uses `./.lightmem.db` if present in the current directory or git root, falling back to `~/.lightmem/memories.db`. Pass `-g` (`--global`) to force the global vault or `--db <PATH>` for an isolated vault.
+5. **Multi-Device Sync Discipline (Global Vault)**:
+   - When Google Drive (or a configured `sync_target`) is logged in and online, every mutating command (`remember`, `forget`, `clear`, `link`, `unlink`, `autolink`, `conflicts --yes`, `deduplicate`, `import`, `observe`) on the global vault automatically **checks & pulls remote changes first** and **pushes updates afterward**.
+   - Before reading stale cross-device state with `lmem recall`, `lmem answer`, or `lmem list` when sync is online, run `lmem sync --pull` (fast no-op when already in sync; merges remote updates cleanly when another device pushed).
+   - Use `lmem sync --offline` / `lmem sync --online` (or `lmem config --offline true|false` / `LIGHTMEM_OFFLINE=1`) to pause and resume cloud sync at any time, and `--local` on `lmem remember` for memories that must never leave the current machine.
 
 
 ## Registered identities and scopes (v0.4.0)

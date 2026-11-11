@@ -8,7 +8,7 @@ pub mod link;
 pub mod memory;
 pub mod stats;
 
-pub use config::LightMemConfig;
+pub use config::{LightMemConfig, PortableSyncConfig};
 pub use link::{extract_wikilinks, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, RelatedMemory};
 pub use memory::{
     cas_blob_filename, compute_file_sha256_hex, compute_sha256_hex, decode_base64,

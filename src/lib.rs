@@ -20,20 +20,21 @@ pub use models::{
     detect_memory_conflict, detect_memory_conflict_with_similarity, detect_mime_and_kind,
     encode_base64, extract_meaningful_tokens, parse_ttl_duration, AttachmentInput,
     AttachmentMetadata, EntityRecord, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus,
-    MemoryType, PaginatedMemories, ScoredMemory, Sha256Hasher, StorageStats,
+    MemoryType, PaginatedMemories, PortableSyncConfig, ScoredMemory, Sha256Hasher, StorageStats,
 };
-pub use repositories::{SqliteRepository, Storage};
+pub use repositories::{SqliteRepository, Storage, SyncMergeStats};
 #[cfg(feature = "mcp")]
 pub use services::McpServer;
 pub use services::{
     serve_docs, AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest,
     BundleService, BundleStats, ConnectResult, ConnectService, DocsOptions, DriveAuthStatus,
     DriveFolders, DriveLogoutReport, EmbeddingProvider, Exporter, GoogleDriveClient,
-    HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker,
-    MemoryImporter, MultimodalInput, ObservedCandidate, ObserverService, OkfMemoryImporter,
-    OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo,
-    PrecisionReranker, Reranker, SyncManifest, SyncOptions, SyncProgress, SyncPullReport,
-    SyncReport, SyncService, SyncStatusReport, Top1Reranker,
+    HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, InlinePullOutcome,
+    JsonMemoryImporter, LlmReranker, MemoryImporter, MultimodalInput, ObservedCandidate,
+    ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
+    OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, SyncManifest,
+    SyncOptions, SyncProgress, SyncPullReport, SyncReport, SyncService, SyncState,
+    SyncStatusReport, Top1Reranker,
 };
 
 pub use views::CliView;

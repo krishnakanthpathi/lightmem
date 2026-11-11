@@ -155,7 +155,13 @@ impl<R: std::io::Read, F: FnMut(usize, usize)> std::io::Read for ProgressStream<
 impl GoogleDriveClient {
     pub fn config_dir() -> PathBuf {
         if let Ok(dir) = std::env::var("LIGHTMEM_HOME") {
-            let p = PathBuf::from(dir);
+            let p = PathBuf::from(dir.trim());
+            if !p.as_os_str().is_empty() {
+                return p;
+            }
+        }
+        if let Ok(dir) = std::env::var("LIGHTMEM_CONFIG_DIR") {
+            let p = PathBuf::from(dir.trim());
             if !p.as_os_str().is_empty() {
                 return p;
             }
@@ -652,15 +658,17 @@ impl GoogleDriveClient {
         parent_id: Option<&str>,
         auth_hdr: &str,
     ) -> Result<String> {
+        let escaped_name = escape_drive_query(name);
         let q = if let Some(pid) = parent_id {
             format!(
                 "mimeType = 'application/vnd.google-apps.folder' and name = '{}' and '{}' in parents and trashed = false",
-                name, pid
+                escaped_name,
+                escape_drive_query(pid)
             )
         } else {
             format!(
                 "mimeType = 'application/vnd.google-apps.folder' and name = '{}' and trashed = false",
-                name
+                escaped_name
             )
         };
 
@@ -1069,9 +1077,14 @@ impl GoogleDriveClient {
 
     /// Download a file's binary content from Google Drive
     pub fn download_file(&self, file_id: &str) -> Result<Vec<u8>> {
+        self.download_file_with_base(GDRIVE_API_BASE, file_id)
+    }
+
+    pub(crate) fn download_file_with_base(&self, api_base: &str, file_id: &str) -> Result<Vec<u8>> {
         let token = self.get_access_token()?;
         let auth_hdr = format!("Bearer {}", token);
-        let url = format!("{}/drive/v3/files/{}?alt=media", GDRIVE_API_BASE, file_id);
+        let base = api_base.trim_end_matches('/');
+        let url = format!("{}/drive/v3/files/{}?alt=media", base, file_id);
 
         let resp = ureq::get(&url)
             .set("Authorization", &auth_hdr)
@@ -1082,6 +1095,28 @@ impl GoogleDriveClient {
         let mut bytes = Vec::new();
         resp.into_reader().read_to_end(&mut bytes)?;
         Ok(bytes)
+    }
+
+    /// Look up an optional file by name inside a parent folder and download its bytes if present.
+    pub fn download_optional_file_by_name(
+        &self,
+        name: &str,
+        parent_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        self.download_optional_file_by_name_with_base(GDRIVE_API_BASE, name, parent_id)
+    }
+
+    pub(crate) fn download_optional_file_by_name_with_base(
+        &self,
+        api_base: &str,
+        name: &str,
+        parent_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some(file_id) = self.find_file_with_base(api_base, name, parent_id)? else {
+            return Ok(None);
+        };
+        let bytes = self.download_file_with_base(api_base, &file_id)?;
+        Ok(Some(bytes))
     }
 
     /// Stream a Google Drive file download directly to `dest_path` without buffering the payload in RAM.
@@ -1141,9 +1176,10 @@ impl GoogleDriveClient {
             escape_drive_query(parent_id)
         );
         let url = format!(
-            "{}/drive/v3/files?q={}&fields=files(id)",
+            "{}/drive/v3/files?q={}&orderBy={}&fields=files(id)",
             base,
-            url_encode(&q)
+            url_encode(&q),
+            url_encode("modifiedTime desc")
         );
 
         let resp = ureq::get(&url)
@@ -1395,6 +1431,64 @@ mod streaming_http_tests {
             .unwrap();
         assert_eq!(written, payload.len() as u64);
         assert_eq!(fs::read(&dest_path).unwrap(), payload);
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_download_optional_file_by_name_handles_missing_and_present() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let api_base = format!("http://{}", addr);
+        let manifest_body = r#"{"format":"lightmem-cas-v2","vault_db_sha256":"abc123"}"#;
+        let manifest_body_clone = manifest_body.to_string();
+
+        let handle = std::thread::spawn(move || {
+            for idx in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let req = read_http_request(&mut stream);
+                let resp = if idx == 0 {
+                    assert!(req.method_path.starts_with("GET /drive/v3/files?"));
+                    let body = r#"{"files":[]}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else if idx == 1 {
+                    let body = r#"{"files":[{"id":"manifest-file-1"}]}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                } else {
+                    assert_eq!(
+                        req.method_path,
+                        "GET /drive/v3/files/manifest-file-1?alt=media"
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        manifest_body_clone.len(),
+                        manifest_body_clone
+                    )
+                };
+                stream.write_all(resp.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let client = mock_client();
+        let missing = client
+            .download_optional_file_by_name_with_base(&api_base, "manifest.json", "root-dir")
+            .unwrap();
+        assert!(missing.is_none());
+
+        let found = client
+            .download_optional_file_by_name_with_base(&api_base, "manifest.json", "root-dir")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found, manifest_body.as_bytes());
 
         handle.join().unwrap();
     }

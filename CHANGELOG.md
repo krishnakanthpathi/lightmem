@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2
+
+- Add seamless multi-device cloud sync across macOS and Linux using non-destructive bidirectional SQLite vault merging (`merge_sync_vault`), preventing conflicting overwrites across concurrent devices.
+- Add inline **pre-write pull + post-write push** auto-sync on global default vault mutations (`remember`, `forget`, `clear`, `link`, `unlink`, `autolink`, `conflicts`, `deduplicate`, `import`, `observe`, `config --reset-db`) and MCP (`remember`, `forget`, `conflicts`) whenever Google Drive is connected or `sync_target` is configured and online, without breaking `--json` stdout purity or local writes on network failure.
+- Upgrade `lmem sync --pull` to status-first non-destructive merge (skipping downloads when already in sync and reserving destructive full replacement for `lmem sync --restore`), and update `lmem sync` push + 5-minute `-d` daemon cycles to pull before pushing when remote is ahead and live-reload config each cycle.
+- Add SQLite Schema v7 with `memory_tombstones` and revision tracking triggers (`storage_revision`) so hard deletions propagate safely across devices with timestamp-based resurrection support, LWW updates preserve foreign-key-cascaded graph links/entities, and `--local` air-gapped memories remain isolated on each machine.
+- Streamline snapshot transport by streaming deflated `vault_latest.db.zip` archives (with backward-compatible pull fallback for legacy `vault_latest.db`), reusing already-populated local attachment bytes during CAS rehydration, and tightening Google Drive `modifiedTime desc` deduplication and query escaping.
+- Sync non-secret portable configuration (`backend`, `onnx_model`, `embedding_model`, `reranker`) via `manifest.json` while keeping host-specific `ollama_url` and `ollama_api_key` strictly local.
+- Add first-class Offline/Online sync controls via `lmem sync --offline`, `lmem sync --online`, `lmem config --offline <true|false>`, `LIGHTMEM_OFFLINE`, and MCP `config` `"offline"`, with offline-safe `lmem sync --status`.
+
 ## 0.7.0
 
 - Fix multi-hundred-MB memory spikes and redundant media uploads during `lmem remember` inline auto-sync and `lmem sync`.

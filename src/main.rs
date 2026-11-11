@@ -421,6 +421,10 @@ enum Commands {
         #[arg(long = "sync-auto")]
         sync_auto: Option<bool>,
 
+        /// Pause or resume cloud sync (offline mode: true/false)
+        #[arg(long)]
+        offline: Option<bool>,
+
         /// Delete / reset the active memory database
         #[arg(long)]
         reset_db: bool,
@@ -524,6 +528,14 @@ enum Commands {
         /// Restore local database from the latest remote snapshot in sync target
         #[arg(long)]
         restore: bool,
+
+        /// Pause cloud and automatic sync (switch to offline mode)
+        #[arg(long, conflicts_with_all = ["online", "push", "pull", "restore", "daemon", "stop", "daemon_worker"])]
+        offline: bool,
+
+        /// Resume cloud and automatic sync (switch back to online mode)
+        #[arg(long, conflicts_with_all = ["offline", "push", "pull", "restore", "daemon", "stop", "daemon_worker"])]
+        online: bool,
 
         /// Output sync results as JSON
         #[arg(long)]
@@ -1170,7 +1182,7 @@ fn main() -> Result<()> {
                 has_text || !files.is_empty(),
                 "Provide memory content or attach at least one file via --file / -f"
             );
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let tag_vec = tags
                 .map(|t| {
@@ -1180,6 +1192,13 @@ fn main() -> Result<()> {
                         .collect()
                 })
                 .unwrap_or_default();
+
+            let pull_outcome = lm.sync_before_write_inline(local);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
 
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
@@ -1208,15 +1227,10 @@ fn main() -> Result<()> {
                 entity_warning.as_deref(),
             )?;
 
-            // Inline synchronous sync on memory creation (No daemon)
-            if !local
-                && (lm.config().effective_sync_target().is_some()
-                    || lm.config().sync_auto == Some(true))
-            {
-                if let Ok(Some(ref report)) = lm.sync_memory_inline(&memory) {
-                    if !json {
-                        CliView::render_inline_sync(report);
-                    }
+            // Inline synchronous push after memory creation (skips --local, offline, or non-auto vaults)
+            if let Some(ref report) = lm.sync_after_write_inline(local) {
+                if !json {
+                    CliView::render_inline_sync(report);
                 }
             }
         }
@@ -1617,9 +1631,22 @@ fn main() -> Result<()> {
         }
 
         Commands::Deduplicate { json } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             let merged = lm.deduplicate()?;
             CliView::render_dedup(merged, json)?;
+            if merged > 0 {
+                if let Some(ref report) = lm.sync_after_write_inline(false) {
+                    if !json {
+                        CliView::render_inline_sync(report);
+                    }
+                }
+            }
         }
 
         Commands::Forget {
@@ -1628,18 +1655,37 @@ fn main() -> Result<()> {
             hard,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             if all {
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(hard)?;
+                let sync_report = lm.sync_after_write_inline(false);
                 drop(lm);
                 if hard {
                     remove_db_files(&db_path);
                 }
                 CliView::render_clear(removed, hard, &db_path, json)?;
+                if !json {
+                    if let Some(ref report) = sync_report {
+                        CliView::render_inline_sync(report);
+                    }
+                }
             } else if let Some(target_id) = id {
                 let ok = lm.forget(&target_id, hard)?;
                 CliView::render_forget(&target_id, ok, hard, json)?;
+                if ok {
+                    if let Some(ref report) = lm.sync_after_write_inline(false) {
+                        if !json {
+                            CliView::render_inline_sync(report);
+                        }
+                    }
+                }
             } else {
                 anyhow::bail!("Provide a memory <ID> or pass '--all' to forget all memories.");
             }
@@ -1647,14 +1693,26 @@ fn main() -> Result<()> {
 
         Commands::Clear { soft, json } => {
             let hard = !soft;
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             let db_path = lm.db_path().to_path_buf();
             let removed = lm.clear_all(hard)?;
+            let sync_report = lm.sync_after_write_inline(false);
             drop(lm);
             if hard {
                 remove_db_files(&db_path);
             }
             CliView::render_clear(removed, hard, &db_path, json)?;
+            if !json {
+                if let Some(ref report) = sync_report {
+                    CliView::render_inline_sync(report);
+                }
+            }
         }
 
         Commands::Export {
@@ -1694,7 +1752,13 @@ fn main() -> Result<()> {
             merge,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("lmbundle") {
                 let res = lm.import_bundle(&file, replace, merge)?;
@@ -1705,6 +1769,11 @@ fn main() -> Result<()> {
                 }
                 let count = lm.import_file_with_options(&file, enrich, replace)?;
                 CliView::render_import(count, &file, json)?;
+            }
+            if let Some(ref report) = lm.sync_after_write_inline(false) {
+                if !json {
+                    CliView::render_inline_sync(report);
+                }
             }
         }
 
@@ -1776,17 +1845,26 @@ fn main() -> Result<()> {
             reranker,
             sync_target,
             sync_auto,
+            offline,
             reset_db,
             yes,
             json,
         } => {
             if reset_db {
-                let lm = open_controller(effective_db, global, connection)?;
+                let mut lm = open_controller(effective_db, global, connection)?;
+                let pull_outcome = lm.sync_before_write_inline(false);
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(true)?;
+                let sync_report = lm.sync_after_write_inline(false);
                 drop(lm);
                 remove_db_files(&db_path);
                 CliView::render_clear(removed, true, &db_path, false)?;
+                if let Some(ref rep) = sync_report {
+                    CliView::render_inline_sync(rep);
+                }
                 if preset.is_none()
                     && backend.is_none()
                     && onnx_model.is_none()
@@ -1796,6 +1874,7 @@ fn main() -> Result<()> {
                     && reranker.is_none()
                     && sync_target.is_none()
                     && sync_auto.is_none()
+                    && offline.is_none()
                 {
                     return Ok(());
                 }
@@ -1924,6 +2003,10 @@ fn main() -> Result<()> {
             }
             if let Some(auto) = sync_auto {
                 cfg.sync_auto = Some(auto);
+                changed = true;
+            }
+            if let Some(off) = offline {
+                cfg.sync_offline = Some(off);
                 changed = true;
             }
 
@@ -2091,9 +2174,26 @@ fn main() -> Result<()> {
             yes: _,
             status,
             restore,
+            offline,
+            online,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            if offline || online {
+                let target_offline = offline;
+                let mut cfg = LightMemConfig::try_load()?;
+                cfg.sync_offline = Some(target_offline);
+                cfg.save()?;
+                if status {
+                    let lm = open_controller(effective_db, global, connection)?;
+                    let report = lm.sync_status(target.as_deref())?;
+                    CliView::render_sync_status(&report, json)?;
+                } else {
+                    CliView::render_sync_offline_mode(target_offline, json)?;
+                }
+                return Ok(());
+            }
+
+            let mut lm = open_controller(effective_db, global, connection)?;
             let mut effective_backup_only = backup_only;
             let mut effective_skip_db = skip_db;
 
@@ -2145,8 +2245,9 @@ fn main() -> Result<()> {
                 let report = lm.sync_status(target.as_deref())?;
                 CliView::render_sync_status(&report, json)?;
             } else if pull || restore {
-                let report = lm.sync_pull(target.as_deref(), restore)?;
-                CliView::render_sync_pull(&report, json)?;
+                let (report, config_adopted) =
+                    lm.sync_pull_and_adopt(target.as_deref(), restore)?;
+                CliView::render_sync_pull_with_options(&report, config_adopted, json)?;
             } else if json {
                 let report = lm.sync_push_with_options(
                     target.as_deref(),
@@ -2227,7 +2328,15 @@ fn main() -> Result<()> {
             min_similarity,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            if yes {
+                let pull_outcome = lm.sync_before_write_inline(false);
+                if !json {
+                    if let Some(ref p) = pull_outcome {
+                        CliView::render_inline_pull(p);
+                    }
+                }
+            }
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -2236,7 +2345,18 @@ fn main() -> Result<()> {
                 let conflicts =
                     lm.find_conflicts_with_options(yes, min_similarity, reranker.as_deref())?;
                 CliView::render_conflicts(&conflicts, yes, lm.db_path(), json)?;
+                if yes && !conflicts.is_empty() {
+                    if let Some(ref report) = lm.sync_after_write_inline(false) {
+                        if !json {
+                            CliView::render_inline_sync(report);
+                        }
+                    }
+                }
             } else {
+                let pull_outcome = lm.sync_before_write_inline(false);
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
                 let conflicts =
                     lm.find_conflicts_with_options(false, min_similarity, reranker.as_deref())?;
                 if conflicts.is_empty() {
@@ -2294,6 +2414,11 @@ fn main() -> Result<()> {
                 }
 
                 println!("✦ Conflict check complete: {} merged.", merged_count);
+                if merged_count > 0 {
+                    if let Some(ref report) = lm.sync_after_write_inline(false) {
+                        CliView::render_inline_sync(report);
+                    }
+                }
             }
         }
 
@@ -2304,9 +2429,20 @@ fn main() -> Result<()> {
             weight,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             let (src_id, dst_id) = lm.link(&source, &target, Some(&relation), Some(weight))?;
             CliView::render_link(&src_id, &dst_id, &relation, weight, json)?;
+            if let Some(ref report) = lm.sync_after_write_inline(false) {
+                if !json {
+                    CliView::render_inline_sync(report);
+                }
+            }
         }
 
         Commands::Unlink {
@@ -2315,9 +2451,22 @@ fn main() -> Result<()> {
             relation,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             let removed = lm.unlink(&source, &target, relation.as_deref())?;
             CliView::render_unlink(&source, &target, relation.as_deref(), removed, json)?;
+            if removed {
+                if let Some(ref report) = lm.sync_after_write_inline(false) {
+                    if !json {
+                        CliView::render_inline_sync(report);
+                    }
+                }
+            }
         }
 
         Commands::Related { id, hops, json } => {
@@ -2336,10 +2485,23 @@ fn main() -> Result<()> {
             min_similarity,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let pull_outcome = lm.sync_before_write_inline(false);
+            if !json {
+                if let Some(ref p) = pull_outcome {
+                    CliView::render_inline_pull(p);
+                }
+            }
             let new_links = lm.autolink(Some(min_similarity))?;
             let snapshot = lm.graph(None, None)?;
             CliView::render_autolink(new_links, snapshot.nodes.len(), snapshot.edges.len(), json)?;
+            if new_links > 0 {
+                if let Some(ref report) = lm.sync_after_write_inline(false) {
+                    if !json {
+                        CliView::render_inline_sync(report);
+                    }
+                }
+            }
         }
 
         Commands::Observe {
@@ -2353,7 +2515,16 @@ fn main() -> Result<()> {
             reranker,
             json,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
+            let mut lm = open_controller(effective_db, global, connection)?;
+            let will_save_writes = !dry_run && (yes || (!json && io::stdin().is_terminal()));
+            if will_save_writes {
+                let pull_outcome = lm.sync_before_write_inline(false);
+                if !json {
+                    if let Some(ref p) = pull_outcome {
+                        CliView::render_inline_pull(p);
+                    }
+                }
+            }
             if !dry_run && !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -2416,6 +2587,13 @@ fn main() -> Result<()> {
                 } else {
                     CliView::render_observed_candidates(&candidates, false, false)?;
                     CliView::render_observed_summary(saved_records.len(), 0, false, false)?;
+                }
+                if !saved_records.is_empty() {
+                    if let Some(ref report) = lm.sync_after_write_inline(false) {
+                        if !json {
+                            CliView::render_inline_sync(report);
+                        }
+                    }
                 }
                 return Ok(());
             }
@@ -2497,6 +2675,11 @@ fn main() -> Result<()> {
             }
 
             CliView::render_observed_summary(saved_count, skipped_count, false, false)?;
+            if saved_count > 0 {
+                if let Some(ref report) = lm.sync_after_write_inline(false) {
+                    CliView::render_inline_sync(report);
+                }
+            }
         }
 
         Commands::Connect {

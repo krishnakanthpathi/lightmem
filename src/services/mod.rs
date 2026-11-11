@@ -22,8 +22,8 @@ pub use gdrive::{DriveAuthStatus, DriveFolders, DriveLogoutReport, GoogleDriveCl
 #[cfg(feature = "mcp")]
 pub use mcp::McpServer;
 pub use sync::{
-    SyncManifest, SyncOptions, SyncProgress, SyncPullReport, SyncReport, SyncService,
-    SyncStatusReport,
+    InlinePullOutcome, SyncManifest, SyncOptions, SyncProgress, SyncPullReport, SyncReport,
+    SyncService, SyncState, SyncStatusReport,
 };
 
 pub use embeddings::{
