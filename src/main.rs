@@ -1,11 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
-use colored::Colorize;
-use lightmem::{
-    encode_base64, parse_ttl_duration, CliView, GoogleDriveClient, LightMem, LightMemConfig,
-    MemoryStatus, MemoryType, MultimodalInput,
-};
+use colored::*;
+use lightmem::{parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -52,12 +49,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// View all managed memory vaults, active connections, and storage telemetry
-    #[command(visible_alias = "vaults")]
-    Status {
-        #[arg(long)]
-        json: bool,
-    },
     /// Register and inspect users, agents, harnesses, and named connections
     Identity {
         #[command(subcommand)]
@@ -119,10 +110,6 @@ enum Commands {
         #[arg(long = "no-entities", visible_alias = "no-extract-entities")]
         no_entities: bool,
 
-        /// Air-gap memory strictly to local machine; exempt from cloud sync and remote backup uploads
-        #[arg(long)]
-        local: bool,
-
         /// Output created memory as JSON
         #[arg(long)]
         json: bool,
@@ -130,13 +117,8 @@ enum Commands {
 
     /// Recall memories via hybrid semantic + keyword search
     Recall {
-        /// Search query string (optional if --image is supplied)
-        #[arg(default_value = "")]
+        /// Search query string
         query: String,
-
-        /// Search multimodal vector memory with an image query
-        #[arg(long = "image", visible_alias = "img")]
-        image: Option<PathBuf>,
 
         /// Filter by category
         #[arg(short = 't', long = "type")]
@@ -177,10 +159,6 @@ enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
-
-        /// Open recalled attachment file(s) immediately using system default application
-        #[arg(long)]
-        open: bool,
 
         /// Output results as JSON for agent consumption
         #[arg(long)]
@@ -248,10 +226,6 @@ enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
-
-        /// Open inspected attachment file(s) immediately using system default application
-        #[arg(long)]
-        open: bool,
 
         /// Output memory details as JSON
         #[arg(long)]
@@ -413,18 +387,6 @@ enum Commands {
         #[arg(long)]
         reranker: Option<String>,
 
-        /// Cloud / CAS sync & backup target directory (e.g. '~/Google Drive/My Drive/LightMem' or local archive)
-        #[arg(long = "sync-target")]
-        sync_target: Option<String>,
-
-        /// Toggle automatic synchronous inline sync on memory creation
-        #[arg(long = "sync-auto")]
-        sync_auto: Option<bool>,
-
-        /// Pause or resume cloud sync (offline mode: true/false)
-        #[arg(long)]
-        offline: Option<bool>,
-
         /// Delete / reset the active memory database
         #[arg(long)]
         reset_db: bool,
@@ -475,121 +437,6 @@ enum Commands {
     /// Display storage statistics and active database path
     Stats {
         /// Output statistics as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Synchronize CAS attachment blobs and create atomic vector database snapshots
-    Sync {
-        /// Target directory for sync (overrides config sync_target, e.g. '~/Google Drive/My Drive/LightMem' or 'gdrive')
-        #[arg(long)]
-        target: Option<PathBuf>,
-
-        /// Push local CAS blobs and save atomic vector snapshot to target (default action)
-        #[arg(long)]
-        push: bool,
-
-        /// Pull missing CAS blobs or inspect remote vault snapshot
-        #[arg(long)]
-        pull: bool,
-
-        /// Only backup the vector database snapshot, skipping attachment blob sync (alias: --skip-media)
-        #[arg(long, visible_alias = "skip-media")]
-        backup_only: bool,
-
-        /// Skip uploading the database snapshot (only sync CAS media attachments)
-        #[arg(long, visible_alias = "skip-snapshot")]
-        skip_db: bool,
-
-        /// Skip specific sync components ('media', 'db', or 'snapshot')
-        #[arg(long)]
-        skip: Option<String>,
-
-        /// Run sync continuously in a detached background daemon
-        #[arg(short = 'd', long)]
-        daemon: bool,
-
-        /// Stop any currently running background sync daemon
-        #[arg(long)]
-        stop: bool,
-
-        /// Internal worker loop for sync daemon process
-        #[arg(long, hide = true)]
-        daemon_worker: bool,
-
-        /// Automatically proceed without confirmation prompts
-        #[arg(short = 'y', long)]
-        yes: bool,
-
-        /// Show sync status, blob counts, and storage metrics without modifying files
-        #[arg(long)]
-        status: bool,
-
-        /// Restore local database from the latest remote snapshot in sync target
-        #[arg(long)]
-        restore: bool,
-
-        /// Pause cloud and automatic sync (switch to offline mode)
-        #[arg(long, conflicts_with_all = ["online", "push", "pull", "restore", "daemon", "stop", "daemon_worker"])]
-        offline: bool,
-
-        /// Resume cloud and automatic sync (switch back to online mode)
-        #[arg(long, conflicts_with_all = ["offline", "push", "pull", "restore", "daemon", "stop", "daemon_worker"])]
-        online: bool,
-
-        /// Output sync results as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Open offline interactive documentation and landing page in browser
-    #[command(visible_alias = "doc", visible_alias = "web")]
-    Docs {
-        /// Port to serve documentation on (default: 8080)
-        #[arg(short = 'p', long)]
-        port: Option<u16>,
-
-        /// Open root landing page instead of documentation
-        #[arg(long)]
-        landing: bool,
-
-        /// Do not automatically open browser
-        #[arg(long)]
-        no_browser: bool,
-    },
-
-    /// Disconnect and log out of Google Drive, invalidating OAuth tokens
-    Logout {
-        /// Skip revoking token on Google's authorization servers
-        #[arg(long)]
-        no_revoke: bool,
-
-        /// Also delete saved client credentials file (gdrive_credentials.json)
-        #[arg(long)]
-        purge_credentials: bool,
-
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Authenticate with Google Drive for cloud CAS attachment and vector snapshot sync
-    Login {
-        /// Optional path to downloaded Google OAuth client credentials JSON
-        #[arg(short = 'c', long)]
-        credentials: Option<PathBuf>,
-
-        /// Output result as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Manage Google Drive cloud storage authentication
-    Auth {
-        #[command(subcommand)]
-        command: Option<AuthCommands>,
-
-        /// Output result as JSON
         #[arg(long)]
         json: bool,
     },
@@ -790,34 +637,6 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand, Debug, Clone)]
-enum AuthCommands {
-    /// Show current Google Drive authentication status and connected account
-    Status {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Log in to Google Drive via browser OAuth flow
-    Login {
-        /// Optional path to downloaded Google OAuth client credentials JSON
-        #[arg(short = 'c', long)]
-        credentials: Option<PathBuf>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Log out from Google Drive and revoke tokens
-    Logout {
-        /// Skip revoking token on Google's authorization servers
-        #[arg(long)]
-        no_revoke: bool,
-        /// Also delete saved client credentials file (gdrive_credentials.json)
-        #[arg(long)]
-        purge_credentials: bool,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
 fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
@@ -923,29 +742,19 @@ enum IdentityCommand {
     Show {
         id: String,
     },
-    /// View all managed memory vaults, active connections, and storage telemetry
-    Status,
 }
 
-fn run_identity(action: &IdentityCommand, json: bool, default_db: PathBuf) -> Result<()> {
+fn run_identity(action: &IdentityCommand) -> Result<()> {
     let registry = lightmem::IdentityRegistry::open_default()?;
-    match action {
-        IdentityCommand::Status => {
-            let overview = registry.status_overview(default_db)?;
-            CliView::render_vault_status_overview(&overview, json)?;
-        }
+    let value = match action {
         IdentityCommand::UserAdd { id, name } => {
-            let value = serde_json::to_value(registry.add_user(id, name.as_deref())?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            serde_json::to_value(registry.add_user(id, name.as_deref())?)?
         }
         IdentityCommand::AgentAdd { id, user, name } => {
-            let value = serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?
         }
         IdentityCommand::HarnessAdd { id, path, name } => {
-            let value =
-                serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?
         }
         IdentityCommand::ConnectionAdd {
             id,
@@ -954,26 +763,18 @@ fn run_identity(action: &IdentityCommand, json: bool, default_db: PathBuf) -> Re
             harness,
             project,
             memory_scope,
-        } => {
-            let value = serde_json::to_value(registry.add_connection(
-                id,
-                user,
-                agent,
-                harness,
-                project.clone(),
-                memory_scope.clone(),
-            )?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
-        IdentityCommand::List { kind } => {
-            let value = registry.list(kind)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
-        IdentityCommand::Show { id } => {
-            let value = serde_json::to_value(registry.resolve(id, None, None)?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
-    }
+        } => serde_json::to_value(registry.add_connection(
+            id,
+            user,
+            agent,
+            harness,
+            project.clone(),
+            memory_scope.clone(),
+        )?)?,
+        IdentityCommand::List { kind } => registry.list(kind)?,
+        IdentityCommand::Show { id } => serde_json::to_value(registry.resolve(id, None, None)?)?,
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
 }
 
@@ -1050,31 +851,6 @@ fn migrate_embeddings(lm: &LightMem, yes: bool, machine_output: bool, force: boo
     Ok(true)
 }
 
-fn open_file_in_default_app(path: &Path) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .with_context(|| format!("Failed to open {} with 'open'", path.display()))?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.to_string_lossy()])
-            .spawn()
-            .with_context(|| format!("Failed to open {} with 'start'", path.display()))?;
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .with_context(|| format!("Failed to open {} with 'xdg-open'", path.display()))?;
-    }
-    Ok(())
-}
-
 fn main() -> Result<()> {
     #[cfg(windows)]
     {
@@ -1084,30 +860,18 @@ fn main() -> Result<()> {
     if cli.version {
         return CliView::render_version(cli.json);
     }
-    let env_db = std::env::var("LIGHTMEM_DB")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from);
-    let default_db = cli
-        .db
-        .as_deref()
-        .map(Path::to_path_buf)
-        .or_else(|| env_db.clone())
-        .unwrap_or_else(|| LightMemConfig::resolve_db_path(cli.global));
-
-    if let Some(Commands::Identity { action, json }) = &cli.command {
-        return run_identity(action, *json || cli.json, default_db);
-    }
-    if let Some(Commands::Status { json }) = &cli.command {
-        let registry = lightmem::IdentityRegistry::open_default()?;
-        let overview = registry.status_overview(default_db)?;
-        return CliView::render_vault_status_overview(&overview, *json || cli.json);
+    if let Some(Commands::Identity { action, .. }) = &cli.command {
+        return run_identity(action);
     }
     let connection_id = cli.connection.clone().or_else(|| {
         std::env::var("LIGHTMEM_CONNECTION")
             .ok()
             .filter(|v| !v.trim().is_empty())
     });
+    let env_db = std::env::var("LIGHTMEM_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
     anyhow::ensure!(
         connection_id.is_some() || (cli.scope.is_none() && cli.session.is_none()),
         "--scope and --session require --connection"
@@ -1147,7 +911,7 @@ fn main() -> Result<()> {
     };
 
     match command {
-        Commands::Identity { .. } | Commands::Status { .. } => unreachable!(),
+        Commands::Identity { .. } => unreachable!(),
         Commands::Context { .. } => {
             let value = match connection {
                 Some(connection) => serde_json::to_value(connection)?,
@@ -1170,7 +934,6 @@ fn main() -> Result<()> {
             supersede,
             provenance,
             no_entities,
-            local,
             json,
         } => {
             let has_text = content
@@ -1182,7 +945,7 @@ fn main() -> Result<()> {
                 has_text || !files.is_empty(),
                 "Provide memory content or attach at least one file via --file / -f"
             );
-            let mut lm = open_controller(effective_db, global, connection)?;
+            let lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let tag_vec = tags
                 .map(|t| {
@@ -1192,13 +955,6 @@ fn main() -> Result<()> {
                         .collect()
                 })
                 .unwrap_or_default();
-
-            let pull_outcome = lm.sync_before_write_inline(local);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
 
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
@@ -1216,7 +972,6 @@ fn main() -> Result<()> {
                 ttl,
                 supersede,
                 provenance,
-                local,
             )?;
             CliView::render_remembered_full(
                 &memory,
@@ -1226,18 +981,10 @@ fn main() -> Result<()> {
                 json,
                 entity_warning.as_deref(),
             )?;
-
-            // Inline synchronous push after memory creation (skips --local, offline, or non-auto vaults)
-            if let Some(ref report) = lm.sync_after_write_inline(local) {
-                if !json {
-                    CliView::render_inline_sync(report);
-                }
-            }
         }
 
         Commands::Recall {
             query,
-            image,
             category,
             media,
             as_of,
@@ -1248,7 +995,6 @@ fn main() -> Result<()> {
             multi_hop,
             save_to,
             path,
-            open,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
@@ -1263,27 +1009,14 @@ fn main() -> Result<()> {
                     lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
                 CliView::render_answer(&result, json)?;
             } else {
-                let filter_attachments = media.is_some() || path || save_to.is_some() || open;
+                let filter_attachments = media.is_some() || path || save_to.is_some();
                 let fetch_limit = if filter_attachments {
                     limit.max(100)
                 } else {
                     limit
                 };
-                let img_b64 = if let Some(ref img_path) = image {
-                    let data = std::fs::read(img_path).with_context(|| {
-                        format!("Failed to read query image file: {}", img_path.display())
-                    })?;
-                    Some(encode_base64(&data))
-                } else {
-                    None
-                };
-                let mm_input = if let Some(ref b64) = img_b64 {
-                    MultimodalInput::with_image(&query, b64)
-                } else {
-                    MultimodalInput::text_only(&query)
-                };
-                let mut results = lm.recall_multimodal_expanded(
-                    &mm_input,
+                let mut results = lm.recall_expanded(
+                    &query,
                     cat,
                     as_of_dt,
                     date,
@@ -1305,26 +1038,17 @@ fn main() -> Result<()> {
                     results.truncate(limit);
                 }
                 let ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
-                if open || path {
+                if path {
                     let all_paths =
                         lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
-                    if open {
-                        for p in &all_paths {
-                            let _ = open_file_in_default_app(p);
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                    } else {
+                        for p in all_paths {
+                            println!("{}", p.display());
                         }
                     }
-                    if path {
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&all_paths)?);
-                        } else {
-                            for p in all_paths {
-                                println!("{}", p.display());
-                            }
-                        }
-                        return Ok(());
-                    }
-                }
-                if let Some(ref target) = save_to {
+                } else if let Some(ref target) = save_to {
                     let all_saved = lm.save_memories_attachments_to(&ids, target)?;
                     if json {
                         let mut offset = 0usize;
@@ -1489,11 +1213,10 @@ fn main() -> Result<()> {
             terms,
             save_to,
             path,
-            open,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
-            if open || path {
+            if path {
                 let mut ids = Vec::new();
                 for term in &terms {
                     let Some(record) = lm.get(term)? else {
@@ -1505,28 +1228,20 @@ fn main() -> Result<()> {
                     ids.push(record.id);
                 }
                 let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
-                if open {
-                    for p in &all_paths {
-                        let _ = open_file_in_default_app(p);
-                    }
-                }
-                if path {
-                    if all_paths.is_empty() {
-                        if json {
-                            println!("[]");
-                        } else {
-                            eprintln!("No attachments found for: {}", terms.join(", "));
-                        }
-                        std::process::exit(1);
-                    }
+                if all_paths.is_empty() {
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                        println!("[]");
                     } else {
-                        for p in all_paths {
-                            println!("{}", p.display());
-                        }
+                        eprintln!("No attachments found for: {}", terms.join(", "));
                     }
-                    return Ok(());
+                    std::process::exit(1);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&all_paths)?);
+                } else {
+                    for p in all_paths {
+                        println!("{}", p.display());
+                    }
                 }
             } else if terms.len() == 1 {
                 let term = &terms[0];
@@ -1631,22 +1346,9 @@ fn main() -> Result<()> {
         }
 
         Commands::Deduplicate { json } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             let merged = lm.deduplicate()?;
             CliView::render_dedup(merged, json)?;
-            if merged > 0 {
-                if let Some(ref report) = lm.sync_after_write_inline(false) {
-                    if !json {
-                        CliView::render_inline_sync(report);
-                    }
-                }
-            }
         }
 
         Commands::Forget {
@@ -1655,37 +1357,18 @@ fn main() -> Result<()> {
             hard,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             if all {
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(hard)?;
-                let sync_report = lm.sync_after_write_inline(false);
                 drop(lm);
                 if hard {
                     remove_db_files(&db_path);
                 }
                 CliView::render_clear(removed, hard, &db_path, json)?;
-                if !json {
-                    if let Some(ref report) = sync_report {
-                        CliView::render_inline_sync(report);
-                    }
-                }
             } else if let Some(target_id) = id {
                 let ok = lm.forget(&target_id, hard)?;
                 CliView::render_forget(&target_id, ok, hard, json)?;
-                if ok {
-                    if let Some(ref report) = lm.sync_after_write_inline(false) {
-                        if !json {
-                            CliView::render_inline_sync(report);
-                        }
-                    }
-                }
             } else {
                 anyhow::bail!("Provide a memory <ID> or pass '--all' to forget all memories.");
             }
@@ -1693,26 +1376,14 @@ fn main() -> Result<()> {
 
         Commands::Clear { soft, json } => {
             let hard = !soft;
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             let db_path = lm.db_path().to_path_buf();
             let removed = lm.clear_all(hard)?;
-            let sync_report = lm.sync_after_write_inline(false);
             drop(lm);
             if hard {
                 remove_db_files(&db_path);
             }
             CliView::render_clear(removed, hard, &db_path, json)?;
-            if !json {
-                if let Some(ref report) = sync_report {
-                    CliView::render_inline_sync(report);
-                }
-            }
         }
 
         Commands::Export {
@@ -1752,13 +1423,7 @@ fn main() -> Result<()> {
             merge,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("lmbundle") {
                 let res = lm.import_bundle(&file, replace, merge)?;
@@ -1769,11 +1434,6 @@ fn main() -> Result<()> {
                 }
                 let count = lm.import_file_with_options(&file, enrich, replace)?;
                 CliView::render_import(count, &file, json)?;
-            }
-            if let Some(ref report) = lm.sync_after_write_inline(false) {
-                if !json {
-                    CliView::render_inline_sync(report);
-                }
             }
         }
 
@@ -1843,28 +1503,17 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
-            sync_target,
-            sync_auto,
-            offline,
             reset_db,
             yes,
             json,
         } => {
             if reset_db {
-                let mut lm = open_controller(effective_db, global, connection)?;
-                let pull_outcome = lm.sync_before_write_inline(false);
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
+                let lm = open_controller(effective_db, global, connection)?;
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(true)?;
-                let sync_report = lm.sync_after_write_inline(false);
                 drop(lm);
                 remove_db_files(&db_path);
                 CliView::render_clear(removed, true, &db_path, false)?;
-                if let Some(ref rep) = sync_report {
-                    CliView::render_inline_sync(rep);
-                }
                 if preset.is_none()
                     && backend.is_none()
                     && onnx_model.is_none()
@@ -1872,9 +1521,6 @@ fn main() -> Result<()> {
                     && url.is_none()
                     && model.is_none()
                     && reranker.is_none()
-                    && sync_target.is_none()
-                    && sync_auto.is_none()
-                    && offline.is_none()
                 {
                     return Ok(());
                 }
@@ -1995,19 +1641,6 @@ fn main() -> Result<()> {
                         r
                     );
                 }
-            }
-
-            if let Some(target) = sync_target {
-                cfg.sync_target = Some(target);
-                changed = true;
-            }
-            if let Some(auto) = sync_auto {
-                cfg.sync_auto = Some(auto);
-                changed = true;
-            }
-            if let Some(off) = offline {
-                cfg.sync_offline = Some(off);
-                changed = true;
             }
 
             if changed {
@@ -2161,182 +1794,13 @@ fn main() -> Result<()> {
             CliView::render_stats(&stats, lm.db_path(), json)?;
         }
 
-        Commands::Sync {
-            target,
-            push: _,
-            pull,
-            backup_only,
-            skip_db,
-            skip,
-            daemon,
-            stop,
-            daemon_worker,
-            yes: _,
-            status,
-            restore,
-            offline,
-            online,
-            json,
-        } => {
-            if offline || online {
-                let target_offline = offline;
-                let mut cfg = LightMemConfig::try_load()?;
-                cfg.sync_offline = Some(target_offline);
-                cfg.save()?;
-                if status {
-                    let lm = open_controller(effective_db, global, connection)?;
-                    let report = lm.sync_status(target.as_deref())?;
-                    CliView::render_sync_status(&report, json)?;
-                } else {
-                    CliView::render_sync_offline_mode(target_offline, json)?;
-                }
-                return Ok(());
-            }
-
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let mut effective_backup_only = backup_only;
-            let mut effective_skip_db = skip_db;
-
-            if let Some(ref s) = skip {
-                let s_lower = s.trim().to_lowercase();
-                if s_lower == "media" || s_lower == "blobs" || s_lower == "attachments" {
-                    effective_backup_only = true;
-                } else if s_lower == "db"
-                    || s_lower == "database"
-                    || s_lower == "snapshot"
-                    || s_lower == "snapshots"
-                {
-                    effective_skip_db = true;
-                }
-            }
-
-            if stop {
-                let stopped_pid = lightmem::SyncService::stop_daemon()?;
-                CliView::render_daemon_stop(stopped_pid, json)?;
-            } else if daemon {
-                let target_path = target
-                    .clone()
-                    .or_else(|| lm.config().effective_sync_target());
-                let sync_options = lightmem::SyncOptions {
-                    backup_only: effective_backup_only,
-                    skip_db: effective_skip_db,
-                };
-                let pid =
-                    lightmem::SyncService::spawn_daemon(target_path.as_deref(), sync_options)?;
-                let display_target = target_path.unwrap_or_else(|| PathBuf::from("gdrive"));
-                CliView::render_daemon_start(
-                    pid,
-                    &lightmem::SyncService::daemon_log_path(),
-                    &display_target,
-                    json,
-                )?;
-            } else if daemon_worker {
-                let sync_options = lightmem::SyncOptions {
-                    backup_only: effective_backup_only,
-                    skip_db: effective_skip_db,
-                };
-                lightmem::SyncService::run_daemon_worker(
-                    lm.storage(),
-                    lm.config(),
-                    target.as_deref(),
-                    sync_options,
-                )?;
-            } else if status {
-                let report = lm.sync_status(target.as_deref())?;
-                CliView::render_sync_status(&report, json)?;
-            } else if pull || restore {
-                let (report, config_adopted) =
-                    lm.sync_pull_and_adopt(target.as_deref(), restore)?;
-                CliView::render_sync_pull_with_options(&report, config_adopted, json)?;
-            } else if json {
-                let report = lm.sync_push_with_options(
-                    target.as_deref(),
-                    effective_backup_only,
-                    effective_skip_db,
-                    |_| {},
-                )?;
-                CliView::render_sync_report(&report, true)?;
-            } else {
-                let report = lm.sync_push_with_options(
-                    target.as_deref(),
-                    effective_backup_only,
-                    effective_skip_db,
-                    |p| {
-                        CliView::render_sync_progress(&p);
-                    },
-                )?;
-                CliView::render_sync_report(&report, false)?;
-            }
-        }
-
-        Commands::Docs {
-            port,
-            landing,
-            no_browser,
-        } => {
-            let options = lightmem::DocsOptions {
-                port,
-                open_landing: landing,
-                no_browser,
-            };
-            lightmem::serve_docs(options)?;
-        }
-
-        Commands::Logout {
-            no_revoke,
-            purge_credentials,
-            json,
-        } => {
-            let report = GoogleDriveClient::logout(!no_revoke, purge_credentials)?;
-            CliView::render_auth_logout(&report, json)?;
-        }
-
-        Commands::Login { credentials, json } => {
-            let status = GoogleDriveClient::login(credentials.as_deref())?;
-            CliView::render_auth_status(&status, json)?;
-        }
-
-        Commands::Auth { command, json } => match command {
-            Some(AuthCommands::Status { json: sub_json }) => {
-                let status = GoogleDriveClient::get_status()?;
-                CliView::render_auth_status(&status, json || sub_json)?;
-            }
-            Some(AuthCommands::Login {
-                credentials,
-                json: sub_json,
-            }) => {
-                let status = GoogleDriveClient::login(credentials.as_deref())?;
-                CliView::render_auth_status(&status, json || sub_json)?;
-            }
-            Some(AuthCommands::Logout {
-                no_revoke,
-                purge_credentials,
-                json: sub_json,
-            }) => {
-                let report = GoogleDriveClient::logout(!no_revoke, purge_credentials)?;
-                CliView::render_auth_logout(&report, json || sub_json)?;
-            }
-            None => {
-                let status = GoogleDriveClient::get_status()?;
-                CliView::render_auth_status(&status, json)?;
-            }
-        },
-
         Commands::Conflicts {
             yes,
             reranker,
             min_similarity,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            if yes {
-                let pull_outcome = lm.sync_before_write_inline(false);
-                if !json {
-                    if let Some(ref p) = pull_outcome {
-                        CliView::render_inline_pull(p);
-                    }
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             if !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -2345,18 +1809,7 @@ fn main() -> Result<()> {
                 let conflicts =
                     lm.find_conflicts_with_options(yes, min_similarity, reranker.as_deref())?;
                 CliView::render_conflicts(&conflicts, yes, lm.db_path(), json)?;
-                if yes && !conflicts.is_empty() {
-                    if let Some(ref report) = lm.sync_after_write_inline(false) {
-                        if !json {
-                            CliView::render_inline_sync(report);
-                        }
-                    }
-                }
             } else {
-                let pull_outcome = lm.sync_before_write_inline(false);
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
                 let conflicts =
                     lm.find_conflicts_with_options(false, min_similarity, reranker.as_deref())?;
                 if conflicts.is_empty() {
@@ -2414,11 +1867,6 @@ fn main() -> Result<()> {
                 }
 
                 println!("✦ Conflict check complete: {} merged.", merged_count);
-                if merged_count > 0 {
-                    if let Some(ref report) = lm.sync_after_write_inline(false) {
-                        CliView::render_inline_sync(report);
-                    }
-                }
             }
         }
 
@@ -2429,20 +1877,9 @@ fn main() -> Result<()> {
             weight,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             let (src_id, dst_id) = lm.link(&source, &target, Some(&relation), Some(weight))?;
             CliView::render_link(&src_id, &dst_id, &relation, weight, json)?;
-            if let Some(ref report) = lm.sync_after_write_inline(false) {
-                if !json {
-                    CliView::render_inline_sync(report);
-                }
-            }
         }
 
         Commands::Unlink {
@@ -2451,22 +1888,9 @@ fn main() -> Result<()> {
             relation,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             let removed = lm.unlink(&source, &target, relation.as_deref())?;
             CliView::render_unlink(&source, &target, relation.as_deref(), removed, json)?;
-            if removed {
-                if let Some(ref report) = lm.sync_after_write_inline(false) {
-                    if !json {
-                        CliView::render_inline_sync(report);
-                    }
-                }
-            }
         }
 
         Commands::Related { id, hops, json } => {
@@ -2485,23 +1909,10 @@ fn main() -> Result<()> {
             min_similarity,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let pull_outcome = lm.sync_before_write_inline(false);
-            if !json {
-                if let Some(ref p) = pull_outcome {
-                    CliView::render_inline_pull(p);
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             let new_links = lm.autolink(Some(min_similarity))?;
             let snapshot = lm.graph(None, None)?;
             CliView::render_autolink(new_links, snapshot.nodes.len(), snapshot.edges.len(), json)?;
-            if new_links > 0 {
-                if let Some(ref report) = lm.sync_after_write_inline(false) {
-                    if !json {
-                        CliView::render_inline_sync(report);
-                    }
-                }
-            }
         }
 
         Commands::Observe {
@@ -2515,16 +1926,7 @@ fn main() -> Result<()> {
             reranker,
             json,
         } => {
-            let mut lm = open_controller(effective_db, global, connection)?;
-            let will_save_writes = !dry_run && (yes || (!json && io::stdin().is_terminal()));
-            if will_save_writes {
-                let pull_outcome = lm.sync_before_write_inline(false);
-                if !json {
-                    if let Some(ref p) = pull_outcome {
-                        CliView::render_inline_pull(p);
-                    }
-                }
-            }
+            let lm = open_controller(effective_db, global, connection)?;
             if !dry_run && !migrate_embeddings(&lm, false, json, false)? {
                 return Ok(());
             }
@@ -2587,13 +1989,6 @@ fn main() -> Result<()> {
                 } else {
                     CliView::render_observed_candidates(&candidates, false, false)?;
                     CliView::render_observed_summary(saved_records.len(), 0, false, false)?;
-                }
-                if !saved_records.is_empty() {
-                    if let Some(ref report) = lm.sync_after_write_inline(false) {
-                        if !json {
-                            CliView::render_inline_sync(report);
-                        }
-                    }
                 }
                 return Ok(());
             }
@@ -2675,11 +2070,6 @@ fn main() -> Result<()> {
             }
 
             CliView::render_observed_summary(saved_count, skipped_count, false, false)?;
-            if saved_count > 0 {
-                if let Some(ref report) = lm.sync_after_write_inline(false) {
-                    CliView::render_inline_sync(report);
-                }
-            }
         }
 
         Commands::Connect {

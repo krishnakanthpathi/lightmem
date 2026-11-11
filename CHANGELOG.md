@@ -1,55 +1,12 @@
 # Changelog
 
-## 0.7.2
+## 0.7.3
 
-- Add seamless multi-device cloud sync across macOS and Linux using non-destructive bidirectional SQLite vault merging (`merge_sync_vault`), preventing conflicting overwrites across concurrent devices.
-- Add inline **pre-write pull + post-write push** auto-sync on global default vault mutations (`remember`, `forget`, `clear`, `link`, `unlink`, `autolink`, `conflicts`, `deduplicate`, `import`, `observe`, `config --reset-db`) and MCP (`remember`, `forget`, `conflicts`) whenever Google Drive is connected or `sync_target` is configured and online, without breaking `--json` stdout purity or local writes on network failure.
-- Upgrade `lmem sync --pull` to status-first non-destructive merge (skipping downloads when already in sync and reserving destructive full replacement for `lmem sync --restore`), and update `lmem sync` push + 5-minute `-d` daemon cycles to pull before pushing when remote is ahead and live-reload config each cycle.
-- Add SQLite Schema v7 with `memory_tombstones` and revision tracking triggers (`storage_revision`) so hard deletions propagate safely across devices with timestamp-based resurrection support, LWW updates preserve foreign-key-cascaded graph links/entities, and `--local` air-gapped memories remain isolated on each machine.
-- Streamline snapshot transport by streaming deflated `vault_latest.db.zip` archives (with backward-compatible pull fallback for legacy `vault_latest.db`), reusing already-populated local attachment bytes during CAS rehydration, and tightening Google Drive `modifiedTime desc` deduplication and query escaping.
-- Sync non-secret portable configuration (`backend`, `onnx_model`, `embedding_model`, `reranker`) via `manifest.json` while keeping host-specific `ollama_url` and `ollama_api_key` strictly local.
-- Add first-class Offline/Online sync controls via `lmem sync --offline`, `lmem sync --online`, `lmem config --offline <true|false>`, `LIGHTMEM_OFFLINE`, and MCP `config` `"offline"`, with offline-safe `lmem sync --status`.
+- Restore the clean pure-local architecture (`v0.5.3` baseline) for consistent single-machine usage across macOS and Linux.
+- Remove Google Drive login/OAuth, cloud sync, sync daemon, and embedded docs server subsystems.
+- Add lossless Schema v7-to-v6 downgrade compatibility in SQLite vault migration so existing vaults from `v0.7.2` open and write cleanly without data loss.
 
-## 0.7.0
-
-- Fix multi-hundred-MB memory spikes and redundant media uploads during `lmem remember` inline auto-sync and `lmem sync`.
-- Generate slim CAS-backed SQLite snapshots (`vault_latest.db`) during normal sync by dehydrating attachment BLOBs whose `<sha256>.<ext>` payload is already verified in `blobs/`, avoiding re-copying and re-uploading 100s of MBs of immutable media on every new text memory (`--backup-only` / `--skip-media` continues to produce self-contained full snapshots).
-- Lazily check attachment existence by metadata (`sha256` and `size_bytes`) before reading any single missing BLOB payload from SQLite, freeing each uploaded payload buffer immediately after transfer.
-- Replace full-file RAM buffering (`fs::read` + double multipart copies) with streaming 64 KB chunked SHA-256 hashing (`compute_file_sha256_hex`) and disk-streamed Google Drive uploads/updates/downloads (`upload_file_multipart_from_path_with_progress`, `upload_or_update_file_from_path_with_progress`, `download_file_to_path`).
-- Automatically rehydrate CAS-dehydrated attachments from `blobs/` into a staged temporary vault with full byte-length and SHA-256 verification before atomically restoring on `lmem sync --restore`.
-
-## 0.6.1
-
-- Add unified visual memory vault & connection dashboard (`lmem status`, `lmem vaults`, and `lmem identity status`) displaying default vault path, active/total memory telemetry, and registered harness connections with physical database paths.
-- Add `--json` output support to `lmem status` and `lmem identity status` for machine-readable vault topologies.
-- Add `vault_status()` method to Python SDK `LightMem` client returning structured vault status overview.
-
-## 0.6.0
-
-- Add background sync daemon support via `lmem sync -d` / `--daemon`, with process tracking (`~/.lightmem/sync_daemon.pid`), status inspection (`lmem sync --status`), and graceful termination (`lmem sync --stop`).
-- Add standalone zero-dependency documentation and landing page HTTP server embedded directly in binary (`lmem docs`, `lmem doc`, `lmem web`).
-- Remove ambiguous silent fallback to local `~/Library/CloudStorage/GoogleDrive-*` paths, enforcing explicit Google Drive OAuth authentication.
-- Add dynamic adaptive upload timeouts and real-time terminal transfer progress meters for large SQLite snapshots and 4K media attachments.
-- Add `--skip-db`, `--skip-media` / `--backup-only`, and `-y`/`--yes` flags to `lmem sync`.
-- Add direct Google Drive REST API cloud sync engine via native OAuth2 loopback authentication.
-- Add `lmem auth` command suite (`status`, `login`, `logout`) with token revocation against Google authorization servers.
-- Add `lmem logout` top-level command to invalidate OAuth tokens and delete local token/folder caches.
-- Add `lmem login` for seamless browser OAuth popup with local loopback callback server.
-- Support `LIGHTMEM_HOME` environment variable for configuration and token isolation in tests and scripts.
-
-## 0.5.4
-
-- Add native joint multimodal vector embedding support for Google `embeddinggemma-2` (768-dimensional unified space for text, code, images, video keyframes, and audio).
-- Automatically extract and encode primary image/keyframe/audio payloads during memory indexing and re-indexing (`embed_multimodal` / `embed_multimodal_batch`).
-- Add image-based query recall (`lmem recall --image <path>`) for direct cross-modal visual similarity retrieval.
-- Add granular format extension tagging (`#png`, `#jpg`, `#webp`, `#wav`, `#mp4`) alongside broad `media_kind` tags upon attachment ingestion.
-- Add SHA-256 Content-Addressed Storage (CAS) attachment deduplication with clear CLI warning notifications on existing vault assets (zero toast/popups).
-- Add `--local` flag to `lmem remember` to strictly air-gap memories offline (`#local` tag, exempt from cloud sync and backup snapshots).
-- Add decoupled CAS cloud sync & atomic SQLite vector snapshot backups (`lmem sync` with `--target`, `--status`, `--pull`, `--restore`, `--backup-only`).
-- Support synchronous inline sync on memory creation when a sync target is configured (zero background daemon processes).
-- Add `--open` flag to `lmem recall` and `lmem inspect` to open materialized attachment media directly in the operating system default application.
-- Preserve backward-compatible fallback for text-only embedders (`OnnxEmbeddingProvider`, `HashEmbeddingProvider`).
-
+## 0.5.3
 
 - Fix architecture mismatch crashes when scanning or running native binaries (e.g., ARM binaries on AMD/x86_64 processors).
 - Add strict ELF, Mach-O, and PE CPU architecture header validation in `_is_native_binary()` to prevent cross-architecture execution errors.

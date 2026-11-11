@@ -635,21 +635,8 @@ impl AttachmentInput {
     }
 }
 
-/// Streaming pure-Rust FIPS 180-4 SHA-256 hasher (constant memory overhead).
-pub struct Sha256Hasher {
-    h: [u32; 8],
-    buffer: [u8; 64],
-    buffer_len: usize,
-    total_bytes: u64,
-}
-
-impl Default for Sha256Hasher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Sha256Hasher {
+/// Pure-Rust FIPS 180-4 SHA-256 hex digest implementation
+pub fn compute_sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -662,73 +649,21 @@ impl Sha256Hasher {
         0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
         0xc67178f2,
     ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
 
-    pub fn new() -> Self {
-        Self {
-            h: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
-            buffer: [0u8; 64],
-            buffer_len: 0,
-            total_bytes: 0,
-        }
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity((data.len() + 72) & !63);
+    padded.extend_from_slice(data);
+    padded.push(0x80);
+    while (padded.len() % 64) != 56 {
+        padded.push(0x00);
     }
+    padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    pub fn update(&mut self, mut chunk: &[u8]) {
-        self.total_bytes = self.total_bytes.wrapping_add(chunk.len() as u64);
-
-        if self.buffer_len > 0 {
-            let take = (64 - self.buffer_len).min(chunk.len());
-            self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&chunk[..take]);
-            self.buffer_len += take;
-            chunk = &chunk[take..];
-
-            if self.buffer_len == 64 {
-                let block = self.buffer;
-                Self::compress_block(&mut self.h, &block);
-                self.buffer_len = 0;
-            }
-        }
-
-        while chunk.len() >= 64 {
-            let block: &[u8; 64] = chunk[..64].try_into().unwrap();
-            Self::compress_block(&mut self.h, block);
-            chunk = &chunk[64..];
-        }
-
-        if !chunk.is_empty() {
-            self.buffer[..chunk.len()].copy_from_slice(chunk);
-            self.buffer_len = chunk.len();
-        }
-    }
-
-    pub fn finalize_hex(mut self) -> String {
-        let bit_len = self.total_bytes.wrapping_mul(8);
-
-        self.buffer[self.buffer_len] = 0x80;
-        self.buffer_len += 1;
-
-        if self.buffer_len > 56 {
-            self.buffer[self.buffer_len..64].fill(0);
-            let block = self.buffer;
-            Self::compress_block(&mut self.h, &block);
-            self.buffer[..56].fill(0);
-        } else {
-            self.buffer[self.buffer_len..56].fill(0);
-        }
-
-        self.buffer[56..64].copy_from_slice(&bit_len.to_be_bytes());
-        let block = self.buffer;
-        Self::compress_block(&mut self.h, &block);
-
-        format!(
-            "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
-            self.h[0], self.h[1], self.h[2], self.h[3], self.h[4], self.h[5], self.h[6], self.h[7]
-        )
-    }
-
-    fn compress_block(h: &mut [u32; 8], chunk: &[u8; 64]) {
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for (i, &word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes(word);
@@ -757,7 +692,7 @@ impl Sha256Hasher {
             let temp1 = hh
                 .wrapping_add(s1)
                 .wrapping_add(ch)
-                .wrapping_add(Self::K[i])
+                .wrapping_add(K[i])
                 .wrapping_add(w[i]);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
@@ -782,52 +717,11 @@ impl Sha256Hasher {
         h[6] = h[6].wrapping_add(g);
         h[7] = h[7].wrapping_add(hh);
     }
-}
 
-/// Pure-Rust FIPS 180-4 SHA-256 hex digest implementation (streaming, zero full-buffer copy).
-pub fn compute_sha256_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256Hasher::new();
-    hasher.update(data);
-    hasher.finalize_hex()
-}
-
-/// Stream a file through FIPS 180-4 SHA-256 in fixed 64 KB chunks without loading it into RAM.
-pub fn compute_file_sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
-    use anyhow::Context;
-    use std::io::Read;
-
-    let file = std::fs::File::open(path).with_context(|| {
-        format!(
-            "Failed to open file for SHA-256 hashing: {}",
-            path.display()
-        )
-    })?;
-    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
-    let mut hasher = Sha256Hasher::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = reader.read(&mut buf).with_context(|| {
-            format!(
-                "Failed to read file for SHA-256 hashing: {}",
-                path.display()
-            )
-        })?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize_hex())
-}
-
-/// Canonical CAS blob filename `<sha256>.<ext>` derived from SHA-256 digest and attachment filename.
-pub fn cas_blob_filename(sha256: &str, filename: &str) -> String {
-    let ext = std::path::Path::new(filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .filter(|e| !e.is_empty())
-        .unwrap_or("bin");
-    format!("{}.{}", sha256, ext)
+    format!(
+        "{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}",
+        h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+    )
 }
 
 /// Pure-Rust RFC 4648 Base64 encoder
@@ -1261,12 +1155,6 @@ impl MemoryRecord {
         }
     }
 
-    /// Whether this memory is marked as strictly local/air-gapped (exempt from cloud sync & remote backup uploads)
-    pub fn is_local(&self) -> bool {
-        self.tags.iter().any(|t| t.eq_ignore_ascii_case("local"))
-            || self.provenance.eq_ignore_ascii_case("local")
-    }
-
     /// Format as standardized memory card for embedding and display
     pub fn to_card_text(&self) -> String {
         let mut out = format!(
@@ -1502,62 +1390,5 @@ mod conflict_tests {
         let unrelated1 = make_fact("PostgreSQL primary database runs on port 5432");
         let unrelated2 = make_fact("Mistri Venkata Annapurna Devi is my mother name");
         assert!(detect_memory_conflict(&unrelated1, &unrelated2).is_none());
-    }
-}
-
-#[cfg(test)]
-mod sha256_streaming_tests {
-    use super::*;
-
-    #[test]
-    fn test_streaming_sha256_matches_nist_vectors_and_block_boundaries() {
-        assert_eq!(
-            compute_sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            compute_sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        assert_eq!(
-            compute_sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-
-        // Incremental feeding in uneven chunks across 55/56/63/64/65/128-byte boundaries
-        let dir = tempfile::tempdir().unwrap();
-        for &len in &[
-            0usize, 1, 55, 56, 63, 64, 65, 128, 65_535, 65_536, 65_537, 200_000,
-        ] {
-            let data: Vec<u8> = (0..len).map(|i| ((i * 31 + 7) % 251) as u8).collect();
-            let direct = compute_sha256_hex(&data);
-
-            let mut incremental = Sha256Hasher::new();
-            for chunk in data.chunks(13) {
-                incremental.update(chunk);
-            }
-            assert_eq!(
-                incremental.finalize_hex(),
-                direct,
-                "Incremental hash mismatch for len={}",
-                len
-            );
-
-            let file_path = dir.path().join(format!("sample_{}.bin", len));
-            std::fs::write(&file_path, &data).unwrap();
-            let streamed = compute_file_sha256_hex(&file_path).unwrap();
-            assert_eq!(
-                streamed, direct,
-                "File streaming hash mismatch for len={}",
-                len
-            );
-        }
-    }
-
-    #[test]
-    fn test_cas_blob_filename_handles_missing_and_empty_extensions() {
-        assert_eq!(cas_blob_filename("deadbeef", "video.mp4"), "deadbeef.mp4");
-        assert_eq!(cas_blob_filename("deadbeef", "README"), "deadbeef.bin");
-        assert_eq!(cas_blob_filename("deadbeef", "trailing."), "deadbeef.bin");
     }
 }

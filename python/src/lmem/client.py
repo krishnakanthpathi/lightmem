@@ -111,10 +111,6 @@ class LightMem:
     def connection_info(self, connection_id: str) -> Dict[str, Any]:
         return self._call("identity", ["show", connection_id])
 
-    def vault_status(self) -> Dict[str, Any]:
-        """View all managed memory vaults, active connections, and storage telemetry."""
-        return self._call("identity", ["status"])
-
     # 1. Store
     def remember(
         self,

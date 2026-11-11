@@ -88,7 +88,6 @@ fn test_remember_with_entities_warning_when_llm_offline() {
             None,
             false,
             None,
-            false,
         )
         .unwrap();
 
@@ -123,7 +122,6 @@ fn test_remember_with_entities_warning_when_llm_offline() {
             None,
             false,
             None,
-            false,
         )
         .unwrap();
 

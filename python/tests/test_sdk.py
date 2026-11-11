@@ -36,8 +36,8 @@ class TestLightMemSDK(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_package_exports(self):
-        self.assertEqual(lmem.__version__, "0.7.2")
-        self.assertEqual(lightmem.__version__, "0.7.2")
+        self.assertEqual(lmem.__version__, "0.7.3")
+        self.assertEqual(lightmem.__version__, "0.7.3")
         self.assertTrue(callable(lmem.LightMem))
         self.assertTrue(callable(lightmem.LightMem))
         self.assertTrue(Path(self.client.binary_path).is_file())
@@ -276,18 +276,6 @@ class TestLightMemSDK(unittest.TestCase):
         mem = fresh_client.recall("video")
         self.assertTrue(len(mem) >= 1)
 
-    def test_vault_status(self):
-        vstatus = self.client.vault_status()
-        self.assertIn("default_vault", vstatus)
-        self.assertIn("connections", vstatus)
-        self.assertIsInstance(vstatus["connections"], list)
-        self.assertEqual(Path(vstatus["default_vault"]["db_path"]).resolve(), self.db_path.resolve())
-        self.assertEqual(vstatus["default_vault"]["active_memories"], 0)
-
-        self.client.remember("Vault telemetry check", category="fact")
-        updated = self.client.vault_status()
-        self.assertEqual(updated["default_vault"]["db_exists"], True)
-        self.assertEqual(updated["default_vault"]["active_memories"], 1)
 
 
 if __name__ == "__main__":

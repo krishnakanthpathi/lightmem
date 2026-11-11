@@ -22,35 +22,10 @@ pub struct LightMemConfig {
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync_target: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync_auto: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sync_offline: Option<bool>,
-}
-
-/// Non-secret, machine-portable subset of LightMem configuration synchronized across devices.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PortableSyncConfig {
-    pub backend: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onnx_model: Option<String>,
-    pub embedding_model: String,
-    #[serde(default = "default_reranker")]
-    pub reranker: String,
 }
 
 fn default_reranker() -> String {
     "minilm-squad2".to_string()
-}
-
-fn parse_env_bool(raw: &str) -> Option<bool> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
 }
 
 impl Default for LightMemConfig {
@@ -62,9 +37,6 @@ impl Default for LightMemConfig {
             ollama_api_key: None,
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
-            sync_target: None,
-            sync_auto: None,
-            sync_offline: None,
         }
     }
 }
@@ -204,169 +176,6 @@ impl LightMemConfig {
             })
     }
 
-    /// Resolves effective cloud/CAS sync and backup target directory path from environment variable (LIGHTMEM_SYNC_TARGET) or config.
-    pub fn effective_sync_target(&self) -> Option<PathBuf> {
-        let raw = std::env::var("LIGHTMEM_SYNC_TARGET")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.sync_target.clone())?;
-
-        let trimmed = raw.trim();
-        let lower = trimmed.to_lowercase();
-        if lower == "gdrive"
-            || lower == "google-drive"
-            || lower == "googledrive"
-            || lower == "drive"
-        {
-            return Some(PathBuf::from("gdrive"));
-        }
-
-        let path = if trimmed.starts_with('~') {
-            if let Some(home) = dirs::home_dir() {
-                home.join(trimmed.trim_start_matches("~/").trim_start_matches('~'))
-            } else {
-                PathBuf::from(trimmed)
-            }
-        } else {
-            PathBuf::from(trimmed)
-        };
-        Some(path)
-    }
-
-    /// Check whether cloud/auto-sync is explicitly paused offline via LIGHTMEM_OFFLINE or sync_offline.
-    pub fn is_offline(&self) -> bool {
-        if let Ok(val) = std::env::var("LIGHTMEM_OFFLINE") {
-            if let Some(parsed) = parse_env_bool(&val) {
-                return parsed;
-            }
-        }
-        self.sync_offline.unwrap_or(false)
-    }
-
-    /// Check whether auto-sync on memory creation is enabled (defaults to true if target is configured)
-    pub fn is_sync_auto_enabled(&self) -> bool {
-        if let Ok(val) = std::env::var("LIGHTMEM_SYNC_AUTO") {
-            return parse_env_bool(&val).unwrap_or(false);
-        }
-        self.sync_auto.unwrap_or(true)
-    }
-
-    /// Determine whether implicit inline pre-pull / post-push auto-sync applies to the active vault.
-    pub fn should_auto_sync(
-        &self,
-        gdrive_connected: bool,
-        is_global_default_db: bool,
-        explicit_db_or_connection: bool,
-    ) -> bool {
-        if self.is_offline() {
-            return false;
-        }
-        if !self.is_sync_auto_enabled() {
-            return false;
-        }
-        let has_target = self.effective_sync_target().is_some() || gdrive_connected;
-        if !has_target {
-            return false;
-        }
-        let explicit_sync_env = std::env::var("LIGHTMEM_SYNC_TARGET")
-            .ok()
-            .map(|v| !v.trim().is_empty())
-            .unwrap_or(false)
-            || std::env::var("LIGHTMEM_SYNC_AUTO")
-                .ok()
-                .and_then(|v| parse_env_bool(&v))
-                .unwrap_or(false);
-        if explicit_sync_env {
-            return true;
-        }
-        is_global_default_db && !explicit_db_or_connection
-    }
-
-    /// Extract the non-secret, machine-portable subset of configuration to share across devices.
-    pub fn portable_sync_config(&self) -> PortableSyncConfig {
-        PortableSyncConfig {
-            backend: self.backend.clone(),
-            onnx_model: self.onnx_model.clone(),
-            embedding_model: self.embedding_model.clone(),
-            reranker: Self::normalize_reranker(&self.reranker, None),
-        }
-    }
-
-    /// Apply synced portable configuration if valid on this machine; returns true if local values changed.
-    pub fn apply_portable_sync_config(&mut self, synced: &PortableSyncConfig) -> bool {
-        let mut candidate = self.clone();
-        candidate.backend = synced.backend.clone();
-        candidate.onnx_model = synced.onnx_model.clone();
-        candidate.embedding_model = synced.embedding_model.clone();
-        candidate.reranker = Self::normalize_reranker(&synced.reranker, None);
-
-        // Guard against nonexistent local filesystem ONNX model directories on another host.
-        if candidate.embedding_identity().is_err() {
-            return false;
-        }
-
-        let changed = self.backend != candidate.backend
-            || self.onnx_model != candidate.onnx_model
-            || self.embedding_model != candidate.embedding_model
-            || Self::normalize_reranker(&self.reranker, None) != candidate.reranker;
-
-        if changed {
-            self.backend = candidate.backend;
-            self.onnx_model = candidate.onnx_model;
-            self.embedding_model = candidate.embedding_model;
-            self.reranker = candidate.reranker;
-        }
-        changed
-    }
-
-    /// Canonical embedding identity stripped of machine-specific Ollama endpoint URLs for multi-device sync checks.
-    pub fn portable_embedding_identity(&self) -> Result<String> {
-        if self.backend == "ollama" {
-            return Ok(format!("card-v1:ollama:{}", self.embedding_model.trim()));
-        }
-        self.embedding_identity()
-    }
-
-    /// Normalize a stored or config embedding identity for cross-device compatibility comparison.
-    pub fn normalize_embedding_identity_for_sync(identity: &str) -> String {
-        if let Some(rest) = identity.strip_prefix("card-v1:ollama:") {
-            let without_scheme = rest
-                .strip_prefix("http://")
-                .or_else(|| rest.strip_prefix("https://"));
-            if let Some(after_scheme) = without_scheme {
-                if let Some(first_colon) = after_scheme.find(':') {
-                    let after_first = &after_scheme[first_colon + 1..];
-                    let model = if let Some(next_colon) = after_first.find(':') {
-                        let maybe_port = &after_first[..next_colon];
-                        let digits_part = maybe_port.split('/').next().unwrap_or("");
-                        if !digits_part.is_empty()
-                            && digits_part.chars().all(|c| c.is_ascii_digit())
-                        {
-                            &after_first[next_colon + 1..]
-                        } else {
-                            after_first
-                        }
-                    } else {
-                        after_first
-                    };
-                    return format!("card-v1:ollama:{}", model.trim());
-                }
-            }
-            return format!("card-v1:ollama:{}", rest.trim());
-        }
-        identity.to_string()
-    }
-
-    /// Return true if two embedding identities map to the same vector space across devices.
-    pub fn embedding_identities_compatible(a: &str, b: &str) -> bool {
-        if a == b {
-            return true;
-        }
-        Self::normalize_embedding_identity_for_sync(a)
-            == Self::normalize_embedding_identity_for_sync(b)
-    }
-
     /// Stable embedding-space identity, including card preprocessing and engine version.
     pub fn embedding_identity(&self) -> Result<String> {
         let model = match self.backend.as_str() {
@@ -480,8 +289,6 @@ impl LightMemConfig {
 
     pub fn config_dir() -> PathBuf {
         std::env::var_os("LIGHTMEM_CONFIG_DIR")
-            .filter(|v| !v.is_empty())
-            .or_else(|| std::env::var_os("LIGHTMEM_HOME").filter(|v| !v.is_empty()))
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 dirs::home_dir()
@@ -676,96 +483,5 @@ mod tests {
             cfg.effective_ollama_url(),
             "https://custom-ollama-proxy.internal"
         );
-    }
-
-    #[test]
-    fn test_portable_sync_config_and_embedding_compatibility() {
-        let mut mac_cfg = LightMemConfig {
-            backend: "ollama".to_string(),
-            onnx_model: None,
-            ollama_url: "http://localhost:11434".to_string(),
-            ollama_api_key: Some("secret-mac-key".to_string()),
-            embedding_model: "mxbai-embed-large:latest".to_string(),
-            reranker: "ollama:qwen2.5:3b".to_string(),
-            sync_target: Some("gdrive".to_string()),
-            sync_auto: Some(true),
-            sync_offline: Some(false),
-        };
-
-        let portable = mac_cfg.portable_sync_config();
-        let serialized = serde_json::to_string(&portable).unwrap();
-        assert!(!serialized.contains("secret-mac-key"));
-        assert!(!serialized.contains("localhost:11434"));
-
-        let mut linux_cfg = LightMemConfig {
-            backend: "hash".to_string(),
-            onnx_model: None,
-            ollama_url: "http://192.168.1.44:11434".to_string(),
-            ollama_api_key: Some("linux-secret".to_string()),
-            embedding_model: "nomic-embed-text".to_string(),
-            reranker: "top1".to_string(),
-            sync_target: Some("/mnt/backup".to_string()),
-            sync_auto: Some(false),
-            sync_offline: Some(true),
-        };
-
-        assert!(linux_cfg.apply_portable_sync_config(&portable));
-        // Applying same portable config a second time is a no-op
-        assert!(!linux_cfg.apply_portable_sync_config(&portable));
-        assert_eq!(linux_cfg.backend, "ollama");
-        assert_eq!(linux_cfg.embedding_model, "mxbai-embed-large:latest");
-        assert_eq!(linux_cfg.reranker, "ollama:qwen2.5:3b");
-        // Host-local settings remain untouched
-        assert_eq!(linux_cfg.ollama_url, "http://192.168.1.44:11434");
-        assert_eq!(linux_cfg.ollama_api_key.as_deref(), Some("linux-secret"));
-        assert_eq!(linux_cfg.sync_offline, Some(true));
-
-        let mac_id = mac_cfg.embedding_identity().unwrap();
-        let linux_id = linux_cfg.embedding_identity().unwrap();
-        assert_ne!(mac_id, linux_id);
-        assert!(LightMemConfig::embedding_identities_compatible(
-            &mac_id, &linux_id
-        ));
-
-        // Incompatible model still fails compatibility check
-        mac_cfg.embedding_model = "nomic-embed-text".to_string();
-        assert!(!LightMemConfig::embedding_identities_compatible(
-            &mac_cfg.embedding_identity().unwrap(),
-            &linux_id
-        ));
-
-        // Missing custom ONNX dir on another host is safely ignored
-        let broken_onnx = PortableSyncConfig {
-            backend: "onnx".to_string(),
-            onnx_model: Some("/nonexistent/host/custom-onnx-dir".to_string()),
-            embedding_model: "nomic-embed-text".to_string(),
-            reranker: "minilm-squad2".to_string(),
-        };
-        assert!(!linux_cfg.apply_portable_sync_config(&broken_onnx));
-        assert_eq!(linux_cfg.backend, "ollama");
-    }
-
-    #[test]
-    fn test_should_auto_sync_vault_isolation_and_offline() {
-        let mut cfg = LightMemConfig {
-            sync_target: Some("gdrive".to_string()),
-            sync_auto: Some(true),
-            sync_offline: None,
-            ..Default::default()
-        };
-
-        // Default global vault syncs; isolated --db or project vaults do not
-        assert!(cfg.should_auto_sync(true, true, false));
-        assert!(!cfg.should_auto_sync(true, false, true));
-        assert!(!cfg.should_auto_sync(true, false, false));
-
-        // Offline mode pauses auto-sync even on the global vault
-        cfg.sync_offline = Some(true);
-        assert!(!cfg.should_auto_sync(true, true, false));
-
-        // sync_auto = false disables auto-sync
-        cfg.sync_offline = Some(false);
-        cfg.sync_auto = Some(false);
-        assert!(!cfg.should_auto_sync(true, true, false));
     }
 }

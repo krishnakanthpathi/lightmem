@@ -55,55 +55,6 @@ pub struct ResolvedConnection {
     pub skill_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultConnectionStatus {
-    pub connection_id: String,
-    pub harness_id: String,
-    pub user_id: String,
-    pub agent_id: String,
-    pub project_id: Option<String>,
-    pub scope: MemoryScope,
-    pub db_path: PathBuf,
-    pub db_exists: bool,
-    pub active_memories: usize,
-    pub total_memories: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DefaultVaultStatus {
-    pub db_path: PathBuf,
-    pub db_exists: bool,
-    pub active_memories: usize,
-    pub total_memories: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VaultStatusOverview {
-    pub default_vault: DefaultVaultStatus,
-    pub connections: Vec<VaultConnectionStatus>,
-}
-
-pub fn inspect_vault_db(path: &std::path::Path) -> (bool, usize, usize) {
-    if !path.exists() {
-        return (false, 0, 0);
-    }
-    let Ok(conn) = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-    else {
-        return (true, 0, 0);
-    };
-    let active: usize = conn
-        .query_row(
-            "SELECT count(*) FROM memories WHERE status = 'active'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let total: usize = conn
-        .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
-        .unwrap_or(0);
-    (true, active, total)
-}
-
 pub struct IdentityRegistry {
     conn: Connection,
     root: PathBuf,
@@ -341,55 +292,19 @@ impl IdentityRegistry {
         })
     }
 
-    pub fn list_resolved_connections(&self) -> Result<Vec<ResolvedConnection>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id FROM connections ORDER BY id")?;
-        let ids: Vec<String> = stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        ids.iter()
-            .map(|id| self.resolve(id, None, None))
-            .collect::<Result<Vec<_>>>()
-    }
-
-    pub fn status_overview(&self, default_db_path: PathBuf) -> Result<VaultStatusOverview> {
-        let (default_exists, default_active, default_total) = inspect_vault_db(&default_db_path);
-        let default_vault = DefaultVaultStatus {
-            db_path: default_db_path,
-            db_exists: default_exists,
-            active_memories: default_active,
-            total_memories: default_total,
-        };
-
-        let resolved = self.list_resolved_connections()?;
-        let mut connections = Vec::with_capacity(resolved.len());
-        for conn in resolved {
-            let (exists, active, total) = inspect_vault_db(&conn.db_path);
-            connections.push(VaultConnectionStatus {
-                connection_id: conn.context.connection_id,
-                harness_id: conn.context.harness_id,
-                user_id: conn.context.user_id,
-                agent_id: conn.context.agent_id,
-                project_id: conn.context.project_id,
-                scope: conn.context.scope,
-                db_path: conn.db_path,
-                db_exists: exists,
-                active_memories: active,
-                total_memories: total,
-            });
-        }
-
-        Ok(VaultStatusOverview {
-            default_vault,
-            connections,
-        })
-    }
-
     pub fn list(&self, kind: &str) -> Result<serde_json::Value> {
         if kind == "connections" {
-            let resolved = self.list_resolved_connections()?;
-            return Ok(serde_json::to_value(resolved)?);
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM connections ORDER BY id")?;
+            let ids: Vec<String> = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            return Ok(serde_json::to_value(
+                ids.iter()
+                    .map(|id| self.resolve(id, None, None))
+                    .collect::<Result<Vec<_>>>()?,
+            )?);
         }
         let sql = match kind {
             "users" => "SELECT id,name,NULL,NULL FROM users ORDER BY id",

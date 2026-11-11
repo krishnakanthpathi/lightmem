@@ -1,30 +1,14 @@
 use crate::models::{
-    cas_blob_filename, compute_sha256_hex, encode_base64, extract_wikilinks, AttachmentInput,
-    AttachmentMetadata, EntityRecord, GraphEdge, GraphNode, GraphSnapshot, LightMemConfig,
-    MemoryLink, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory,
-    StorageStats,
+    compute_sha256_hex, extract_wikilinks, AttachmentInput, AttachmentMetadata, EntityRecord,
+    GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
+    PaginatedMemories, RelatedMemory, StorageStats,
 };
-use crate::services::embeddings::{
-    cosine_similarity, validate_vector, EmbeddingProvider, MultimodalInput,
-};
+use crate::services::embeddings::{cosine_similarity, validate_vector, EmbeddingProvider};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SyncMergeStats {
-    pub inserted_memories: usize,
-    pub updated_memories: usize,
-    pub deleted_memories: usize,
-    pub local_kept_newer: usize,
-    pub skipped_local_only: usize,
-    pub vectors_updated: usize,
-    pub attachments_added: usize,
-    pub links_added: usize,
-    pub entities_added: usize,
-}
 
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
@@ -97,7 +81,7 @@ impl Storage {
             version <= 7,
             "Database schema is newer than this version of LightMem"
         );
-        if version == 7 {
+        if version == 6 {
             let has_memories: bool = conn
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories')",
@@ -127,6 +111,22 @@ impl Storage {
             "Database schema is newer than this version of LightMem"
         );
         if version >= 4 {
+            if version == 7 {
+                tx.execute_batch(
+                    r#"
+                    DROP TRIGGER IF EXISTS revision_tombstones_ai;
+                    DROP TRIGGER IF EXISTS revision_tombstones_au;
+                    DROP TRIGGER IF EXISTS revision_tombstones_ad;
+                    DROP TRIGGER IF EXISTS revision_links_ai;
+                    DROP TRIGGER IF EXISTS revision_links_au;
+                    DROP TRIGGER IF EXISTS revision_links_ad;
+                    DROP TRIGGER IF EXISTS revision_entities_ai;
+                    DROP TRIGGER IF EXISTS revision_entities_ad;
+                    DROP TABLE IF EXISTS memory_tombstones;
+                    "#,
+                )?;
+                tx.pragma_update(None, "user_version", 6)?;
+            }
             if version == 4 {
                 tx.execute("ALTER TABLE memories ADD COLUMN context_json TEXT", [])?;
                 tx.pragma_update(None, "user_version", 5)?;
@@ -147,10 +147,6 @@ impl Storage {
                     "#,
                 )?;
                 tx.pragma_update(None, "user_version", 6)?;
-            }
-            if version < 7 {
-                apply_schema_v7_migration(&tx)?;
-                tx.pragma_update(None, "user_version", 7)?;
             }
             let needs_tag_or_key_repair: bool = tx
                 .query_row(
@@ -378,8 +374,7 @@ impl Storage {
             CREATE INDEX IF NOT EXISTS idx_entities_lookup ON memory_entities(entity_name, entity_val);
             "#,
         )?;
-        apply_schema_v7_migration(&tx)?;
-        tx.pragma_update(None, "user_version", 7)?;
+        tx.pragma_update(None, "user_version", 6)?;
         tx.commit()?;
         Ok(())
     }
@@ -490,29 +485,7 @@ impl Storage {
         let final_records: Vec<_> = unique.into_values().collect();
         for batch in final_records.chunks(32) {
             let texts: Vec<_> = batch.iter().map(MemoryRecord::to_card_text).collect();
-            let vectors = if embedder.supports_multimodal() {
-                let mut media_payloads = Vec::with_capacity(batch.len());
-                for rec in batch {
-                    let media = if !rec.attachments.is_empty() {
-                        load_primary_multimodal_payload(&tx, &rec.id)?
-                    } else {
-                        None
-                    };
-                    media_payloads.push(media);
-                }
-                let inputs: Vec<MultimodalInput> = texts
-                    .iter()
-                    .zip(&media_payloads)
-                    .map(|(text, media)| match media.as_ref() {
-                        Some((Some(img), _)) => MultimodalInput::with_image(text, img.as_str()),
-                        Some((_, Some(aud))) => MultimodalInput::with_audio(text, aud.as_str()),
-                        _ => MultimodalInput::text_only(text),
-                    })
-                    .collect();
-                embedder.embed_multimodal_batch(&inputs)?
-            } else {
-                embedder.embed_batch(&texts)?
-            };
+            let vectors = embedder.embed_batch(&texts)?;
             anyhow::ensure!(
                 vectors.len() == batch.len(),
                 "Embedding provider returned the wrong batch size"
@@ -785,15 +758,6 @@ impl Storage {
         Ok(out)
     }
 
-    /// Retrieve primary multimodal payload (image base64 or audio base64) for memory embedding
-    pub fn primary_multimodal_payload(
-        &self,
-        memory_id: &str,
-    ) -> Result<Option<(Option<String>, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
-        load_primary_multimodal_payload(&conn, memory_id)
-    }
-
     /// Snapshot and defragment database into a standalone single SQLite file (flushing WAL)
     pub fn backup_to_file(&self, target_path: &Path) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -811,393 +775,6 @@ impl Storage {
             let backup = rusqlite::backup::Backup::new(&conn, &mut dst)?;
             backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
         }
-        Ok(())
-    }
-
-    /// Snapshot database into a standalone single SQLite file, dehydrating attachments
-    /// whose CAS blobs (`<sha256>.<ext>`) are already verified in `dehydrated_blobs`
-    /// without reading those BLOBs from SQLite.
-    pub fn backup_slim_snapshot_to_file(
-        &self,
-        target_path: &Path,
-        dehydrated_blobs: &std::collections::HashSet<String>,
-    ) -> Result<()> {
-        let _ = std::fs::remove_file(target_path);
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = target_path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(sidecar));
-        }
-
-        let dst = Storage::open(target_path)?;
-        {
-            let src_conn = self.conn.lock().unwrap();
-            let mut dst_conn = dst.conn.lock().unwrap();
-            let tx =
-                dst_conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-            if let Some((identity, dims)) = src_conn
-                .query_row(
-                    "SELECT identity, dims FROM embedding_state WHERE singleton = 1",
-                    [],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-                )
-                .optional()?
-            {
-                tx.execute(
-                    "INSERT OR REPLACE INTO embedding_state (singleton, identity, dims) VALUES (1, ?1, ?2)",
-                    params![identity, dims],
-                )?;
-            }
-
-            {
-                let mut src_stmt = src_conn.prepare(
-                    "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key
-                     FROM memories ORDER BY rowid ASC",
-                )?;
-                let mut dst_stmt = tx.prepare(
-                    "INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                )?;
-                let rows = src_stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, f64>(5)?,
-                        r.get::<_, String>(6)?,
-                        r.get::<_, String>(7)?,
-                        r.get::<_, String>(8)?,
-                        r.get::<_, String>(9)?,
-                        r.get::<_, Option<String>>(10)?,
-                        r.get::<_, Option<String>>(11)?,
-                        r.get::<_, String>(12)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (
-                        id,
-                        category,
-                        title,
-                        content,
-                        tags,
-                        confidence,
-                        status,
-                        provenance,
-                        created_at,
-                        updated_at,
-                        expired_at,
-                        context_json,
-                        dedup_key,
-                    ) = row?;
-                    dst_stmt.execute(params![
-                        id,
-                        category,
-                        title,
-                        content,
-                        tags,
-                        confidence,
-                        status,
-                        provenance,
-                        created_at,
-                        updated_at,
-                        expired_at,
-                        context_json,
-                        dedup_key
-                    ])?;
-                }
-            }
-
-            {
-                let mut src_stmt = src_conn
-                    .prepare("SELECT id, embedding, dims FROM memory_vectors ORDER BY rowid ASC")?;
-                let mut dst_stmt = tx.prepare(
-                    "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
-                )?;
-                let rows = src_stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Vec<u8>>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (id, emb, dims) = row?;
-                    dst_stmt.execute(params![id, emb, dims])?;
-                }
-            }
-
-            {
-                let mut src_stmt = src_conn.prepare(
-                    "SELECT source_id, target_id, relation, weight, created_at FROM memory_links ORDER BY rowid ASC",
-                )?;
-                let mut dst_stmt = tx.prepare(
-                    "INSERT INTO memory_links (source_id, target_id, relation, weight, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                )?;
-                let rows = src_stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, f64>(3)?,
-                        r.get::<_, String>(4)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (source_id, target_id, relation, weight, created_at) = row?;
-                    dst_stmt
-                        .execute(params![source_id, target_id, relation, weight, created_at])?;
-                }
-            }
-
-            {
-                let mut src_stmt = src_conn.prepare(
-                    "SELECT id, memory_id, entity_name, entity_val, created_at FROM memory_entities ORDER BY id ASC",
-                )?;
-                let mut dst_stmt = tx.prepare(
-                    "INSERT INTO memory_entities (id, memory_id, entity_name, entity_val, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                )?;
-                let rows = src_stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (id, memory_id, entity_name, entity_val, created_at) = row?;
-                    dst_stmt.execute(params![
-                        id,
-                        memory_id,
-                        entity_name,
-                        entity_val,
-                        created_at
-                    ])?;
-                }
-            }
-
-            {
-                let mut src_meta_stmt = src_conn.prepare(
-                    "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at
-                     FROM memory_attachments ORDER BY rowid ASC",
-                )?;
-                let mut src_blob_stmt =
-                    src_conn.prepare("SELECT data FROM memory_attachments WHERE id = ?1")?;
-                let mut dst_stmt = tx.prepare(
-                    "INSERT INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                )?;
-                let rows = src_meta_stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, i64>(5)?,
-                        r.get::<_, String>(6)?,
-                        r.get::<_, Option<String>>(7)?,
-                        r.get::<_, Option<f64>>(8)?,
-                        r.get::<_, String>(9)?,
-                    ))
-                })?;
-                for row in rows {
-                    let (
-                        id,
-                        memory_id,
-                        filename,
-                        mime_type,
-                        media_kind,
-                        size_bytes,
-                        sha256,
-                        dimensions,
-                        duration_secs,
-                        created_at,
-                    ) = row?;
-                    let blob_name = cas_blob_filename(&sha256, &filename);
-                    let should_dehydrate = size_bytes > 0 && dehydrated_blobs.contains(&blob_name);
-                    if should_dehydrate {
-                        let empty: &[u8] = &[];
-                        dst_stmt.execute(params![
-                            id,
-                            memory_id,
-                            filename,
-                            mime_type,
-                            media_kind,
-                            size_bytes,
-                            sha256,
-                            dimensions,
-                            duration_secs,
-                            empty,
-                            created_at
-                        ])?;
-                    } else {
-                        let data: Vec<u8> = src_blob_stmt.query_row([&id], |r| r.get(0))?;
-                        dst_stmt.execute(params![
-                            id,
-                            memory_id,
-                            filename,
-                            mime_type,
-                            media_kind,
-                            size_bytes,
-                            sha256,
-                            dimensions,
-                            duration_secs,
-                            data,
-                            created_at
-                        ])?;
-                    }
-                }
-            }
-
-            {
-                let has_tombstones: bool = src_conn
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_tombstones')",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(false);
-                if has_tombstones {
-                    let mut src_stmt = src_conn.prepare(
-                        "SELECT id, deleted_at FROM memory_tombstones ORDER BY rowid ASC",
-                    )?;
-                    let mut dst_stmt = tx.prepare(
-                        "INSERT OR REPLACE INTO memory_tombstones (id, deleted_at) VALUES (?1, ?2)",
-                    )?;
-                    let rows = src_stmt
-                        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                    for row in rows {
-                        let (id, deleted_at) = row?;
-                        dst_stmt.execute(params![id, deleted_at])?;
-                    }
-                }
-            }
-
-            let src_revision: i64 = src_conn
-                .query_row(
-                    "SELECT revision FROM storage_revision WHERE singleton = 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            tx.execute(
-                "INSERT OR REPLACE INTO storage_revision (singleton, revision) VALUES (1, ?1)",
-                [src_revision],
-            )?;
-
-            tx.commit()?;
-            dst_conn
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
-        }
-        drop(dst);
-
-        #[cfg(unix)]
-        if target_path.exists() {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(target_path, std::fs::Permissions::from_mode(0o600));
-        }
-
-        Ok(())
-    }
-
-    /// Checkpoint WAL and switch journal mode to DELETE so all data resides in the main `.db` file.
-    pub fn flush_to_single_file(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
-        Ok(())
-    }
-
-    /// Check read-only whether an external SQLite database file contains dehydrated CAS attachments.
-    pub fn file_has_dehydrated_attachments(db_path: &Path) -> Result<bool> {
-        let conn = rusqlite::Connection::open_with_flags(
-            db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        let table_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_attachments')",
-            [],
-            |r| r.get(0),
-        )?;
-        if !table_exists {
-            return Ok(false);
-        }
-        let has_dehydrated: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM memory_attachments WHERE size_bytes > 0 AND length(data) = 0)",
-            [],
-            |r| r.get(0),
-        )?;
-        Ok(has_dehydrated)
-    }
-
-    /// List attachments in this vault whose binary payload was dehydrated into CAS storage.
-    pub fn list_dehydrated_attachments(&self) -> Result<Vec<AttachmentMetadata>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at
-             FROM memory_attachments
-             WHERE size_bytes > 0 AND length(data) = 0
-             ORDER BY created_at ASC, id ASC",
-        )?;
-        let rows = stmt.query_map([], row_to_attachment_metadata)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// Rehydrate a dehydrated attachment row after verifying byte length and SHA-256 integrity,
-    /// preserving the immutability trigger on `memory_attachments`.
-    pub fn rehydrate_attachment(
-        &self,
-        attachment_id: &str,
-        expected_sha256: &str,
-        expected_size: u64,
-        data: &[u8],
-    ) -> Result<()> {
-        anyhow::ensure!(
-            data.len() as u64 == expected_size,
-            "Rehydration size mismatch for attachment '{}': expected {} bytes, got {} bytes",
-            attachment_id,
-            expected_size,
-            data.len()
-        );
-        let actual_sha = compute_sha256_hex(data);
-        anyhow::ensure!(
-            actual_sha == expected_sha256,
-            "Rehydration SHA-256 mismatch for attachment '{}': expected {}, got {}",
-            attachment_id,
-            expected_sha256,
-            actual_sha
-        );
-
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute_batch("DROP TRIGGER IF EXISTS trg_attachments_immutable;")?;
-        let updated = tx.execute(
-            "UPDATE memory_attachments
-             SET data = ?1
-             WHERE id = ?2 AND sha256 = ?3 AND size_bytes > 0 AND length(data) = 0",
-            params![data, attachment_id, expected_sha256],
-        )?;
-        tx.execute_batch(
-            r#"
-            CREATE TRIGGER IF NOT EXISTS trg_attachments_immutable
-            BEFORE UPDATE ON memory_attachments
-            BEGIN
-                SELECT RAISE(ABORT, 'Attachment binary payload is immutable; only LightMem may delete and replace attachments');
-            END;
-            "#,
-        )?;
-        anyhow::ensure!(
-            updated == 1,
-            "Failed to rehydrate attachment '{}' (missing row or already populated)",
-            attachment_id
-        );
-        tx.commit()?;
         Ok(())
     }
 
@@ -1539,628 +1116,6 @@ impl Storage {
         Ok(count)
     }
 
-    /// Return current monotonic storage revision counter for change detection.
-    pub fn storage_revision(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        let rev: i64 = conn
-            .query_row(
-                "SELECT revision FROM storage_revision WHERE singleton = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        Ok(rev)
-    }
-
-    /// Return total number of recorded hard-delete tombstones in this vault.
-    pub fn tombstone_count(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM memory_tombstones", [], |r| r.get(0))
-            .unwrap_or(0);
-        Ok(count.max(0) as usize)
-    }
-
-    /// Reuse verified populated attachment bytes already stored locally matching `sha256` and `size_bytes`.
-    pub fn get_populated_attachment_bytes(
-        &self,
-        sha256: &str,
-        size_bytes: u64,
-    ) -> Result<Option<Vec<u8>>> {
-        if size_bytes == 0 {
-            return Ok(Some(Vec::new()));
-        }
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT data FROM memory_attachments WHERE sha256 = ?1 AND size_bytes = ?2 AND length(data) > 0 LIMIT 4",
-        )?;
-        let rows = stmt.query_map(params![sha256, size_bytes as i64], |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?;
-        for row in rows {
-            let data = row?;
-            if data.len() as u64 == size_bytes && compute_sha256_hex(&data) == sha256 {
-                return Ok(Some(data));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Non-destructively merge remote sync snapshot `src` into `self` using LWW, tombstones,
-    /// strict `--local` isolation, in-place UPDATEs (avoiding cascade wipes), and populated local BLOB preservation.
-    pub fn merge_sync_vault(&self, src: &Storage) -> Result<SyncMergeStats> {
-        if Arc::ptr_eq(&self.conn, &src.conn) {
-            return Ok(SyncMergeStats::default());
-        }
-
-        let (mut conn, src_conn) =
-            if (Arc::as_ptr(&self.conn) as usize) < (Arc::as_ptr(&src.conn) as usize) {
-                let c = self.conn.lock().unwrap();
-                let sc = src.conn.lock().unwrap();
-                (c, sc)
-            } else {
-                let sc = src.conn.lock().unwrap();
-                let c = self.conn.lock().unwrap();
-                (c, sc)
-            };
-
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let mut stats = SyncMergeStats::default();
-
-        // 1. Read remote tombstones if available (backward-compatible with older v6 snapshots)
-        let mut src_tombstones: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        let src_has_tombstones: bool = src_conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_tombstones')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(false);
-        if src_has_tombstones {
-            let mut stmt = src_conn.prepare("SELECT id, deleted_at FROM memory_tombstones")?;
-            let rows =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            for row in rows {
-                let (id, deleted_at) = row?;
-                src_tombstones.insert(id, deleted_at);
-            }
-        }
-
-        // 2. Snapshot local memory headers & local tombstones
-        let mut local_memories: std::collections::HashMap<String, (String, String, String)> =
-            std::collections::HashMap::new();
-        {
-            let mut stmt = tx.prepare("SELECT id, updated_at, provenance, tags FROM memories")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (id, updated_at, prov, tags) = row?;
-                local_memories.insert(id, (updated_at, prov, tags));
-            }
-        }
-
-        let mut local_tombstones: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        {
-            let mut stmt = tx.prepare("SELECT id, deleted_at FROM memory_tombstones")?;
-            let rows =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            for row in rows {
-                let (id, deleted_at) = row?;
-                local_tombstones.insert(id, deleted_at);
-            }
-        }
-
-        // 3. Apply remote tombstones against local memories (protecting --local and newer local edits)
-        for (tid, remote_deleted_at) in &src_tombstones {
-            if let Some((local_updated_at, local_prov, local_tags)) =
-                local_memories.get(tid).cloned()
-            {
-                if is_local_row(&local_prov, &local_tags) {
-                    stats.skipped_local_only += 1;
-                    continue;
-                }
-                if cmp_rfc3339_strings(remote_deleted_at, &local_updated_at)
-                    != std::cmp::Ordering::Less
-                {
-                    tx.execute("DELETE FROM memories WHERE id = ?1", [tid])?;
-                    local_memories.remove(tid);
-                    stats.deleted_memories += 1;
-
-                    let should_store_tombstone = local_tombstones
-                        .get(tid)
-                        .map(|lt| {
-                            cmp_rfc3339_strings(remote_deleted_at, lt)
-                                == std::cmp::Ordering::Greater
-                        })
-                        .unwrap_or(true);
-                    if should_store_tombstone {
-                        tx.execute(
-                            "INSERT OR REPLACE INTO memory_tombstones (id, deleted_at) VALUES (?1, ?2)",
-                            params![tid, remote_deleted_at],
-                        )?;
-                        local_tombstones.insert(tid.clone(), remote_deleted_at.clone());
-                    }
-                } else {
-                    stats.local_kept_newer += 1;
-                }
-            } else {
-                let should_store_tombstone = local_tombstones
-                    .get(tid)
-                    .map(|lt| {
-                        cmp_rfc3339_strings(remote_deleted_at, lt) == std::cmp::Ordering::Greater
-                    })
-                    .unwrap_or(true);
-                if should_store_tombstone {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO memory_tombstones (id, deleted_at) VALUES (?1, ?2)",
-                        params![tid, remote_deleted_at],
-                    )?;
-                    local_tombstones.insert(tid.clone(), remote_deleted_at.clone());
-                }
-            }
-        }
-
-        // 4. Merge remote memories via LWW UPDATE / INSERT
-        let mut won_remote_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        let mut updated_existing_ids: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
-        {
-            let mut stmt = src_conn.prepare(
-                "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key FROM memories",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, f64>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
-                    r.get::<_, String>(8)?,
-                    r.get::<_, String>(9)?,
-                    r.get::<_, Option<String>>(10)?,
-                    r.get::<_, Option<String>>(11)?,
-                    r.get::<_, String>(12)?,
-                ))
-            })?;
-
-            for row in rows {
-                let (
-                    id,
-                    category,
-                    title,
-                    content,
-                    tags,
-                    confidence,
-                    status,
-                    provenance,
-                    created_at,
-                    updated_at,
-                    expired_at,
-                    context_json,
-                    dedup_key,
-                ) = row?;
-
-                if is_local_row(&provenance, &tags) {
-                    stats.skipped_local_only += 1;
-                    continue;
-                }
-
-                // Respect newer or equal tombstones
-                if let Some(remote_del) = src_tombstones.get(&id) {
-                    if cmp_rfc3339_strings(remote_del, &updated_at) != std::cmp::Ordering::Less {
-                        continue;
-                    }
-                }
-                if let Some(local_del) = local_tombstones.get(&id) {
-                    if cmp_rfc3339_strings(&updated_at, local_del) != std::cmp::Ordering::Greater {
-                        continue;
-                    }
-                    // Remote write is strictly newer than local tombstone -> resurrect
-                    tx.execute("DELETE FROM memory_tombstones WHERE id = ?1", [&id])?;
-                    local_tombstones.remove(&id);
-                }
-
-                if let Some((local_updated_at, local_prov, local_tags)) =
-                    local_memories.get(&id).cloned()
-                {
-                    if is_local_row(&local_prov, &local_tags) {
-                        stats.skipped_local_only += 1;
-                        continue;
-                    }
-                    match cmp_rfc3339_strings(&updated_at, &local_updated_at) {
-                        std::cmp::Ordering::Greater => {
-                            // CRITICAL: UPDATE in place so ON DELETE CASCADE never wipes local attachments/links/vectors
-                            tx.execute(
-                                "UPDATE memories
-                                 SET category=?2, title=?3, content=?4, tags=?5, confidence=?6, status=?7, provenance=?8, created_at=?9, updated_at=?10, expired_at=?11, context_json=?12, dedup_key=?13
-                                 WHERE id=?1",
-                                params![
-                                    &id,
-                                    &category,
-                                    &title,
-                                    &content,
-                                    &tags,
-                                    confidence,
-                                    &status,
-                                    &provenance,
-                                    &created_at,
-                                    &updated_at,
-                                    &expired_at,
-                                    &context_json,
-                                    &dedup_key,
-                                ],
-                            )?;
-                            local_memories.insert(id.clone(), (updated_at, provenance, tags));
-                            won_remote_ids.insert(id.clone());
-                            updated_existing_ids.insert(id);
-                            stats.updated_memories += 1;
-                        }
-                        std::cmp::Ordering::Less => {
-                            stats.local_kept_newer += 1;
-                        }
-                        std::cmp::Ordering::Equal => {}
-                    }
-                } else {
-                    tx.execute(
-                        "INSERT INTO memories (id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json, dedup_key)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                        params![
-                            &id,
-                            &category,
-                            &title,
-                            &content,
-                            &tags,
-                            confidence,
-                            &status,
-                            &provenance,
-                            &created_at,
-                            &updated_at,
-                            &expired_at,
-                            &context_json,
-                            &dedup_key,
-                        ],
-                    )?;
-                    local_memories.insert(id.clone(), (updated_at, provenance, tags));
-                    won_remote_ids.insert(id);
-                    stats.inserted_memories += 1;
-                }
-            }
-        }
-
-        // 5. Vectors (compatibility-checked; remote wins overwrite updated memories, otherwise fill missing)
-        let src_has_vectors: bool = src_conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM memory_vectors)", [], |r| {
-                r.get(0)
-            })
-            .unwrap_or(false);
-
-        if src_has_vectors {
-            let target_state: Option<(String, i64)> = tx
-                .query_row(
-                    "SELECT identity, dims FROM embedding_state WHERE singleton=1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let src_state: Option<(String, i64)> = src_conn
-                .query_row(
-                    "SELECT identity, dims FROM embedding_state WHERE singleton=1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-
-            let target_vec_dims: Option<i64> = tx
-                .query_row("SELECT dims FROM memory_vectors LIMIT 1", [], |r| r.get(0))
-                .optional()?;
-            let src_vec_dims: Option<i64> = src_conn
-                .query_row("SELECT dims FROM memory_vectors LIMIT 1", [], |r| r.get(0))
-                .optional()?;
-
-            let target_dims = target_state.as_ref().map(|s| s.1).or(target_vec_dims);
-            let src_dims = src_state.as_ref().map(|s| s.1).or(src_vec_dims);
-
-            if let (Some(td), Some(sd)) = (target_dims, src_dims) {
-                anyhow::ensure!(
-                    td == sd,
-                    "Incompatible embedding dimensions: target has {} dims, source has {} dims",
-                    td,
-                    sd
-                );
-            }
-
-            if let (Some(ts), Some(ss)) = (&target_state, &src_state) {
-                anyhow::ensure!(
-                    LightMemConfig::embedding_identities_compatible(&ts.0, &ss.0),
-                    "Incompatible embedding models: target uses '{}', source uses '{}'",
-                    ts.0,
-                    ss.0
-                );
-            }
-
-            let target_vec_count: i64 = tx
-                .query_row("SELECT COUNT(*) FROM memory_vectors", [], |r| r.get(0))
-                .unwrap_or(0);
-            if target_vec_count == 0 && target_state.is_none() {
-                if let Some((ref s_id, s_dims)) = src_state {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO embedding_state (singleton, identity, dims) VALUES (1, ?1, ?2)",
-                        params![s_id, s_dims],
-                    )?;
-                }
-            } else if target_state.is_some() && src_state.is_none() {
-                tx.execute("DELETE FROM embedding_state", [])?;
-            }
-
-            let mut vec_stmt =
-                src_conn.prepare("SELECT id, embedding, dims FROM memory_vectors")?;
-            let vec_rows = vec_stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?;
-            for v in vec_rows {
-                let (id, emb, dims) = v?;
-                let is_syncable_present = local_memories
-                    .get(&id)
-                    .map(|(_, prov, tags)| !is_local_row(prov, tags))
-                    .unwrap_or(false);
-                if !is_syncable_present {
-                    continue;
-                }
-                if won_remote_ids.contains(&id) {
-                    let changed = tx.execute(
-                        "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)
-                         ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
-                        params![id, emb, dims],
-                    )?;
-                    stats.vectors_updated += changed;
-                } else {
-                    let changed = tx.execute(
-                        "INSERT OR IGNORE INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
-                        params![id, emb, dims],
-                    )?;
-                    stats.vectors_updated += changed;
-                }
-            }
-        }
-
-        // 6. Attachments (never overwrite populated local BLOBs; insert new metadata/dehydrated rows safely)
-        {
-            let mut att_stmt = src_conn.prepare(
-                "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at FROM memory_attachments",
-            )?;
-            let att_rows = att_stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, i64>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, Option<String>>(7)?,
-                    r.get::<_, Option<f64>>(8)?,
-                    r.get::<_, Vec<u8>>(9)?,
-                    r.get::<_, String>(10)?,
-                ))
-            })?;
-            for a in att_rows {
-                let (
-                    id,
-                    memory_id,
-                    filename,
-                    mime_type,
-                    media_kind,
-                    size_bytes,
-                    sha256,
-                    dimensions,
-                    duration_secs,
-                    data,
-                    created_at,
-                ) = a?;
-                let is_syncable_present = local_memories
-                    .get(&memory_id)
-                    .map(|(_, prov, tags)| !is_local_row(prov, tags))
-                    .unwrap_or(false);
-                if !is_syncable_present {
-                    continue;
-                }
-
-                let existing_len: Option<i64> = tx
-                    .query_row(
-                        "SELECT length(data) FROM memory_attachments WHERE id = ?1 OR (memory_id = ?2 AND sha256 = ?3) LIMIT 1",
-                        params![&id, &memory_id, &sha256],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if existing_len.is_some() {
-                    // Preserve populated local BLOB (or dehydrated placeholder handled by CAS rehydration)
-                    // without ever firing trg_attachments_immutable.
-                    continue;
-                }
-
-                let inserted = tx.execute(
-                    "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        id,
-                        memory_id,
-                        filename,
-                        mime_type,
-                        media_kind,
-                        size_bytes,
-                        sha256,
-                        dimensions,
-                        duration_secs,
-                        data,
-                        created_at
-                    ],
-                )?;
-                stats.attachments_added += inserted;
-            }
-        }
-
-        // 7. Entities
-        let has_entities: bool = src_conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_entities')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(false);
-        if has_entities {
-            for updated_id in &updated_existing_ids {
-                tx.execute(
-                    "DELETE FROM memory_entities WHERE memory_id = ?1",
-                    [updated_id],
-                )?;
-            }
-
-            let mut ent_stmt = src_conn.prepare(
-                "SELECT e.memory_id, e.entity_name, e.entity_val, e.created_at
-                 FROM memory_entities e
-                 INNER JOIN memories m ON e.memory_id = m.id
-                 WHERE m.status = 'active'",
-            )?;
-            let ent_rows = ent_stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                ))
-            })?;
-            for e in ent_rows {
-                let (memory_id, entity_name, entity_val, created_at) = e?;
-                let is_syncable_present = local_memories
-                    .get(&memory_id)
-                    .map(|(_, prov, tags)| !is_local_row(prov, tags))
-                    .unwrap_or(false);
-                if !is_syncable_present {
-                    continue;
-                }
-                let is_active: bool = tx
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND status='active')",
-                        [&memory_id],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(false);
-                if !is_active {
-                    continue;
-                }
-                let already_exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM memory_entities WHERE memory_id=?1 AND entity_name=?2 AND entity_val=?3)",
-                    params![&memory_id, &entity_name, &entity_val],
-                    |r| r.get(0),
-                )?;
-                if !already_exists {
-                    tx.execute(
-                        "INSERT INTO memory_entities (memory_id, entity_name, entity_val, created_at) VALUES (?1, ?2, ?3, ?4)",
-                        params![memory_id, entity_name, entity_val, created_at],
-                    )?;
-                    stats.entities_added += 1;
-                }
-            }
-        }
-
-        // 8. Knowledge graph links
-        {
-            let mut link_stmt = src_conn.prepare(
-                "SELECT source_id, target_id, relation, weight, created_at FROM memory_links",
-            )?;
-            let link_rows = link_stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, f64>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })?;
-            for l in link_rows {
-                let (s, t, rel, weight, created_at) = l?;
-                let s_ok = local_memories
-                    .get(&s)
-                    .map(|(_, prov, tags)| !is_local_row(prov, tags))
-                    .unwrap_or(false);
-                let t_ok = local_memories
-                    .get(&t)
-                    .map(|(_, prov, tags)| !is_local_row(prov, tags))
-                    .unwrap_or(false);
-                if s_ok && t_ok {
-                    let added = tx.execute(
-                        "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![s, t, rel, weight, created_at],
-                    )?;
-                    stats.links_added += added;
-                }
-            }
-        }
-
-        tx.commit()?;
-        Ok(stats)
-    }
-
-    /// Retrieve verified binary attachment payload `(AttachmentMetadata, Vec<u8>)` for a single attachment ID.
-    pub fn get_attachment_data_by_id(
-        &self,
-        attachment_id: &str,
-    ) -> Result<Option<(AttachmentMetadata, Vec<u8>)>> {
-        let conn = self.conn.lock().unwrap();
-        let row = conn
-            .query_row(
-                "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at, data
-                 FROM memory_attachments
-                 WHERE id = ?1",
-                [attachment_id],
-                |r| {
-                    let meta = row_to_attachment_metadata(r)?;
-                    let data: Vec<u8> = r.get(10)?;
-                    Ok((meta, data))
-                },
-            )
-            .optional()?;
-        match row {
-            Some((meta, data)) => {
-                if meta.size_bytes > 0 && data.is_empty() {
-                    anyhow::bail!(
-                        "Attachment integrity verification failed for '{}' (sha256:{}): payload is dehydrated; run 'lmem sync --restore' to rehydrate from CAS blobs",
-                        meta.filename,
-                        meta.sha256
-                    );
-                }
-                let actual_sha = compute_sha256_hex(&data);
-                anyhow::ensure!(
-                    actual_sha == meta.sha256 && data.len() as u64 == meta.size_bytes,
-                    "Attachment integrity verification failed for '{}' (expected sha256:{}, got sha256:{})",
-                    meta.filename,
-                    meta.sha256,
-                    actual_sha
-                );
-                Ok(Some((meta, data)))
-            }
-            None => Ok(None),
-        }
-    }
-
     /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for a memory
     pub fn get_memory_attachments_data(
         &self,
@@ -2183,13 +1138,6 @@ impl Storage {
         let mut out = Vec::new();
         for item in rows {
             let (meta, data) = item?;
-            if meta.size_bytes > 0 && data.is_empty() {
-                anyhow::bail!(
-                    "Attachment integrity verification failed for '{}' (sha256:{}): payload is dehydrated; run 'lmem sync --restore' to rehydrate from CAS blobs",
-                    meta.filename,
-                    meta.sha256
-                );
-            }
             let actual_sha = compute_sha256_hex(&data);
             anyhow::ensure!(
                 actual_sha == meta.sha256 && data.len() as u64 == meta.size_bytes,
@@ -2460,20 +1408,6 @@ impl Storage {
             )
             .unwrap_or(false);
         Ok(exists)
-    }
-
-    /// Find all memories referencing a given attachment SHA-256 digest: returns Vec<(memory_id, filename)>
-    pub fn find_attachments_by_sha256(&self, sha256: &str) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT memory_id, filename FROM memory_attachments WHERE sha256 = ?1 ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map([sha256], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        let mut results = Vec::new();
-        for item in rows {
-            results.push(item?);
-        }
-        Ok(results)
     }
 
     pub fn add_link(
@@ -2988,25 +1922,7 @@ impl Storage {
             return Ok(false);
         };
         let rows = if hard_delete {
-            let meta: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT provenance, tags FROM memories WHERE id = ?1",
-                    [&id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let deleted = tx.execute("DELETE FROM memories WHERE id=?1", [&id])?;
-            if deleted > 0 {
-                if let Some((prov, tags)) = meta {
-                    if !is_local_row(&prov, &tags) {
-                        tx.execute(
-                            "INSERT OR REPLACE INTO memory_tombstones (id, deleted_at) VALUES (?1, ?2)",
-                            params![&id, Utc::now().to_rfc3339()],
-                        )?;
-                    }
-                }
-            }
-            deleted
+            tx.execute("DELETE FROM memories WHERE id=?1", [id])?
         } else {
             tx.execute("UPDATE memories SET status='expired', expired_at=?1, updated_at=?1 WHERE id=?2 AND status='active'", params![Utc::now().to_rfc3339(), id])?
         };
@@ -3018,33 +1934,8 @@ impl Storage {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let rows = if hard_delete {
-            let syncable_ids: Vec<String> = {
-                let mut stmt = tx.prepare("SELECT id, provenance, tags FROM memories")?;
-                let rows = stmt.query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })?;
-                let mut ids = Vec::new();
-                for r in rows {
-                    let (id, prov, tags) = r?;
-                    if !is_local_row(&prov, &tags) {
-                        ids.push(id);
-                    }
-                }
-                ids
-            };
             let deleted = tx.execute("DELETE FROM memories", [])?;
             tx.execute("DELETE FROM embedding_state", [])?;
-            let now = Utc::now().to_rfc3339();
-            for id in syncable_ids {
-                tx.execute(
-                    "INSERT OR REPLACE INTO memory_tombstones (id, deleted_at) VALUES (?1, ?2)",
-                    params![id, &now],
-                )?;
-            }
             deleted
         } else {
             tx.execute(
@@ -3405,46 +2296,6 @@ impl Storage {
     }
 }
 
-fn apply_schema_v7_migration(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS memory_tombstones (
-            id TEXT PRIMARY KEY,
-            deleted_at TEXT NOT NULL
-        );
-        CREATE TRIGGER IF NOT EXISTS revision_tombstones_ai AFTER INSERT ON memory_tombstones BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_tombstones_au AFTER UPDATE ON memory_tombstones BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_tombstones_ad AFTER DELETE ON memory_tombstones BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_links_ai AFTER INSERT ON memory_links BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_links_au AFTER UPDATE ON memory_links BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_links_ad AFTER DELETE ON memory_links BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_entities_ai AFTER INSERT ON memory_entities BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        CREATE TRIGGER IF NOT EXISTS revision_entities_ad AFTER DELETE ON memory_entities BEGIN UPDATE storage_revision SET revision=revision+1; END;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn is_local_row(provenance: &str, tags_raw: &str) -> bool {
-    provenance.trim().eq_ignore_ascii_case("local")
-        || parse_tags_column(tags_raw)
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case("local"))
-}
-
-fn parse_rfc3339_utc(raw: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-fn cmp_rfc3339_strings(a: &str, b: &str) -> std::cmp::Ordering {
-    match (parse_rfc3339_utc(a), parse_rfc3339_utc(b)) {
-        (Some(ta), Some(tb)) => ta.cmp(&tb),
-        _ => a.cmp(b),
-    }
-}
-
 fn expire_due_conn(conn: &Connection) -> Result<usize> {
     let now = Utc::now().to_rfc3339();
     let has_due: bool = conn.query_row(
@@ -3744,16 +2595,7 @@ fn check_identity(conn: &Connection, identity: &str) -> Result<()> {
         .query_row("SELECT identity FROM embedding_state", [], |r| r.get(0))
         .optional()?;
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-    let compatible = state
-        .as_deref()
-        .map(|s| crate::models::LightMemConfig::embedding_identities_compatible(s, identity))
-        .unwrap_or(false);
-    anyhow::ensure!(
-        count == 0 || compatible,
-        "Embedding migration required (stored: {}, requested: {}). Run lmem reindex to review and start migration.",
-        state.as_deref().unwrap_or("legacy / unknown"),
-        identity
-    );
+    anyhow::ensure!(count == 0 || state.as_deref() == Some(identity), "Embedding migration required (stored: {}, requested: {}). Run lmem reindex to review and start migration.", state.as_deref().unwrap_or("legacy / unknown"), identity);
     Ok(())
 }
 
@@ -3765,8 +2607,7 @@ fn bind_identity(conn: &Connection, identity: &str, dims: usize) -> Result<()> {
         .optional()?;
     if let Some((stored, size)) = state {
         anyhow::ensure!(
-            crate::models::LightMemConfig::embedding_identities_compatible(&stored, identity)
-                && size == dims as i64,
+            stored == identity && size == dims as i64,
             "Embedding model or dimensions changed; run lmem reindex"
         );
     } else {
@@ -3871,7 +2712,6 @@ where
         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
         ON CONFLICT(id) DO UPDATE SET category=excluded.category, title=excluded.title, content=excluded.content, tags=excluded.tags, confidence=excluded.confidence, status=excluded.status, provenance=excluded.provenance, created_at=excluded.created_at, updated_at=excluded.updated_at, expired_at=excluded.expired_at, dedup_key=excluded.dedup_key, context_json=excluded.context_json",
         params![merged.id, merged.category.as_str(), merged.title, merged.content, serde_json::to_string(&merged.tags)?, merged.confidence, merged.status.as_str(), merged.provenance, merged.created_at.to_rfc3339(), merged.updated_at.to_rfc3339(), merged.expired_at.map(|t| t.to_rfc3339()), final_dedup_key, merged.context.as_ref().map(serde_json::to_string).transpose()?])?;
-    tx.execute("DELETE FROM memory_tombstones WHERE id=?1", [&merged.id])?;
     tx.execute("DELETE FROM memory_vectors WHERE id=?1", [&merged.id])?;
     if let Some(vector) = vector {
         validate_vector(&vector)?;
@@ -3921,13 +2761,7 @@ where
                  WHERE target_id = ?2 AND source_id != ?1",
                 params![merged.id, duplicate.id],
             )?;
-            tx.execute("DELETE FROM memories WHERE id=?1", [&duplicate.id])?;
-            if !duplicate.is_local() {
-                tx.execute(
-                    "INSERT OR REPLACE INTO memory_tombstones (id, deleted_at) VALUES (?1, ?2)",
-                    params![&duplicate.id, Utc::now().to_rfc3339()],
-                )?;
-            }
+            tx.execute("DELETE FROM memories WHERE id=?1", [duplicate.id])?;
         }
     }
     Ok(merged)
@@ -3969,36 +2803,6 @@ fn load_attachments_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<Att
     )?;
     let rows = stmt.query_map([memory_id], row_to_attachment_metadata)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
-}
-
-fn load_primary_multimodal_payload(
-    conn: &Connection,
-    memory_id: &str,
-) -> Result<Option<(Option<String>, Option<String>)>> {
-    let mut stmt = conn.prepare(
-        "SELECT data, media_kind, duration_secs FROM memory_attachments \
-         WHERE memory_id = ?1 \
-         ORDER BY (media_kind='image') DESC, (media_kind='video') DESC, (media_kind='audio') DESC \
-         LIMIT 1",
-    )?;
-    let mut rows = stmt.query([memory_id])?;
-    if let Some(row) = rows.next()? {
-        let blob: Vec<u8> = row.get(0)?;
-        let kind: String = row.get(1)?;
-        let dur: Option<f64> = row.get(2)?;
-        if kind == "image" {
-            return Ok(Some((Some(encode_base64(&blob)), None)));
-        } else if kind == "video" {
-            if let Some(frame) =
-                crate::services::observer::ObserverService::extract_video_keyframe_jpeg(&blob)
-            {
-                return Ok(Some((Some(encode_base64(&frame)), None)));
-            }
-        } else if kind == "audio" && dur.unwrap_or(0.0) >= 0.5 {
-            return Ok(Some((None, Some(encode_base64(&blob)))));
-        }
-    }
-    Ok(None)
 }
 
 fn load_entities_for_id(conn: &Connection, memory_id: &str) -> Result<Vec<EntityRecord>> {
@@ -4366,343 +3170,82 @@ mod fts_tests {
     }
 
     #[test]
-    fn test_schema_v6_to_v7_migration_and_revision_triggers() {
+    fn test_schema_v7_downgrade_to_v6_preserves_memories_and_links() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("v6.db");
-        {
-            let storage = Storage::open(&db_path).unwrap();
-            let mem = MemoryRecord::new(
-                MemoryType::Fact,
-                "Existing Note".to_string(),
-                "Stored prior to v7 upgrade".to_string(),
-                vec!["legacy".to_string()],
-                0.9,
-                None,
-            );
-            storage.insert_memory(&mem, None).unwrap();
-        }
-        // Downgrade user_version to 6 and drop v7 objects to simulate upgrading an existing v6 vault
+        let db_path = dir.path().join("v7_vault.db");
+
+        let storage = Storage::open(&db_path).unwrap();
+        let mem_a = MemoryRecord::new(
+            MemoryType::Fact,
+            "Gateway".to_string(),
+            "API gateway runs on port 8080".to_string(),
+            vec!["infra".to_string()],
+            0.95,
+            None,
+        );
+        let mem_b = MemoryRecord::new(
+            MemoryType::Fact,
+            "Postgres".to_string(),
+            "Primary DB runs on port 5432".to_string(),
+            vec!["db".to_string()],
+            0.95,
+            None,
+        );
+        storage.insert_memory(&mem_a, Some(&[1.0, 0.0])).unwrap();
+        storage.insert_memory(&mem_b, Some(&[0.0, 1.0])).unwrap();
+        storage
+            .add_link(&mem_a.id, &mem_b.id, Some("depends_on"), Some(1.0))
+            .unwrap();
+        drop(storage);
+
+        // Upgrade test DB to v0.7.2 Schema v7 layout
         {
             let conn = Connection::open(&db_path).unwrap();
             conn.execute_batch(
-                "DROP TABLE IF EXISTS memory_tombstones;
-                 DROP TRIGGER IF EXISTS revision_links_ai;
-                 DROP TRIGGER IF EXISTS revision_links_ad;
-                 DROP TRIGGER IF EXISTS revision_entities_ai;",
+                r#"
+                CREATE TABLE IF NOT EXISTS memory_tombstones (
+                    id TEXT PRIMARY KEY,
+                    deleted_at TEXT NOT NULL
+                );
+                CREATE TRIGGER IF NOT EXISTS revision_tombstones_ai AFTER INSERT ON memory_tombstones BEGIN UPDATE storage_revision SET revision=revision+1; END;
+                CREATE TRIGGER IF NOT EXISTS revision_links_ai AFTER INSERT ON memory_links BEGIN UPDATE storage_revision SET revision=revision+1; END;
+                CREATE TRIGGER IF NOT EXISTS revision_entities_ad AFTER DELETE ON memory_entities BEGIN UPDATE storage_revision SET revision=revision+1; END;
+                "#,
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", 6).unwrap();
+            conn.pragma_update(None, "user_version", 7).unwrap();
         }
 
-        let upgraded = Storage::open(&db_path).unwrap();
-        {
-            let conn = upgraded.conn.lock().unwrap();
-            let ver: i64 = conn
-                .pragma_query_value(None, "user_version", |r| r.get(0))
-                .unwrap();
-            assert_eq!(ver, 7);
-            let has_tombstones: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_tombstones')",
-                    [],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(has_tombstones);
-        }
-
-        let rev0 = upgraded.storage_revision().unwrap();
-        let m2 = MemoryRecord::new(
-            MemoryType::Fact,
-            "Second Note".to_string(),
-            "Used for link revision test".to_string(),
-            vec![],
-            0.9,
-            None,
-        );
-        upgraded.insert_memory(&m2, None).unwrap();
-        let rev1 = upgraded.storage_revision().unwrap();
-        assert!(rev1 > rev0);
-
-        let all = upgraded.list_memories(None, None, None, 10).unwrap();
-        assert_eq!(all.len(), 2);
-        upgraded
-            .add_link(&all[0].id, &all[1].id, Some("relates_to"), Some(1.0))
-            .unwrap();
-        let rev2 = upgraded.storage_revision().unwrap();
-        assert!(
-            rev2 > rev1,
-            "memory_links insert must advance storage_revision"
-        );
-
-        upgraded.forget_memory(&m2.id, true).unwrap();
-        assert_eq!(upgraded.tombstone_count().unwrap(), 1);
-        let rev3 = upgraded.storage_revision().unwrap();
-        assert!(
-            rev3 > rev2,
-            "hard delete + tombstone must advance storage_revision"
-        );
-    }
-
-    #[test]
-    fn test_merge_sync_vault_lww_tombstones_local_isolation_and_blob_preservation() {
-        let dir = tempfile::tempdir().unwrap();
-        let a_path = dir.path().join("device_a.db");
-        let b_path = dir.path().join("device_b.db");
-        let a = Storage::open(&a_path).unwrap();
-        let b = Storage::open(&b_path).unwrap();
-
-        let t0 = DateTime::parse_from_rfc3339("2026-01-01T10:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let t1 = DateTime::parse_from_rfc3339("2026-01-01T11:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let t2 = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-
-        let embedder = crate::services::embeddings::HashEmbeddingProvider;
-        let identity = "card-v1:hash:fnv-bigram-v1";
-
-        // 1. Shared memory with an attachment: Device A has hydrated BLOB; Device B edits content at t2 > t1
-        let mut shared_a = MemoryRecord::new(
-            MemoryType::Fact,
-            "Shared Doc".to_string(),
-            "Original text on Device A".to_string(),
-            vec!["work".to_string()],
-            0.9,
-            None,
-        );
-        shared_a.created_at = t0;
-        shared_a.updated_at = t1;
-
-        let payload = b"binary-png-content-12345".to_vec();
-        let sha = compute_sha256_hex(&payload);
-        let att_id = uuid::Uuid::new_v4().to_string();
-        let att = AttachmentInput {
-            metadata: AttachmentMetadata {
-                id: att_id.clone(),
-                memory_id: shared_a.id.clone(),
-                filename: "doc.png".to_string(),
-                mime_type: "image/png".to_string(),
-                media_kind: "image".to_string(),
-                size_bytes: payload.len() as u64,
-                sha256: sha.clone(),
-                dimensions: Some("8x8".to_string()),
-                duration_secs: None,
-                created_at: t0,
-                data_base64: None,
-            },
-            data: payload.clone(),
-        };
-        a.insert_indexed_with_attachments(
-            &shared_a,
-            std::slice::from_ref(&att),
-            &embedder,
-            identity,
-            false,
-        )
-        .unwrap();
-
-        let mut shared_b = shared_a.clone();
-        shared_b.content = "Updated text on Device B".to_string();
-        shared_b.updated_at = t2;
-        // Simulate B having the memory in slim snapshot form where attachment row is dehydrated
-        let att_dehydrated = AttachmentInput {
-            metadata: att.metadata.clone(),
-            data: Vec::new(),
-        };
-        b.insert_indexed_with_attachments(&shared_b, &[att_dehydrated], &embedder, identity, false)
-            .unwrap();
-
-        // 2. Device A unique memory vs Device B unique memory + Graph link on B + deleted memory
-        let mut only_a = MemoryRecord::new(
-            MemoryType::Decision,
-            "Mac Only Note".to_string(),
-            "Decision made offline on Mac".to_string(),
-            vec![],
-            0.9,
-            None,
-        );
-        only_a.created_at = t0;
-        only_a.updated_at = t1;
-        a.insert_indexed_batch(&[only_a.clone()], &embedder, identity, false)
-            .unwrap();
-
-        let mut only_b = MemoryRecord::new(
-            MemoryType::Decision,
-            "Linux Only Note".to_string(),
-            "Decision made offline on Linux".to_string(),
-            vec![],
-            0.9,
-            None,
-        );
-        only_b.created_at = t0;
-        only_b.updated_at = t1;
-        b.insert_indexed_batch(&[only_b.clone()], &embedder, identity, false)
-            .unwrap();
-        b.add_link(&shared_b.id, &only_b.id, Some("relates_to"), Some(1.0))
-            .unwrap();
-
-        // 3. Memory existing on A at t0, hard-deleted on B at t2 -> must delete on A after merge
-        let mut doomed = MemoryRecord::new(
-            MemoryType::Fact,
-            "Doomed Fact".to_string(),
-            "Should be removed via tombstone".to_string(),
-            vec![],
-            0.9,
-            None,
-        );
-        doomed.created_at = t0;
-        doomed.updated_at = t1;
-        a.insert_indexed_batch(&[doomed.clone()], &embedder, identity, false)
-            .unwrap();
-        b.insert_indexed_batch(&[doomed.clone()], &embedder, identity, false)
-            .unwrap();
-        b.forget_memory(&doomed.id, true).unwrap();
-
-        // 4. --local memories on both A and B (tagged and provenance)
-        let local_a = MemoryRecord::new(
-            MemoryType::Password,
-            "Local A Secret".to_string(),
-            "Never leaves A".to_string(),
-            vec!["local".to_string()],
-            1.0,
-            Some("local".to_string()),
-        );
-        a.insert_indexed_batch(std::slice::from_ref(&local_a), &embedder, identity, false)
-            .unwrap();
-
-        let local_b = MemoryRecord::new(
-            MemoryType::Password,
-            "Local B Secret".to_string(),
-            "Never leaves B".to_string(),
-            vec!["Local".to_string()],
-            1.0,
-            None,
-        );
-        b.insert_indexed_batch(std::slice::from_ref(&local_b), &embedder, identity, false)
-            .unwrap();
-
-        // Merge B -> A
-        let stats = a.merge_sync_vault(&b).unwrap();
-        assert_eq!(stats.inserted_memories, 1, "only_b should be inserted");
+        // Re-opening must cleanly restore Schema v6 without losing data or failing writes
+        let reopened = Storage::open(&db_path).unwrap();
         assert_eq!(
-            stats.updated_memories, 1,
-            "shared_b LWW update should apply"
+            reopened.get_memory(&mem_a.id).unwrap().unwrap().content,
+            mem_a.content
         );
-        assert_eq!(
-            stats.deleted_memories, 1,
-            "doomed should be deleted via tombstone"
-        );
-        assert!(stats.skipped_local_only >= 1, "local_b must be skipped");
-        assert_eq!(stats.links_added, 1, "graph link from B should transfer");
-
-        // Verify shared memory updated WITHOUT cascading delete of hydrated attachment on A
-        let fetched_shared = a.get_memory(&shared_a.id).unwrap().unwrap();
-        assert_eq!(fetched_shared.content, "Updated text on Device B");
-        let preserved_att = a.get_memory_attachments_data(&shared_a.id).unwrap();
-        assert_eq!(preserved_att.len(), 1);
-        assert_eq!(
-            preserved_att[0].1, payload,
-            "Populated local BLOB must stay intact when merging newer remote metadata"
-        );
-
-        // Verify unique & deleted & --local states
-        assert!(a.get_memory(&only_a.id).unwrap().is_some());
-        assert!(a.get_memory(&only_b.id).unwrap().is_some());
-        assert!(a.get_memory(&doomed.id).unwrap().is_none());
-        assert!(a.get_memory(&local_a.id).unwrap().is_some());
-        assert!(a.get_memory(&local_b.id).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_merge_sync_vault_resurrects_newer_write_over_older_tombstone() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = Storage::open(dir.path().join("a.db")).unwrap();
-        let b = Storage::open(dir.path().join("b.db")).unwrap();
-
-        let mut rec = MemoryRecord::new(
+        assert_eq!(reopened.get_links_for_memory(&mem_a.id).unwrap().len(), 1);
+        let mem_c = MemoryRecord::new(
             MemoryType::Fact,
-            "Phoenix Fact".to_string(),
-            "Deleted first, then recreated".to_string(),
+            "Cache".to_string(),
+            "Redis runs on port 6379".to_string(),
             vec![],
             0.9,
             None,
         );
-        rec.created_at = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        rec.updated_at = rec.created_at;
+        reopened.insert_memory(&mem_c, Some(&[0.5, 0.5])).unwrap();
+        drop(reopened);
 
-        // Device A deletes it now (tombstone timestamp = now)
-        a.insert_memory(&rec, None).unwrap();
-        a.forget_memory(&rec.id, true).unwrap();
-        assert_eq!(a.tombstone_count().unwrap(), 1);
-
-        // Case 1: Remote version with OLDER updated_at is suppressed by local tombstone
-        b.insert_memory(&rec, None).unwrap();
-        a.merge_sync_vault(&b).unwrap();
-        assert!(a.get_memory(&rec.id).unwrap().is_none());
-        assert_eq!(a.tombstone_count().unwrap(), 1);
-
-        // Case 2: Remote version edited/recreated STRICTLY NEWER than tombstone resurrects it
-        let mut newer = rec.clone();
-        newer.content = "Resurrected content".to_string();
-        newer.updated_at = Utc::now() + chrono::Duration::seconds(60);
-        b.insert_memory(&newer, None).unwrap();
-
-        a.merge_sync_vault(&b).unwrap();
-        let resurrected = a.get_memory(&rec.id).unwrap().expect("must resurrect");
-        assert_eq!(resurrected.content, "Resurrected content");
-        assert_eq!(a.tombstone_count().unwrap(), 0);
-    }
-
-    #[test]
-    fn test_merge_sync_vault_rejects_incompatible_embeddings_atomically() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = Storage::open(dir.path().join("a.db")).unwrap();
-        let b = Storage::open(dir.path().join("b.db")).unwrap();
-
-        let hash_emb = crate::services::embeddings::HashEmbeddingProvider;
-        let m_a = MemoryRecord::new(
-            MemoryType::Fact,
-            "Fact A".to_string(),
-            "Hash vault memory".to_string(),
-            vec![],
-            0.9,
-            None,
-        );
-        a.insert_indexed_batch(&[m_a], &hash_emb, "card-v1:hash:fnv-bigram-v1", false)
+        let conn = Connection::open(&db_path).unwrap();
+        let ver: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-
-        let m_b = MemoryRecord::new(
-            MemoryType::Fact,
-            "Fact B".to_string(),
-            "ONNX vault memory".to_string(),
-            vec![],
-            0.9,
-            None,
-        );
-        // Simulate B having a different embedding identity
-        {
-            b.insert_indexed_batch(
-                std::slice::from_ref(&m_b),
-                &hash_emb,
-                "card-v1:onnx:Xenova/bge-small-en-v1.5",
-                false,
+        assert_eq!(ver, 6);
+        let has_tombstones: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_tombstones')",
+                [],
+                |r| r.get(0),
             )
             .unwrap();
-        }
-
-        let err = a.merge_sync_vault(&b).unwrap_err();
-        assert!(
-            err.to_string().contains("Incompatible embedding"),
-            "Unexpected error: {}",
-            err
-        );
-        // Atomicity: m_b must NOT have been partially committed to A
-        assert!(a.get_memory(&m_b.id).unwrap().is_none());
+        assert!(!has_tombstones);
     }
 }
