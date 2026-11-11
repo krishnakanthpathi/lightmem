@@ -14,10 +14,7 @@ const FAVICON_32: &[u8] = include_bytes!("../../static/favicon-32.png");
 const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../../static/apple-touch-icon.png");
 const OG_PNG: &[u8] = include_bytes!("../../static/og.png");
 
-fn handle_request(req_line: &str) -> Option<(&'static [u8], &'static str)> {
-    let path = req_line.split_whitespace().nth(1)?;
-    let clean_path = path.split('?').next().unwrap_or(path);
-
+fn route_path(clean_path: &str) -> Option<(&'static [u8], &'static str)> {
     match clean_path {
         "/" | "/index.html" => Some((INDEX_HTML.as_bytes(), "text/html; charset=utf-8")),
         "/docs" | "/docs.html" => Some((DOCS_HTML.as_bytes(), "text/html; charset=utf-8")),
@@ -36,6 +33,75 @@ fn handle_request(req_line: &str) -> Option<(&'static [u8], &'static str)> {
         "/og.png" => Some((OG_PNG, "image/png")),
         _ => None,
     }
+}
+
+fn handle_request(req_line: &str) -> Option<(&'static [u8], &'static str)> {
+    let mut parts = req_line.split_whitespace();
+    let method = parts.next()?;
+    let path = parts.next()?;
+    if !matches!(method, "GET" | "HEAD") {
+        return None;
+    }
+    let clean_path = path.split('?').next().unwrap_or(path);
+    route_path(clean_path)
+}
+
+fn serve_connection(mut stream: std::net::TcpStream) {
+    use std::io::{BufRead, BufReader, Write};
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+
+    let mut req_line = String::new();
+    {
+        let mut reader = BufReader::new(&stream);
+        if reader.read_line(&mut req_line).unwrap_or(0) == 0 {
+            return;
+        }
+        // Drain remaining HTTP headers up to the blank line so closing the socket
+        // does not leave unread receive-buffer bytes that trigger TCP RST on macOS/BSD.
+        let mut header_line = String::new();
+        let mut total_header_bytes = req_line.len();
+        loop {
+            header_line.clear();
+            match reader.read_line(&mut header_line) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total_header_bytes = total_header_bytes.saturating_add(n);
+                    if header_line == "\r\n" || header_line == "\n" || total_header_bytes >= 131_072
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    let method = req_line.split_whitespace().next().unwrap_or("");
+    let is_head = method == "HEAD";
+    if !method.is_empty() && !matches!(method, "GET" | "HEAD") {
+        let resp = b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Length: 18\r\nConnection: close\r\n\r\nMethod Not Allowed";
+        let _ = stream.write_all(resp);
+    } else if let Some((content, mime)) = handle_request(&req_line) {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            mime,
+            content.len()
+        );
+        let _ = stream.write_all(header.as_bytes());
+        if !is_head {
+            let _ = stream.write_all(content);
+        }
+    } else {
+        let not_found_hdr =
+            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 9\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(not_found_hdr);
+        if !is_head {
+            let _ = stream.write_all(b"Not Found");
+        }
+    }
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// Options for launching the embedded documentation and landing page server
@@ -107,39 +173,29 @@ pub fn serve_docs(options: DocsOptions) -> Result<()> {
     if !options.no_browser {
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("open").arg(&url).spawn();
+            if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
+                eprintln!("Warning: Failed to open {} in browser: {}", url, e);
+            }
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("cmd")
+            if let Err(e) = std::process::Command::new("cmd")
                 .args(["/C", "start", &url])
-                .spawn();
+                .spawn()
+            {
+                eprintln!("Warning: Failed to open {} in browser: {}", url, e);
+            }
         }
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         {
-            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+            if let Err(e) = std::process::Command::new("xdg-open").arg(&url).spawn() {
+                eprintln!("Warning: Failed to open {} in browser: {}", url, e);
+            }
         }
     }
 
-    for mut stream in listener.incoming().flatten() {
-        use std::io::{BufRead, BufReader, Write};
-        let mut reader = BufReader::new(&stream);
-        let mut req_line = String::new();
-        if reader.read_line(&mut req_line).is_ok() {
-            if let Some((content, mime)) = handle_request(&req_line) {
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    mime,
-                    content.len()
-                );
-                let _ = stream.write_all(header.as_bytes());
-                let _ = stream.write_all(content);
-            } else {
-                let not_found = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found";
-                let _ = stream.write_all(not_found);
-            }
-            let _ = stream.flush();
-        }
+    for stream in listener.incoming().flatten() {
+        std::thread::spawn(move || serve_connection(stream));
     }
 
     Ok(())
@@ -148,6 +204,8 @@ pub fn serve_docs(options: DocsOptions) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     #[test]
     fn test_docs_options_builder_and_routes() {
@@ -176,5 +234,55 @@ mod tests {
         assert!(!png_bytes.is_empty());
 
         assert!(handle_request("GET /nonexistent.txt HTTP/1.1").is_none());
+        assert!(handle_request("POST /docs HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn test_docs_tcp_large_headers_head_and_404_without_rst() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let srv = std::thread::spawn(move || {
+            for stream in listener.incoming().take(3).flatten() {
+                serve_connection(stream);
+            }
+        });
+
+        // 1. GET /docs with >24KB headers (would previously trigger TCP RST / ConnectionResetError)
+        let mut s1 = TcpStream::connect(addr).unwrap();
+        let big_hdr = "Z".repeat(24_000);
+        write!(
+            s1,
+            "GET /docs HTTP/1.1\r\nHost: {}\r\nX-Big: {}\r\nConnection: close\r\n\r\n",
+            addr, big_hdr
+        )
+        .unwrap();
+        s1.flush().unwrap();
+        let mut resp1 = Vec::new();
+        s1.read_to_end(&mut resp1).unwrap();
+        let resp1_str = String::from_utf8_lossy(&resp1);
+        assert!(resp1_str.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(resp1_str.contains(&format!("Content-Length: {}\r\n", DOCS_HTML.len())));
+        assert!(resp1.ends_with(DOCS_HTML.as_bytes()));
+
+        // 2. HEAD / returns headers with Content-Length and zero body
+        let mut s2 = TcpStream::connect(addr).unwrap();
+        write!(s2, "HEAD / HTTP/1.1\r\nHost: {}\r\n\r\n", addr).unwrap();
+        s2.flush().unwrap();
+        let mut resp2 = Vec::new();
+        s2.read_to_end(&mut resp2).unwrap();
+        let resp2_str = String::from_utf8_lossy(&resp2);
+        assert!(resp2_str.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(resp2_str.ends_with("\r\n\r\n"));
+
+        // 3. POST / returns 405 Method Not Allowed
+        let mut s3 = TcpStream::connect(addr).unwrap();
+        write!(s3, "POST /docs HTTP/1.1\r\nHost: {}\r\n\r\n", addr).unwrap();
+        s3.flush().unwrap();
+        let mut resp3 = String::new();
+        s3.read_to_string(&mut resp3).unwrap();
+        assert!(resp3.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+
+        srv.join().unwrap();
     }
 }

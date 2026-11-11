@@ -36,8 +36,8 @@ class TestLightMemSDK(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_package_exports(self):
-        self.assertEqual(lmem.__version__, "0.7.4")
-        self.assertEqual(lightmem.__version__, "0.7.4")
+        self.assertEqual(lmem.__version__, "0.7.5")
+        self.assertEqual(lightmem.__version__, "0.7.5")
         self.assertTrue(callable(lmem.LightMem))
         self.assertTrue(callable(lightmem.LightMem))
         self.assertTrue(Path(self.client.binary_path).is_file())

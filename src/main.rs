@@ -933,6 +933,14 @@ fn open_file_in_default_app(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn open_files_in_default_app(paths: &[PathBuf]) {
+    for p in paths {
+        if let Err(err) = open_file_in_default_app(p) {
+            eprintln!("Warning: {}", err);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     #[cfg(windows)]
     {
@@ -1168,9 +1176,7 @@ fn main() -> Result<()> {
                     let all_paths =
                         lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
                     if open {
-                        for p in &all_paths {
-                            let _ = open_file_in_default_app(p);
-                        }
+                        open_files_in_default_app(&all_paths);
                     }
                     if json {
                         println!("{}", serde_json::to_string_pretty(&all_paths)?);
@@ -1182,9 +1188,7 @@ fn main() -> Result<()> {
                 } else if let Some(ref target) = save_to {
                     let all_saved = lm.save_memories_attachments_to(&ids, target)?;
                     if open {
-                        for p in &all_saved {
-                            let _ = open_file_in_default_app(p);
-                        }
+                        open_files_in_default_app(&all_saved);
                     }
                     if json {
                         let mut offset = 0usize;
@@ -1223,9 +1227,7 @@ fn main() -> Result<()> {
                 } else {
                     if open {
                         let all_paths = lm.materialize_memories_attachments(&ids, None)?;
-                        for p in &all_paths {
-                            let _ = open_file_in_default_app(p);
-                        }
+                        open_files_in_default_app(&all_paths);
                     }
                     CliView::render_recall(&display_query, &results, lm.db_path(), json)?;
                 }
@@ -1372,9 +1374,7 @@ fn main() -> Result<()> {
                 }
                 let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
                 if open {
-                    for p in &all_paths {
-                        let _ = open_file_in_default_app(p);
-                    }
+                    open_files_in_default_app(&all_paths);
                 }
                 if all_paths.is_empty() {
                     if json {
@@ -1402,17 +1402,13 @@ fn main() -> Result<()> {
                     };
                     if open {
                         if save_to.is_some() {
-                            for p in &saved_paths {
-                                let _ = open_file_in_default_app(p);
-                            }
+                            open_files_in_default_app(&saved_paths);
                         } else {
                             let all_paths = lm.materialize_memories_attachments(
                                 std::slice::from_ref(&record.id),
                                 None,
                             )?;
-                            for p in &all_paths {
-                                let _ = open_file_in_default_app(p);
-                            }
+                            open_files_in_default_app(&all_paths);
                         }
                     }
                     if json && save_to.is_some() {
@@ -1463,14 +1459,10 @@ fn main() -> Result<()> {
                 };
                 if open {
                     if save_to.is_some() {
-                        for p in &all_saved {
-                            let _ = open_file_in_default_app(p);
-                        }
+                        open_files_in_default_app(&all_saved);
                     } else {
                         let all_paths = lm.materialize_memories_attachments(&ids, None)?;
-                        for p in &all_paths {
-                            let _ = open_file_in_default_app(p);
-                        }
+                        open_files_in_default_app(&all_paths);
                     }
                 }
                 let mut offset_idx = 0usize;

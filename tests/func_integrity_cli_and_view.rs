@@ -863,3 +863,434 @@ fn test_open_image_status_and_docs_cli_surface() {
     );
     assert!(!insp_open.status.success());
 }
+
+fn minimal_1x1_png(rgb: [u8; 3]) -> Vec<u8> {
+    // Valid uncompressed zlib-stored 1x1 RGB PNG (IHDR + IDAT + IEND)
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    fn push_chunk(dst: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
+        dst.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        dst.extend_from_slice(tag);
+        dst.extend_from_slice(data);
+        // CRC32 (IEEE 802.3)
+        let mut crc: u32 = 0xffff_ffff;
+        for &b in tag.iter().chain(data.iter()) {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+            }
+        }
+        dst.extend_from_slice(&(!crc).to_be_bytes());
+    }
+    // 1x1, 8-bit RGB (color type 2)
+    push_chunk(&mut out, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+    // Raw scanline: filter 0 + R G B
+    let raw = [0u8, rgb[0], rgb[1], rgb[2]];
+    // Zlib stream: CMF=0x78, FLG=0x01 (no dict, FCHECK ok), BFINAL=1 non-compressed block len=4 nlen=!4
+    let mut z = vec![0x78, 0x01, 0x01, 0x04, 0x00, 0xfb, 0xff];
+    z.extend_from_slice(&raw);
+    // Adler32 of raw
+    let mut s1: u32 = 1;
+    let mut s2: u32 = 0;
+    for &b in &raw {
+        s1 = (s1 + b as u32) % 65521;
+        s2 = (s2 + s1) % 65521;
+    }
+    z.extend_from_slice(&((s2 << 16) | s1).to_be_bytes());
+    push_chunk(&mut out, b"IDAT", &z);
+    push_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_cli_open_flag_dedup_and_extension_tags_with_os_shim() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let cfg_dir = dir.path().join("cfg");
+    let db_path = dir.path().join("open_e2e.db");
+    let shim_bin = dir.path().join("shim_bin");
+    std::fs::create_dir_all(&shim_bin).unwrap();
+    let open_log = dir.path().join("open_calls.log");
+
+    for cmd_name in ["open", "xdg-open"] {
+        let shim = shim_bin.join(cmd_name);
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> '{}'; done\n",
+                open_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let orig_path = std::env::var("PATH").unwrap_or_default();
+    let shim_path_env = format!("{}:{}", shim_bin.display(), orig_path);
+
+    let run_with_shim = |args: &[&str]| {
+        Command::new(lmem_bin())
+            .env("LIGHTMEM_CONFIG_DIR", &cfg_dir)
+            .env("LIGHTMEM_DB", &db_path)
+            .env("PATH", &shim_path_env)
+            .arg("--db")
+            .arg(&db_path)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    assert!(
+        run_with_shim(&["config", "--backend", "hash", "--reranker", "top1"])
+            .status
+            .success()
+    );
+
+    let png_bytes = minimal_1x1_png([240, 20, 20]);
+    let img1 = dir.path().join("crimson.png");
+    let img2 = dir.path().join("crimson_dup.png");
+    std::fs::write(&img1, &png_bytes).unwrap();
+    std::fs::write(&img2, &png_bytes).unwrap();
+
+    let r1 = run_with_shim(&[
+        "remember",
+        "Crimson square asset",
+        "-f",
+        img1.to_str().unwrap(),
+        "--no-entities",
+        "--json",
+    ]);
+    assert!(r1.status.success());
+    let j1: serde_json::Value = serde_json::from_slice(&r1.stdout).unwrap();
+    let mem_id = j1["id"].as_str().unwrap().to_string();
+    let tags: Vec<String> = j1["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t.as_str().map(String::from))
+        .collect();
+    assert!(tags.contains(&"png".to_string()), "tags: {:?}", tags);
+    assert!(tags.contains(&"image".to_string()), "tags: {:?}", tags);
+
+    // Duplicate upload emits dedup notice
+    let r2 = run_with_shim(&[
+        "remember",
+        "Duplicate crimson upload",
+        "-f",
+        img2.to_str().unwrap(),
+        "--no-entities",
+    ]);
+    assert!(r2.status.success());
+    let dup_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&r2.stdout),
+        String::from_utf8_lossy(&r2.stderr)
+    );
+    assert!(
+        dup_out.to_lowercase().contains("already exists"),
+        "Expected duplicate notice, got: {}",
+        dup_out
+    );
+
+    // Check --open across recall, recall --path, recall --save-to, inspect, inspect --path, inspect --save-to
+    let save_recall = dir.path().join("save_recall");
+    let save_inspect = dir.path().join("save_inspect");
+    let cases: &[(&[&str], usize)] = &[
+        (&["recall", "Crimson square", "-l", "1", "--open"], 1),
+        (
+            &["recall", "Crimson square", "-l", "1", "--open", "--path"],
+            1,
+        ),
+        (
+            &[
+                "recall",
+                "Crimson square",
+                "-l",
+                "1",
+                "--open",
+                "--save-to",
+                save_recall.to_str().unwrap(),
+            ],
+            1,
+        ),
+        (&["inspect", &mem_id, "--open"], 1),
+        (&["inspect", &mem_id, "--open", "--path"], 1),
+        (
+            &[
+                "inspect",
+                &mem_id,
+                "--open",
+                "--save-to",
+                save_inspect.to_str().unwrap(),
+            ],
+            1,
+        ),
+    ];
+
+    for (args, expected_count) in cases {
+        let _ = std::fs::remove_file(&open_log);
+        let out = run_with_shim(args);
+        assert!(
+            out.status.success(),
+            "args {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // `.spawn()` executes child opener asynchronously; wait briefly for shim write.
+        let mut logged = String::new();
+        for _ in 0..40 {
+            if let Ok(s) = std::fs::read_to_string(&open_log) {
+                let count = s.lines().filter(|l| !l.trim().is_empty()).count();
+                if count >= *expected_count {
+                    logged = s;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let lines: Vec<&str> = logged.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            *expected_count,
+            "args {:?} logged: {:?}",
+            args,
+            lines
+        );
+        for opened_path in lines {
+            assert_eq!(std::fs::read(opened_path).unwrap(), png_bytes);
+        }
+    }
+}
+
+#[test]
+fn e2e_cli_multimodal_recall_image_and_live_docs_server() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    let dir = tempdir().unwrap();
+    let cfg_dir = dir.path().join("cfg");
+    let db_path = dir.path().join("mm_e2e.db");
+
+    let red_png = dir.path().join("red.png");
+    let blue_png = dir.path().join("blue.png");
+    std::fs::write(&red_png, minimal_1x1_png([255, 0, 0])).unwrap();
+    std::fs::write(&blue_png, minimal_1x1_png([0, 0, 255])).unwrap();
+
+    // Precompute red PNG prefix in base64 using known file bytes
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let red_tag_b64 = {
+        // Minimal PNG shares the 1x1 IHDR, differing at the red pixel bytes around base64 offset 40+
+        // Just pass distinct labels or decode full payload dynamically below!
+        "red_marker"
+    };
+    let _ = red_tag_b64;
+
+    let seen_img_queries = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let seen_clone = Arc::clone(&seen_img_queries);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_srv = Arc::clone(&stop);
+
+    // Inspect exact base64 strings directly from red.png / blue.png
+    let red_bytes = std::fs::read(&red_png).unwrap();
+    let blue_bytes = std::fs::read(&blue_png).unwrap();
+
+    let srv = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        while !stop_srv.load(std::sync::atomic::Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut content_len = 0usize;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0
+                            || line == "\r\n"
+                            || line == "\n"
+                        {
+                            break;
+                        }
+                        if let Some((k, v)) = line.split_once(':') {
+                            if k.eq_ignore_ascii_case("content-length") {
+                                content_len = v.trim().parse().unwrap_or(0);
+                            }
+                        }
+                    }
+                    let mut body_buf = vec![0u8; content_len];
+                    let _ = reader.read_exact(&mut body_buf);
+                    let req_json: serde_json::Value =
+                        serde_json::from_slice(&body_buf).unwrap_or_default();
+                    let vec_for_item = |item: &serde_json::Value| -> Vec<f32> {
+                        if let Some(img_b64) = item.get("image").and_then(|v| v.as_str()) {
+                            // Compare base64 equality against known red vs blue byte sequences
+                            let is_red = img_b64 == encode_b64_for_test(&red_bytes);
+                            let is_blue = img_b64 == encode_b64_for_test(&blue_bytes);
+                            if is_red {
+                                return vec![1.0, 0.0, 0.0, 0.0];
+                            } else if is_blue {
+                                return vec![0.0, 1.0, 0.0, 0.0];
+                            }
+                        }
+                        vec![0.0, 0.0, 1.0, 0.0]
+                    };
+                    let embs: Vec<Vec<f32>> = match req_json.get("input") {
+                        Some(serde_json::Value::Array(arr)) => {
+                            arr.iter().map(vec_for_item).collect()
+                        }
+                        Some(obj @ serde_json::Value::Object(_)) => {
+                            seen_clone.lock().unwrap().push(obj.clone());
+                            vec![vec_for_item(obj)]
+                        }
+                        _ => vec![vec![0.0, 0.0, 1.0, 0.0]],
+                    };
+                    let resp_body = serde_json::json!({ "embeddings": embs }).to_string();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    assert!(run_lmem(
+        &cfg_dir,
+        &db_path,
+        &[
+            "config",
+            "--backend",
+            "ollama",
+            "--url",
+            &format!("http://127.0.0.1:{}", port),
+            "--model",
+            "embeddinggemma-2",
+            "--reranker",
+            "top1",
+        ],
+    )
+    .status
+    .success());
+
+    let rem_red = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &[
+            "remember",
+            "Sample alpha",
+            "-f",
+            red_png.to_str().unwrap(),
+            "--no-entities",
+            "--json",
+        ],
+    );
+    assert!(rem_red.status.success());
+    let red_id = serde_json::from_slice::<serde_json::Value>(&rem_red.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let rem_blue = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &[
+            "remember",
+            "Sample beta",
+            "-f",
+            blue_png.to_str().unwrap(),
+            "--no-entities",
+            "--json",
+        ],
+    );
+    assert!(rem_blue.status.success());
+
+    let rec = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &["recall", "--image", red_png.to_str().unwrap(), "--json"],
+    );
+    assert!(
+        rec.status.success(),
+        "recall --image failed: {}",
+        String::from_utf8_lossy(&rec.stderr)
+    );
+    let hits: Vec<serde_json::Value> = serde_json::from_slice(&rec.stdout).unwrap();
+    assert_eq!(hits[0]["memory"]["id"].as_str().unwrap(), red_id);
+    assert!(!seen_img_queries.lock().unwrap().is_empty());
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    srv.join().unwrap();
+
+    // Live `lmem docs` child process HTTP E2E
+    let docs_probe = TcpListener::bind("127.0.0.1:0").unwrap();
+    let docs_port = docs_probe.local_addr().unwrap().port();
+    drop(docs_probe);
+
+    let mut docs_child = Command::new(lmem_bin())
+        .env("LIGHTMEM_CONFIG_DIR", &cfg_dir)
+        .args(["docs", "--port", &docs_port.to_string(), "--no-browser"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let addr = format!("127.0.0.1:{}", docs_port);
+    let mut connected = None;
+    for _ in 0..40 {
+        if let Ok(stream) = std::net::TcpStream::connect(&addr) {
+            connected = Some(stream);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let mut s = connected.expect("lmem docs server did not bind in time");
+    let big_hdr = "X".repeat(24_000);
+    write!(
+        s,
+        "GET /docs HTTP/1.1\r\nHost: {}\r\nX-Big: {}\r\nConnection: close\r\n\r\n",
+        addr, big_hdr
+    )
+    .unwrap();
+    s.flush().unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(resp.contains("LightMem"));
+
+    let _ = docs_child.kill();
+    let _ = docs_child.wait();
+}
+
+fn encode_b64_for_test(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}

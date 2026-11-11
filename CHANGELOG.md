@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5
+
+- Fix TCP connection resets (`ECONNRESET`) in `lmem docs` / `doc` / `web` under browsers and large HTTP headers by draining incoming request headers cleanly before socket write shutdown, handling `HEAD` and `405`, and serving requests concurrently.
+- Surface `stderr` warnings instead of silently ignoring errors when `--open` fails to invoke the OS default application (`open` / `xdg-open` / `cmd /C start`).
+- Add permanent CLI E2E regression tests covering `docs` HTTP header draining, `--open` OS launcher integration, extension auto-tags, SHA-256 duplicate warnings, and multimodal `recall --image` over `/api/embed`.
+
 ## 0.7.4
 
 - Add `--open` flag on `lmem recall` and `lmem inspect` to materialize and open verified attachments directly in the system default application (`open` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows).
