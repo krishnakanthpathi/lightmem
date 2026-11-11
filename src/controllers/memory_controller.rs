@@ -1465,20 +1465,47 @@ impl LightMem {
     ) -> Result<AnswerResult> {
         let candidates = self.recall_with_date(question, category, as_of, on_date, limit, None)?;
 
-        // Exact entity slot shortcut: if any recalled memory has an entity matching the question keyword
-        let q_lower = question.to_lowercase();
-        for cand in &candidates {
-            for ent in &cand.memory.entities {
-                if !ent.name.is_empty()
-                    && (q_lower.contains(&ent.name)
-                        || q_lower.contains(&ent.name.replace('_', " ")))
-                {
-                    return Ok(AnswerResult {
-                        answer: ent.val.clone(),
-                        selected_memory: Some(cand.memory.clone()),
-                        confidence: cand.memory.confidence.max(0.95),
-                        reranker_used: "entity_index".to_string(),
-                    });
+        // Exact entity slot shortcut (when caller did not explicitly request a specific reranker
+        // and the query is not a multi-record synthesis/summary prompt).
+        if reranker_override.is_none() && !crate::services::reranker::is_synthesis_query(question) {
+            let tokenize = |s: &str| -> Vec<String> {
+                s.to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            };
+            let q_words = tokenize(question);
+            for cand in &candidates {
+                for ent in &cand.memory.entities {
+                    let name_words = tokenize(&ent.name);
+                    let val_words = tokenize(&ent.val);
+                    if name_words.is_empty() || val_words.is_empty() {
+                        continue;
+                    }
+                    // Skip tautological self-entities (e.g. name="lightmem", val="LightMem")
+                    if name_words == val_words {
+                        continue;
+                    }
+                    // Skip if the entity value is already explicitly present in the question
+                    let val_in_question = q_words
+                        .windows(val_words.len())
+                        .any(|w| w == val_words.as_slice());
+                    if val_in_question {
+                        continue;
+                    }
+                    // Require whole-token/phrase match of the entity slot name in the question
+                    let name_in_question = q_words
+                        .windows(name_words.len())
+                        .any(|w| w == name_words.as_slice());
+                    if name_in_question {
+                        return Ok(AnswerResult {
+                            answer: ent.val.clone(),
+                            selected_memory: Some(cand.memory.clone()),
+                            confidence: cand.memory.confidence.max(0.95),
+                            reranker_used: "entity_index".to_string(),
+                        });
+                    }
                 }
             }
         }

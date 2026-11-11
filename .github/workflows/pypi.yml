@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             binary: target/aarch64-apple-darwin/release/lmem
             platform_tag: macosx_11_0_arm64

@@ -72,24 +72,41 @@ impl ObserverService {
         let is_offline = std::env::var_os("LIGHTMEM_QA_DISABLE").is_some()
             || std::env::var_os("LIGHTMEM_OFFLINE").is_some();
 
-        let wants_local = if let Some(spec) = reranker_spec {
+        let is_llm_spec = |spec: &str| {
+            let l = spec.trim().to_lowercase();
+            l == "ollama"
+                || l == "openai"
+                || l == "llm"
+                || l.starts_with("ollama:")
+                || l.starts_with("openai:")
+                || l.starts_with("llm:")
+        };
+
+        let is_local_spec = |spec: &str| {
             let l = spec.trim().to_lowercase();
             matches!(
                 l.as_str(),
                 "local"
                     | "none"
                     | "offline"
+                    | "minilm"
                     | "minilm-squad2"
+                    | "tinyroberta"
                     | "tinyroberta-squad2"
                     | "top1"
                     | "onnx"
             )
-        } else {
-            false
         };
 
-        // 1. LLM Extraction by Default:
-        // Try LLM extraction first unless offline mode or explicit local mode is set
+        let wants_local = if let Some(spec) = reranker_spec {
+            is_local_spec(spec)
+        } else if let Some(cfg) = config {
+            !is_llm_spec(&cfg.reranker)
+        } else {
+            true
+        };
+
+        // 1. LLM Extraction when explicitly requested or when an LLM reranker/preset is active
         if !is_offline && !wants_local {
             let effective_llm_spec = reranker_spec.unwrap_or_else(|| {
                 if let Some(cfg) = config {
@@ -750,8 +767,8 @@ impl ObserverService {
 
         let resolved_model = ollama.resolve_model();
 
-        let system_prompt = "You are an expert AI agent memory extractor. Extract key atomic long-term memories (facts, preferences, decisions, rules, goals, observations) from the given conversation or notes.\n\
-            Ignore conversational filler, greetings, and trivial chit-chat.\n\
+        let system_prompt = "You are an expert AI agent memory extractor. Extract EVERY distinct atomic long-term memory (facts, preferences, decisions, instructions/rules, goals, observations) mentioned in the conversation or notes as separate items in a JSON array.\n\
+            Do not omit preferences, decisions, ports/numbers, or instructions when multiple appear; ignore only pure greetings and trivial chit-chat.\n\
             Return ONLY a valid JSON array of objects with schema:\n\
             [\n\
               {\n\
@@ -771,18 +788,35 @@ impl ObserverService {
                 { "role": "user", "content": text }
             ],
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 1024,
+            "reasoning_effort": "none"
         });
 
-        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(12));
-        if let Some(ref key) = config.effective_ollama_api_key() {
-            req = req.set(
-                "Authorization",
-                &crate::models::config::format_auth_header(key),
-            );
-        }
+        let send_chat = |body: serde_json::Value| {
+            let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(12));
+            if let Some(ref key) = config.effective_ollama_api_key() {
+                req = req.set(
+                    "Authorization",
+                    &crate::models::config::format_auth_header(key),
+                );
+            }
+            req.send_json(body).map_err(Box::new)
+        };
 
-        let resp_result = req.send_json(payload);
+        let resp_result = match send_chat(payload) {
+            Err(err) if matches!(*err, ureq::Error::Status(400, _)) => {
+                send_chat(serde_json::json!({
+                    "model": resolved_model,
+                    "messages": [
+                        { "role": "system", "content": system_prompt },
+                        { "role": "user", "content": text }
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 1024
+                }))
+            }
+            other => other,
+        };
         let raw_content = match resp_result {
             Ok(resp) => {
                 let json_resp: serde_json::Value = resp.into_json()?;
@@ -800,22 +834,37 @@ impl ObserverService {
                 // Fallback to Ollama native /api/generate endpoint
                 let gen_url = format!("{}/api/generate", config.effective_ollama_url());
                 let gen_prompt = format!("{}\n\nText:\n{}", system_prompt, text);
-                let gen_payload = serde_json::json!({
-                    "model": resolved_model,
-                    "prompt": gen_prompt,
-                    "stream": false,
-                    "format": "json"
-                });
-                let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(12));
-                if let Some(ref key) = config.effective_ollama_api_key() {
-                    fallback_req = fallback_req.set(
-                        "Authorization",
-                        &crate::models::config::format_auth_header(key),
-                    );
+                let send_gen = |with_think: bool| {
+                    let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(12));
+                    if let Some(ref key) = config.effective_ollama_api_key() {
+                        fallback_req = fallback_req.set(
+                            "Authorization",
+                            &crate::models::config::format_auth_header(key),
+                        );
+                    }
+                    let gen_payload = if with_think {
+                        serde_json::json!({
+                            "model": resolved_model,
+                            "prompt": &gen_prompt,
+                            "stream": false,
+                            "format": "json",
+                            "think": false
+                        })
+                    } else {
+                        serde_json::json!({
+                            "model": resolved_model,
+                            "prompt": &gen_prompt,
+                            "stream": false,
+                            "format": "json"
+                        })
+                    };
+                    fallback_req.send_json(gen_payload).map_err(Box::new)
+                };
+                let fallback_resp = match send_gen(true) {
+                    Err(err) if matches!(*err, ureq::Error::Status(400, _)) => send_gen(false),
+                    other => other,
                 }
-                let fallback_resp = fallback_req
-                    .send_json(gen_payload)
-                    .context("Ollama extraction request failed")?;
+                .context("Ollama extraction request failed")?;
                 let json_resp: serde_json::Value = fallback_resp.into_json()?;
                 json_resp
                     .get("response")
@@ -828,30 +877,87 @@ impl ObserverService {
         Self::parse_llm_json_response(&raw_content)
     }
 
-    /// Parse LLM JSON array response into ObservedCandidates.
-    pub fn parse_llm_json_response(raw: &str) -> Result<Vec<ObservedCandidate>> {
+    fn strip_think_tags(raw: &str) -> &str {
         let trimmed = raw.trim();
-        // Handle markdown code blocks
-        let clean_json = if let Some(start) = trimmed.find("```json") {
-            let after = &trimmed[start + 7..];
-            if let Some(end) = after.find("```") {
-                &after[..end]
+        let after_think = if let Some(pos) = trimmed.rfind("</think>") {
+            let tail = trimmed[pos + "</think>".len()..].trim();
+            if !tail.is_empty() {
+                tail
             } else {
-                after
-            }
-        } else if let Some(start) = trimmed.find("```") {
-            let after = &trimmed[start + 3..];
-            if let Some(end) = after.find("```") {
-                &after[..end]
-            } else {
-                after
+                trimmed[..pos].trim()
             }
         } else {
             trimmed
         };
+        if let Some(start) = after_think.find("```json") {
+            let after = &after_think[start + 7..];
+            if let Some(end) = after.find("```") {
+                return after[..end].trim();
+            }
+            return after.trim();
+        }
+        if let Some(start) = after_think.find("```") {
+            let after = &after_think[start + 3..];
+            if let Some(end) = after.find("```") {
+                return after[..end].trim();
+            }
+            return after.trim();
+        }
+        after_think
+    }
+
+    fn extract_json_array_slice(raw: &str) -> Option<&str> {
+        let cleaned = Self::strip_think_tags(raw);
+        let mut chars = cleaned.char_indices();
+        while let Some((idx, ch)) = chars.next() {
+            if ch == '[' {
+                let start = idx;
+                let mut depth = 1usize;
+                let mut in_string = false;
+                let mut escaped = false;
+                let mut end_opt = None;
+                for (inner_idx, inner_ch) in chars.by_ref() {
+                    if in_string {
+                        if escaped {
+                            escaped = false;
+                        } else if inner_ch == '\\' {
+                            escaped = true;
+                        } else if inner_ch == '"' {
+                            in_string = false;
+                        }
+                        continue;
+                    }
+                    match inner_ch {
+                        '"' => in_string = true,
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end_opt = Some(inner_idx);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(end_idx) = end_opt {
+                    let candidate = &cleaned[start..=end_idx];
+                    if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse LLM JSON array response into ObservedCandidates.
+    pub fn parse_llm_json_response(raw: &str) -> Result<Vec<ObservedCandidate>> {
+        let json_slice =
+            Self::extract_json_array_slice(raw).unwrap_or_else(|| Self::strip_think_tags(raw));
 
         let parsed: serde_json::Value =
-            serde_json::from_str(clean_json.trim()).context("Failed parsing LLM output as JSON")?;
+            serde_json::from_str(json_slice).context("Failed parsing LLM output as JSON")?;
 
         let arr = parsed
             .as_array()
@@ -1028,18 +1134,36 @@ impl ObserverService {
                 { "role": "user", "content": user_content }
             ],
             "temperature": 0.1,
-            "max_tokens": 512
+            "max_tokens": 512,
+            "reasoning_effort": "none"
         });
 
-        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
-        if let Some(ref key) = config.effective_ollama_api_key() {
-            req = req.set(
-                "Authorization",
-                &crate::models::config::format_auth_header(key),
-            );
-        }
+        let send_chat = |body: serde_json::Value| {
+            let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
+            if let Some(ref key) = config.effective_ollama_api_key() {
+                req = req.set(
+                    "Authorization",
+                    &crate::models::config::format_auth_header(key),
+                );
+            }
+            req.send_json(body).map_err(Box::new)
+        };
 
-        if let Ok(resp) = req.send_json(chat_payload) {
+        let chat_resp = match send_chat(chat_payload) {
+            Err(err) if matches!(*err, ureq::Error::Status(400, _)) => {
+                send_chat(serde_json::json!({
+                    "model": resolved_model,
+                    "messages": [
+                        { "role": "user", "content": user_content }
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 512
+                }))
+            }
+            other => other,
+        };
+
+        if let Ok(resp) = chat_resp {
             if let Ok(json_resp) = resp.into_json::<serde_json::Value>() {
                 if let Some(text) = json_resp
                     .get("choices")
@@ -1049,9 +1173,9 @@ impl ObserverService {
                     .and_then(|m| m.get("content"))
                     .and_then(|c| c.as_str())
                 {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        return Ok(trimmed.to_string());
+                    let cleaned = Self::strip_think_tags(text);
+                    if !cleaned.is_empty() {
+                        return Ok(cleaned.to_string());
                     }
                 }
             }
@@ -1064,14 +1188,16 @@ impl ObserverService {
             serde_json::json!({
                 "model": resolved_model,
                 "prompt": format!("{}\n\nFile contents:\n{}", prompt, snippet),
-                "stream": false
+                "stream": false,
+                "think": false
             })
         } else {
             serde_json::json!({
                 "model": resolved_model,
                 "prompt": prompt,
                 "images": [b64],
-                "stream": false
+                "stream": false,
+                "think": false
             })
         };
 
@@ -1091,12 +1217,11 @@ impl ObserverService {
             )
         })?;
         let json_resp: serde_json::Value = fallback_resp.into_json()?;
-        let extracted = json_resp
+        let raw_extracted = json_resp
             .get("response")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
+            .unwrap_or("");
+        let extracted = Self::strip_think_tags(raw_extracted).to_string();
         anyhow::ensure!(
             !extracted.is_empty(),
             "LLM model '{}' returned an empty extraction response for '{}'",
@@ -1211,7 +1336,7 @@ impl ObserverService {
         );
         let resolved_model = ollama.resolve_model();
 
-        let system_prompt = "You are a precise entity and slot extraction engine. Extract all key factual attributes, identifiers, and entities from the provided text (such as pincode, postal_code, address, city, country, phone, email, full_name, user_id, organization, port, role, etc.).\n\
+        let system_prompt = "You are a precise entity and slot extraction engine. Extract all key factual attribute-value pairs and identifiers from the provided text (such as pincode, postal_code, address, city, country, phone, email, full_name, user_id, organization, port, role, etc.). Only emit pairs where val is a distinct factual value, not a mere repeat of name.\n\
             Return ONLY a valid JSON array of objects matching schema:\n\
             [\n\
               {\n\
@@ -1229,20 +1354,36 @@ impl ObserverService {
                 { "role": "user", "content": text }
             ],
             "temperature": 0.0,
-            "max_tokens": 1024
+            "max_tokens": 1024,
+            "reasoning_effort": "none"
         });
 
-        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(12));
-        if let Some(ref key) = config.effective_ollama_api_key() {
-            req = req.set(
-                "Authorization",
-                &crate::models::config::format_auth_header(key),
-            );
-        }
+        let send_chat = |body: serde_json::Value| {
+            let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(12));
+            if let Some(ref key) = config.effective_ollama_api_key() {
+                req = req.set(
+                    "Authorization",
+                    &crate::models::config::format_auth_header(key),
+                );
+            }
+            req.send_json(body).map_err(Box::new)
+        };
 
-        let resp = req
-            .send_json(payload)
-            .with_context(|| format!("Failed to connect to LLM at {}", chat_url))?;
+        let resp = match send_chat(payload) {
+            Err(err) if matches!(*err, ureq::Error::Status(400, _)) => {
+                send_chat(serde_json::json!({
+                    "model": resolved_model,
+                    "messages": [
+                        { "role": "system", "content": system_prompt },
+                        { "role": "user", "content": text }
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 1024
+                }))
+            }
+            other => other,
+        }
+        .with_context(|| format!("Failed to connect to LLM at {}", chat_url))?;
 
         let json_resp: serde_json::Value = resp
             .into_json()
@@ -1263,26 +1404,10 @@ impl ObserverService {
 
     /// Parse LLM JSON array response into EntityRecords.
     pub fn parse_entities_llm_json(raw: &str) -> Result<Vec<EntityRecord>> {
-        let trimmed = raw.trim();
-        let clean_json = if let Some(start) = trimmed.find("```json") {
-            let after = &trimmed[start + 7..];
-            if let Some(end) = after.find("```") {
-                &after[..end]
-            } else {
-                after
-            }
-        } else if let Some(start) = trimmed.find("```") {
-            let after = &trimmed[start + 3..];
-            if let Some(end) = after.find("```") {
-                &after[..end]
-            } else {
-                after
-            }
-        } else {
-            trimmed
-        };
+        let json_slice =
+            Self::extract_json_array_slice(raw).unwrap_or_else(|| Self::strip_think_tags(raw));
 
-        let parsed: serde_json::Value = serde_json::from_str(clean_json.trim())
+        let parsed: serde_json::Value = serde_json::from_str(json_slice)
             .context("Failed parsing LLM entities output as JSON")?;
 
         let arr = parsed
@@ -1319,7 +1444,11 @@ impl ObserverService {
                 .trim()
                 .to_string();
 
-            if !name.is_empty() && !val.is_empty() {
+            let name_spaced = name.replace('_', " ");
+            let val_lower = val.to_lowercase();
+            let is_tautology = val_lower == name || val_lower == name_spaced;
+
+            if !name.is_empty() && !val.is_empty() && !is_tautology {
                 let key = format!("{}\0{}", name, val);
                 if seen.insert(key) {
                     results.push(EntityRecord::new(name, val));
@@ -1412,5 +1541,23 @@ mod tests {
         assert_eq!(entities[1].val, "Hyderabad");
         assert_eq!(entities[2].name, "port");
         assert_eq!(entities[2].val, "8080");
+    }
+
+    #[test]
+    fn test_parse_llm_and_entities_with_think_tags() {
+        let entity_raw =
+            "<think>Checking [not json]...</think>\n```json\n[{\"name\":\"role\",\"val\":\"architect\"},{\"name\":\"lightmem\",\"val\":\"LightMem\"},{\"name\":\"sqlite_wal\",\"val\":\"SQLite WAL\"}]\n```\n</think>";
+        let entities = ObserverService::parse_entities_llm_json(entity_raw)
+            .expect("Should strip think tags before parsing entity JSON array");
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].name, "role");
+        assert_eq!(entities[0].val, "architect");
+
+        let obs_raw = r#"</think>
+[{"title":"DB Port","content":"Postgres uses port 5432","category":"fact","tags":["db"],"confidence":0.9}]"#;
+        let cands = ObserverService::parse_llm_json_response(obs_raw)
+            .expect("Should parse observation JSON array after </think>");
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].title, "DB Port");
     }
 }

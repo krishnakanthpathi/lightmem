@@ -124,8 +124,13 @@ impl HybridSearchEngine {
                     .iter()
                     .any(|t| t == q_tok || t.starts_with(&format!("{}-", q_tok)))
             {
-                // Exact token or tag prefix match (e.g. "kk" in "kk-linux")
-                total_boost += 0.06;
+                if q_tok.chars().any(|c| c.is_ascii_digit()) {
+                    // Digit-bearing ordinal/identifier tokens (e.g. "10th", "5432", "2026") are high-signal discriminators
+                    total_boost += 0.14;
+                } else {
+                    // Exact token or tag prefix match (e.g. "kk" in "kk-linux")
+                    total_boost += 0.06;
+                }
             }
         }
 
@@ -597,5 +602,58 @@ mod tests {
         assert_eq!(results[0].memory.id, mem1.id);
         assert!(results[0].score.is_finite());
         assert!(results[0].score >= 0.0 && results[0].score <= 1.0);
+    }
+
+    #[test]
+    fn digit_bearing_query_token_boosts_matching_record_over_unrelated_ties() {
+        let storage = Storage::open_in_memory().unwrap();
+        let embedder = ScriptedEmbedder {
+            query_vec: vec![1.0, 0.0],
+        };
+
+        // 8 unrelated distractors ranked higher by vector similarity than the target record
+        for i in 0..8 {
+            let m = MemoryRecord::new(
+                MemoryType::Fact,
+                format!("Unrelated item {}", i),
+                format!("Shopping checklist entry {}", i),
+                vec![],
+                0.9,
+                None,
+            );
+            let x = 0.99 - (i as f32) * 0.01;
+            let y = (1.0 - x * x).max(0.0).sqrt();
+            storage.insert_memory(&m, Some(&[x, y])).unwrap();
+        }
+
+        let target = MemoryRecord::new(
+            MemoryType::Fact,
+            "10th SSC Marks".to_string(),
+            "10th SSC Roll No. 2008102776".to_string(),
+            vec![],
+            0.9,
+            None,
+        );
+        storage
+            .insert_memory(&target, Some(&[0.5, 0.8660254]))
+            .unwrap();
+
+        // Compound/misspelled 2-token query where AND BM25 returns empty, so "10th" digit boost rescues target
+        let results = HybridSearchEngine::search(
+            &storage,
+            &embedder,
+            "what is my 10th hallticket",
+            None,
+            None,
+            None,
+            5,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            results.iter().any(|r| r.memory.id == target.id),
+            "Digit-bearing ordinal token '10th' should rescue matching record into top 5"
+        );
     }
 }

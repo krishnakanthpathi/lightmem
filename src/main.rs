@@ -2339,6 +2339,7 @@ fn main() -> Result<()> {
                         "tinyroberta-squad2",
                         "onnx",
                         "ollama",
+                        "ollama:bonsai-2:2b",
                         "ollama:gemma4:31b-cloud",
                         "ollama:qwen2.5:3b",
                         "ollama:qwen2.5:1.5b",
@@ -2352,6 +2353,7 @@ fn main() -> Result<()> {
                     a.value_parser(PossibleValuesParser::new([
                         "onnx",
                         "ollama",
+                        "ollama:bonsai-2:2b",
                         "top1",
                         "minilm-squad2",
                         "tinyroberta-squad2",

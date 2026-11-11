@@ -600,17 +600,71 @@ impl OllamaReranker {
             }
         }
 
-        let preferred = [
+        let is_cloud_endpoint = self.ollama_url.to_lowercase().contains("ollama.com");
+        let preferred_local = [
+            "bonsai-2:2b",
+            "bonsai-2:latest",
             "qwen2.5:3b",
             "qwen2.5:1.5b",
             "llama3.2:3b",
             "llama3.2:1b",
-            "gemma4:31b-cloud",
             "gemma4:31b",
             "gpt-4o-mini",
             "qwen2.5:7b",
             "llama3.1:8b",
         ];
+        let preferred_cloud = [
+            "gemma4:31b-cloud",
+            "gemma4:31b",
+            "gpt-4o-mini",
+            "qwen2.5:3b",
+            "qwen2.5:1.5b",
+            "llama3.2:3b",
+            "llama3.2:1b",
+            "bonsai-2:2b",
+            "bonsai-2:latest",
+        ];
+        let preferred: &[&str] = if is_cloud_endpoint {
+            &preferred_cloud
+        } else {
+            &preferred_local
+        };
+
+        let is_non_chat_model = |name: &str| {
+            let l = name.to_lowercase();
+            l.contains("embed")
+                || l.contains("bge")
+                || l.contains("minilm")
+                || l.contains("vl")
+                || l.contains("ocr")
+        };
+        let is_cloud_tag = |name: &str| {
+            let l = name.to_lowercase();
+            l.contains("-cloud") || l.ends_with(":cloud")
+        };
+
+        let select_model = |names: &[String]| -> Option<String> {
+            for p in preferred {
+                if let Some(found) = names.iter().find(|n| n.eq_ignore_ascii_case(p)) {
+                    return Some(found.clone());
+                }
+            }
+            if !is_cloud_endpoint {
+                if let Some(found) = names
+                    .iter()
+                    .find(|n| !is_non_chat_model(n) && !is_cloud_tag(n))
+                {
+                    return Some(found.clone());
+                }
+                if let Some(found) = names
+                    .iter()
+                    .find(|n| n.eq_ignore_ascii_case("gemma4:31b-cloud"))
+                {
+                    return Some(found.clone());
+                }
+            }
+            names.iter().find(|n| !is_non_chat_model(n)).cloned()
+        };
 
         // 1. Try standard OpenAI-compatible `/v1/models` endpoint
         let v1_models_url = format!("{}/v1/models", self.ollama_url);
@@ -629,21 +683,8 @@ impl OllamaReranker {
                         .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(String::from))
                         .collect();
 
-                    for p in preferred {
-                        if names.iter().any(|n| n.eq_ignore_ascii_case(p)) {
-                            return p.to_string();
-                        }
-                    }
-
-                    if let Some(found) = names.iter().find(|n| {
-                        let l = n.to_lowercase();
-                        !l.contains("embed")
-                            && !l.contains("bge")
-                            && !l.contains("minilm")
-                            && !l.contains("vl")
-                            && !l.contains("ocr")
-                    }) {
-                        return found.clone();
+                    if let Some(chosen) = select_model(&names) {
+                        return chosen;
                     }
                 }
             }
@@ -666,28 +707,155 @@ impl OllamaReranker {
                         .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
                         .collect();
 
-                    for p in preferred {
-                        if names.iter().any(|n| n.eq_ignore_ascii_case(p)) {
-                            return p.to_string();
-                        }
-                    }
-
-                    if let Some(found) = names.iter().find(|n| {
-                        let l = n.to_lowercase();
-                        !l.contains("embed")
-                            && !l.contains("bge")
-                            && !l.contains("minilm")
-                            && !l.contains("vl")
-                            && !l.contains("ocr")
-                            && !l.contains("-cloud")
-                    }) {
-                        return found.clone();
+                    if let Some(chosen) = select_model(&names) {
+                        return chosen;
                     }
                 }
             }
         }
 
-        "qwen2.5:1.5b".to_string()
+        if is_cloud_endpoint {
+            "gemma4:31b-cloud".to_string()
+        } else {
+            "bonsai-2:2b".to_string()
+        }
+    }
+
+    fn request_json_completion(
+        &self,
+        model_name: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let chat_url = format!("{}/v1/chat/completions", self.ollama_url);
+        let chat_payload = serde_json::json!({
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+            "reasoning_effort": "none",
+            "response_format": { "type": "json_object" }
+        });
+
+        let send_chat = |payload: serde_json::Value| {
+            let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
+            if let Some(ref key) = self.api_key {
+                req = req.set(
+                    "Authorization",
+                    &crate::models::config::format_auth_header(key),
+                );
+            }
+            req.send_json(payload).map_err(Box::new)
+        };
+
+        let chat_result = match send_chat(chat_payload) {
+            Err(err) if matches!(*err, ureq::Error::Status(400, _)) => {
+                // Retry without optional OpenAI/Ollama extension fields for strict OpenAI proxies.
+                let minimal_payload = serde_json::json!({
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt
+                        }
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": max_tokens
+                });
+                send_chat(minimal_payload)
+            }
+            other => other,
+        };
+
+        match chat_result {
+            Ok(resp) => {
+                let body: serde_json::Value = resp
+                    .into_json()
+                    .context("Failed to parse JSON response from /v1/chat/completions")?;
+                Ok(body
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c0| c0.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| body.get("response").and_then(|v| v.as_str()))
+                    .unwrap_or("{}")
+                    .to_string())
+            }
+            Err(err) if matches!(*err, ureq::Error::Status(404, _)) => {
+                // Fallback to legacy Ollama /api/generate
+                let gen_url = format!("{}/api/generate", self.ollama_url);
+                let gen_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+                let send_generate = |with_think_flag: bool| {
+                    let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(30));
+                    if let Some(ref key) = self.api_key {
+                        fallback_req = fallback_req.set(
+                            "Authorization",
+                            &crate::models::config::format_auth_header(key),
+                        );
+                    }
+                    let gen_payload = if with_think_flag {
+                        serde_json::json!({
+                            "model": model_name,
+                            "prompt": &gen_prompt,
+                            "stream": false,
+                            "format": "json",
+                            "think": false,
+                            "options": {
+                                "temperature": 0.0,
+                                "num_predict": max_tokens
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "model": model_name,
+                            "prompt": &gen_prompt,
+                            "stream": false,
+                            "format": "json",
+                            "options": {
+                                "temperature": 0.0,
+                                "num_predict": max_tokens
+                            }
+                        })
+                    };
+                    fallback_req.send_json(gen_payload).map_err(Box::new)
+                };
+
+                let resp = match send_generate(true) {
+                    Err(err) if matches!(*err, ureq::Error::Status(400, _)) => send_generate(false),
+                    other => other,
+                }
+                .map_err(|e| anyhow::anyhow!("Ollama QA request to {} failed: {}", gen_url, e))?;
+                let body: serde_json::Value = resp.into_json()?;
+                Ok(body
+                    .get("response")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string())
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Chat completions request to {} (model '{}') failed: {}",
+                    chat_url,
+                    model_name,
+                    e
+                );
+            }
+        }
     }
 }
 
@@ -703,109 +871,57 @@ impl Reranker for OllamaReranker {
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
             .filter(|c| c.bm25_rank.is_some() || c.score >= 0.35)
-            .take(5)
+            .take(10)
             .collect();
 
         if gated.is_empty() {
             return Ok(no_evidence(&provider_label));
         }
 
+        let synthesis = is_synthesis_query(question);
         let mut memories_block = String::new();
         for (idx, c) in gated.iter().enumerate() {
-            memories_block.push_str(&format!("[{}] {}\n", idx, c.memory.content));
+            if synthesis {
+                memories_block.push_str(&format!(
+                    "[{}] ({} · {}) {}\n",
+                    idx,
+                    c.memory.category.as_str(),
+                    c.memory.title,
+                    c.memory.content
+                ));
+            } else {
+                memories_block.push_str(&format!("[{}] {}\n", idx, c.memory.content));
+            }
         }
 
-        let system_prompt = "You are a strict extractive question-answering engine. Answer the question using ONLY the provided memory records.\n\
-             Rules:\n\
-             1. Extract the exact concise factual value (e.g. name, ID, account number, port, OS, URL, college name, score) from the single best matching memory.\n\
-             2. Do NOT include labels or full sentences — return ONLY the extracted value itself.\n\
-             3. If none of the memories contain the answer, or if a memory states the information is not recorded, return null for \"answer\" and null for \"memory_index\".\n\
-             4. Respond with valid JSON matching: {\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1}";
-
-        let user_prompt = format!("Memories:\n{}\nQuestion: {}", memories_block, question);
-
-        // 1. Try standard OpenAI-compatible `/v1/chat/completions` endpoint
-        let chat_url = format!("{}/v1/chat/completions", self.ollama_url);
-        let chat_payload = serde_json::json!({
-            "model": model_name,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ],
-            "temperature": 0.0,
-            "max_tokens": 128
-        });
-
-        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
-        if let Some(ref key) = self.api_key {
-            req = req.set(
-                "Authorization",
-                &crate::models::config::format_auth_header(key),
-            );
-        }
-
-        let raw_response = match req.send_json(chat_payload) {
-            Ok(resp) => {
-                let body: serde_json::Value = resp
-                    .into_json()
-                    .context("Failed to parse JSON response from /v1/chat/completions")?;
-                body.get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c0| c0.get("message"))
-                    .and_then(|m| m.get("content"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| body.get("response").and_then(|v| v.as_str()))
-                    .unwrap_or("{}")
-                    .to_string()
-            }
-            Err(ureq::Error::Status(404, _)) => {
-                // Fallback to legacy Ollama /api/generate
-                let gen_url = format!("{}/api/generate", self.ollama_url);
-                let gen_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
-                let gen_payload = serde_json::json!({
-                    "model": model_name,
-                    "prompt": gen_prompt,
-                    "stream": false,
-                    "format": "json",
-                    "options": {
-                        "temperature": 0.0,
-                        "num_predict": 128
-                    }
-                });
-                let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(30));
-                if let Some(ref key) = self.api_key {
-                    fallback_req = fallback_req.set(
-                        "Authorization",
-                        &crate::models::config::format_auth_header(key),
-                    );
-                }
-                let resp = fallback_req.send_json(gen_payload).map_err(|e| {
-                    anyhow::anyhow!("Ollama QA request to {} failed: {}", gen_url, e)
-                })?;
-                let body: serde_json::Value = resp.into_json()?;
-                body.get("response")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}")
-                    .to_string()
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "Chat completions request to {} (model '{}') failed: {}",
-                    chat_url,
-                    model_name,
-                    e
-                );
-            }
+        let (system_prompt, max_tokens) = if synthesis {
+            (
+                "You are a grounded memory synthesis engine. Summarize or list information using ONLY the provided memory records.\n\
+                 Rules:\n\
+                 1. Synthesize a concise, factual answer combining details from ALL relevant provided memories that match EVERY topic and qualifier in the question (for example, if asked about \"sprint goals\" and no memory mentions sprint, return null).\n\
+                 2. Cite zero ungrounded facts: include only facts explicitly present in the provided memories.\n\
+                 3. If the provided memories do NOT contain relevant records matching the question's specific topic/qualifiers, return null for \"answer\" and null for \"memory_index\".\n\
+                 4. Respond with valid JSON matching: {\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1} where \"memory_index\" is the 0-based index of the primary supporting memory.",
+                512,
+            )
+        } else {
+            (
+                "You are a strict extractive question-answering engine. Answer the question using ONLY the provided memory records.\n\
+                 Rules:\n\
+                 1. Extract the exact concise factual value (e.g. name, ID, account number, roll number, port, OS, URL, college name, score) from the single best matching memory.\n\
+                 2. Do NOT include labels or full sentences — return ONLY the extracted value itself.\n\
+                 3. If none of the memories contain the answer, or if a memory states the information is not recorded, return null for \"answer\" and null for \"memory_index\".\n\
+                 4. Respond with valid JSON matching: {\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1}",
+                256,
+            )
         };
 
+        let user_prompt = format!("Memories:\n{}\nQuestion: {}", memories_block, question);
+        let raw_response =
+            self.request_json_completion(&model_name, system_prompt, &user_prompt, max_tokens)?;
+
         if let Some((answer, mem_idx, confidence)) =
-            parse_and_ground_ollama_answer(&raw_response, &gated)
+            parse_and_ground_ollama_answer_with_mode(&raw_response, &gated, synthesis)
         {
             return Ok(AnswerResult {
                 answer,
@@ -838,78 +954,8 @@ impl Reranker for OllamaReranker {
             newer.content,
         );
 
-        let chat_url = format!("{}/v1/chat/completions", self.ollama_url);
-        let chat_payload = serde_json::json!({
-            "model": model_name,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt
-                }
-            ],
-            "temperature": 0.0,
-            "max_tokens": 256
-        });
-
-        let mut req = ureq::post(&chat_url).timeout(Duration::from_secs(30));
-        if let Some(ref key) = self.api_key {
-            req = req.set(
-                "Authorization",
-                &crate::models::config::format_auth_header(key),
-            );
-        }
-
-        let raw_opt = if let Ok(resp) = req.send_json(chat_payload) {
-            if let Ok(body) = resp.into_json::<serde_json::Value>() {
-                body.get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c0| c0.get("message"))
-                    .and_then(|m| m.get("content"))
-                    .and_then(|v| v.as_str())
-                    .or_else(|| body.get("response").and_then(|v| v.as_str()))
-                    .map(|s| s.to_string())
-            } else {
-                None
-            }
-        } else {
-            // Legacy /api/generate fallback
-            let gen_url = format!("{}/api/generate", self.ollama_url);
-            let gen_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
-            let gen_payload = serde_json::json!({
-                "model": model_name,
-                "prompt": gen_prompt,
-                "stream": false,
-                "format": "json",
-                "options": {
-                    "temperature": 0.0,
-                    "num_predict": 256
-                }
-            });
-            let mut fallback_req = ureq::post(&gen_url).timeout(Duration::from_secs(30));
-            if let Some(ref key) = self.api_key {
-                fallback_req = fallback_req.set(
-                    "Authorization",
-                    &crate::models::config::format_auth_header(key),
-                );
-            }
-            if let Ok(resp) = fallback_req.send_json(gen_payload) {
-                if let Ok(body) = resp.into_json::<serde_json::Value>() {
-                    body.get("response")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(raw) = raw_opt {
+        if let Ok(raw) = self.request_json_completion(&model_name, system_prompt, &user_prompt, 512)
+        {
             if let Some(json_slice) = extract_json_slice(&raw) {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_slice) {
                     if let Some(merged_c) = parsed
@@ -994,11 +1040,133 @@ pub fn default_merge_conflict(older: &MemoryRecord, newer: &MemoryRecord) -> Mem
     build_merged_record(older, newer, chosen_content, chosen_title)
 }
 
-fn extract_json_slice(raw: &str) -> Option<&str> {
+pub(crate) fn is_synthesis_query(question: &str) -> bool {
+    let lower = question.trim().to_lowercase();
+    let padded = format!(" {} ", lower);
+    if ["summarize", "summarise", "summary", "overview", "recap"]
+        .iter()
+        .any(|kw| {
+            lower
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|tok| tok == *kw)
+        })
+    {
+        return true;
+    }
+
+    [
+        " list all ",
+        " list my ",
+        " all my ",
+        " all of my ",
+        " what are my ",
+        " what are all ",
+        " tell me about my ",
+        " tell me about all ",
+        " describe my ",
+        " explain my ",
+    ]
+    .iter()
+    .any(|phrase| padded.contains(phrase))
+}
+
+fn find_thinking_ranges(raw: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel_open) = raw[cursor..].find("<think>") {
+        let open_start = cursor + rel_open;
+        let body_start = open_start + "<think>".len();
+        if let Some(rel_close) = raw[body_start..].find("</think>") {
+            let close_end = body_start + rel_close + "</think>".len();
+            ranges.push((open_start, close_end));
+            cursor = close_end;
+        } else {
+            break;
+        }
+    }
+    ranges
+}
+
+pub(crate) fn extract_json_slice(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
+    let think_ranges = find_thinking_ranges(trimmed);
+
+    let mut valid_objects: Vec<(usize, &str)> = Vec::new();
+    let mut chars = trimmed.char_indices().peekable();
+    while let Some((byte_idx, ch)) = chars.next() {
+        if let Some((_, skip_end)) = think_ranges
+            .iter()
+            .find(|(st, en)| byte_idx >= *st && byte_idx < *en)
+        {
+            while let Some(&(next_idx, _)) = chars.peek() {
+                if next_idx < *skip_end {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '{' {
+            let start = byte_idx;
+            let mut depth = 1usize;
+            let mut in_string = false;
+            let mut escaped = false;
+            let mut end_opt = None;
+            for (inner_idx, inner_ch) in chars.by_ref() {
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if inner_ch == '\\' {
+                        escaped = true;
+                    } else if inner_ch == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                match inner_ch {
+                    '"' => in_string = true,
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end_opt = Some(inner_idx);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(end_idx) = end_opt {
+                let candidate = &trimmed[start..=end_idx];
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    valid_objects.push((start, candidate));
+                }
+            }
+        }
+    }
+
+    if !valid_objects.is_empty() {
+        // When a reasoning model emits `{...}\n</think>\n\n{...}` or `<think>...</think>\n{...}`,
+        // prefer the first valid JSON object that appears cleanly after the last `</think>` tag.
+        if let Some(last_close) = trimmed.rfind("</think>") {
+            let after_close = last_close + "</think>".len();
+            if let Some((_, slice)) = valid_objects.iter().find(|(st, _)| *st >= after_close) {
+                return Some(*slice);
+            }
+        }
+        return Some(valid_objects[0].1);
+    }
+
     let start = trimmed.find('{')?;
     let end = trimmed.rfind('}')?;
-    (start <= end).then_some(&trimmed[start..=end])
+    if start <= end {
+        let candidate = &trimmed[start..=end];
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn is_answer_grounded_in(answer: &str, mem: &MemoryRecord) -> bool {
@@ -1021,9 +1189,125 @@ fn is_answer_grounded_in(answer: &str, mem: &MemoryRecord) -> bool {
     false
 }
 
+fn is_synthesis_grounded(answer: &str, gated: &[&ScoredMemory]) -> bool {
+    let mut corpus_tokens: HashSet<String> = HashSet::new();
+    let mut corpus_text = String::new();
+    for c in gated {
+        corpus_tokens.extend(content_tokens(&c.memory.content));
+        corpus_tokens.extend(content_tokens(&c.memory.title));
+        corpus_tokens.insert(c.memory.category.as_str().to_lowercase());
+        corpus_text.push_str(&c.memory.title);
+        corpus_text.push(' ');
+        corpus_text.push_str(&c.memory.content);
+        corpus_text.push('\n');
+    }
+
+    let ans_tokens = content_tokens(answer);
+    if ans_tokens.is_empty() {
+        return false;
+    }
+
+    // 1. Strict numeric/code anti-hallucination guard: every digit-bearing token in the answer
+    // MUST exist in the union of retrieved memories (content or title).
+    for tok in &ans_tokens {
+        if tok.chars().any(|c| c.is_ascii_digit())
+            && !corpus_tokens.contains(tok)
+            && !grounded(tok, &corpus_text)
+        {
+            return false;
+        }
+    }
+
+    // 2. Substantive lexical overlap guard (ignoring harmless summary/connector framing words).
+    const FRAMING_WORDS: &[&str] = &[
+        "also",
+        "additionally",
+        "furthermore",
+        "moreover",
+        "including",
+        "include",
+        "includes",
+        "summary",
+        "summarize",
+        "overall",
+        "based",
+        "mentioned",
+        "noted",
+        "across",
+        "earlier",
+        "currently",
+        "several",
+        "multiple",
+        "various",
+        "primarily",
+        "key",
+        "details",
+        "history",
+        "records",
+        "memories",
+        "goals",
+        "goal",
+        "plan",
+        "planned",
+        "ranging",
+        "between",
+        "through",
+        "having",
+    ];
+    let substantive: Vec<&String> = ans_tokens
+        .iter()
+        .filter(|t| !FRAMING_WORDS.contains(&t.as_str()))
+        .collect();
+
+    if substantive.is_empty() {
+        return false;
+    }
+
+    let matched = substantive
+        .iter()
+        .filter(|t| corpus_tokens.contains(t.as_str()) || grounded(t, &corpus_text))
+        .count();
+
+    let min_required = if substantive.len() == 1 { 1 } else { 2 };
+    matched >= min_required && matched * 100 >= substantive.len() * 65
+}
+
+fn clean_synthesis_answer(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`'))
+        .trim()
+        .to_string()
+}
+
+fn extract_memory_index(val: Option<&serde_json::Value>) -> Option<usize> {
+    let v = val?;
+    if let Some(n) = v.as_u64() {
+        return Some(n as usize);
+    }
+    if let Some(arr) = v.as_array() {
+        return arr
+            .first()
+            .and_then(|item| item.as_u64())
+            .map(|n| n as usize);
+    }
+    if let Some(s) = v.as_str() {
+        return s.trim().parse::<usize>().ok();
+    }
+    None
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_and_ground_ollama_answer(
     raw_json: &str,
     gated: &[&ScoredMemory],
+) -> Option<(String, usize, f32)> {
+    parse_and_ground_ollama_answer_with_mode(raw_json, gated, false)
+}
+
+fn parse_and_ground_ollama_answer_with_mode(
+    raw_json: &str,
+    gated: &[&ScoredMemory],
+    synthesis: bool,
 ) -> Option<(String, usize, f32)> {
     let json_slice = extract_json_slice(raw_json)?;
     let parsed: serde_json::Value = serde_json::from_str(json_slice).ok()?;
@@ -1032,7 +1316,11 @@ fn parse_and_ground_ollama_answer(
         return None;
     }
 
-    let cleaned = clean_extracted_span(raw_ans);
+    let cleaned = if synthesis {
+        clean_synthesis_answer(raw_ans)
+    } else {
+        clean_extracted_span(raw_ans)
+    };
     let lower = cleaned.to_lowercase();
     if cleaned.is_empty()
         || matches!(
@@ -1041,6 +1329,10 @@ fn parse_and_ground_ollama_answer(
         )
         || lower.contains("not been recorded")
         || lower.contains("insufficient evidence")
+        || lower.contains("no matching memory")
+        || lower.contains("no relevant memory")
+        || lower.contains("not mentioned in")
+        || lower.contains("cannot determine")
     {
         return None;
     }
@@ -1055,11 +1347,41 @@ fn parse_and_ground_ollama_answer(
         0.85
     };
 
-    if let Some(idx) = parsed
-        .get("memory_index")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-    {
+    let explicit_idx = extract_memory_index(parsed.get("memory_index"));
+
+    if synthesis {
+        if !is_synthesis_grounded(&cleaned, gated) {
+            return None;
+        }
+        let ans_tokens = content_tokens(&cleaned);
+        let best_idx = explicit_idx
+            .filter(|&i| {
+                if i >= gated.len() {
+                    return false;
+                }
+                let mut m_toks = content_tokens(&gated[i].memory.content);
+                m_toks.extend(content_tokens(&gated[i].memory.title));
+                ans_tokens.iter().any(|t| m_toks.contains(t))
+            })
+            .unwrap_or_else(|| {
+                gated
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, c)| {
+                        let mut m_toks = content_tokens(&c.memory.content);
+                        m_toks.extend(content_tokens(&c.memory.title));
+                        ans_tokens
+                            .iter()
+                            .filter(|t| m_toks.contains(t.as_str()))
+                            .count()
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            });
+        return Some((cleaned, best_idx, confidence));
+    }
+
+    if let Some(idx) = explicit_idx {
         if idx < gated.len() && is_answer_grounded_in(&cleaned, &gated[idx].memory) {
             return Some((cleaned, idx, confidence));
         }
@@ -1398,5 +1720,171 @@ mod tests {
         assert!(result.answer.contains("Insufficient evidence"));
         assert_eq!(result.confidence, 0.0);
         assert_eq!(result.reranker_used, "minilm-squad2");
+    }
+
+    #[test]
+    fn test_extract_json_slice_handles_think_tags_and_duplicates() {
+        let with_think = "<think>Considering {\"answer\": \"WRONG\"}</think>\n{\"answer\": \"HAQPP8118D\", \"memory_index\": 1, \"confidence\": 0.95}";
+        assert_eq!(
+            extract_json_slice(with_think).unwrap(),
+            "{\"answer\": \"HAQPP8118D\", \"memory_index\": 1, \"confidence\": 0.95}"
+        );
+
+        let with_duplicate_close = "{\"answer\": \"HAQPP8118D\", \"memory_index\": 1}\n</think>\n\n{\"answer\": \"HAQPP8118D\", \"memory_index\": 1, \"confidence\": 0.9}";
+        assert_eq!(
+            extract_json_slice(with_duplicate_close).unwrap(),
+            "{\"answer\": \"HAQPP8118D\", \"memory_index\": 1, \"confidence\": 0.9}"
+        );
+
+        let c1 = make_candidate("1", "Unrelated", 0.5);
+        let c2 = make_candidate("2", "PAN is HAQPP8118D", 0.5);
+        let c3 = make_candidate("3", "10th SSC Roll No. 2008102776", 0.5);
+        let gated = vec![&c1, &c2, &c3];
+        let array_idx =
+            r#"{"answer": "2008102776", "memory_index": [2], "confidence": 0.95}</think>"#;
+        let (ans, idx, _) = parse_and_ground_ollama_answer(array_idx, &gated).unwrap();
+        assert_eq!(ans, "2008102776");
+        assert_eq!(idx, 2);
+    }
+
+    #[test]
+    fn test_synthesis_query_detection_and_grounding() {
+        assert!(is_synthesis_query("summarize my goals"));
+        assert!(is_synthesis_query("Summarize sprint goals"));
+        assert!(is_synthesis_query("what are my study goals?"));
+        assert!(is_synthesis_query("list all recent decisions"));
+        assert!(!is_synthesis_query("what is my pan"));
+        assert!(!is_synthesis_query("what port does redis use"));
+
+        let g1 = make_candidate(
+            "g1",
+            "Weight loss target: 80 kg from 91 kg via 500 kcal daily deficit.",
+            0.65,
+        );
+        let g2 = make_candidate(
+            "g2",
+            "Studying Fundamentals of Operating Systems via Udemy Business.",
+            0.55,
+        );
+        let gated = vec![&g1, &g2];
+
+        let grounded_sum = r#"{"answer": "Weight loss target: 80 kg from 91 kg with 500 kcal deficit. Also studying Fundamentals of Operating Systems via Udemy Business.", "memory_index": 0, "confidence": 0.96}"#;
+        let (ans, idx, conf) =
+            parse_and_ground_ollama_answer_with_mode(grounded_sum, &gated, true).unwrap();
+        assert!(ans.starts_with("Weight loss target: 80 kg"));
+        assert_eq!(idx, 0);
+        assert!(conf > 0.9);
+
+        let fabricated_digit = r#"{"answer": "Weight loss target: 9999 kg by next month.", "memory_index": 0, "confidence": 0.95}"#;
+        assert!(
+            parse_and_ground_ollama_answer_with_mode(fabricated_digit, &gated, true).is_none(),
+            "Summary containing ungrounded numbers must be rejected"
+        );
+
+        let unrelated_hallucination = r#"{"answer": "Complete SpaceX Mars orbital telemetry milestone.", "memory_index": 0, "confidence": 0.95}"#;
+        assert!(
+            parse_and_ground_ollama_answer_with_mode(unrelated_hallucination, &gated, true)
+                .is_none(),
+            "Summary with ungrounded terms must be rejected"
+        );
+
+        let abstained = r#"{"answer": null, "memory_index": null, "confidence": 0.0}"#;
+        assert!(parse_and_ground_ollama_answer_with_mode(abstained, &gated, true).is_none());
+    }
+
+    #[test]
+    fn test_ollama_resolve_model_prefers_bonsai_over_cloud_on_localhost() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"object":"list","data":[{"id":"gemma4:31b-cloud","object":"model"},{"id":"embeddinggemma-2:latest","object":"model"},{"id":"qwen2.5:3b","object":"model"},{"id":"bonsai-2:2b","object":"model"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        let reranker = OllamaReranker::new(format!("http://127.0.0.1:{}", port), None);
+        let chosen = reranker.resolve_model();
+        let _ = handle.join();
+        assert_eq!(chosen, "bonsai-2:2b");
+    }
+
+    #[test]
+    fn test_ollama_answer_reaches_rank_10_and_sends_reasoning_effort_none() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let saw_reasoning_none = Arc::new(AtomicBool::new(false));
+        let saw_rank_9 = Arc::new(AtomicBool::new(false));
+        let saw_reasoning_clone = Arc::clone(&saw_reasoning_none);
+        let saw_rank9_clone = Arc::clone(&saw_rank_9);
+
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                if req.contains("\"reasoning_effort\":\"none\"") {
+                    saw_reasoning_clone.store(true, Ordering::SeqCst);
+                }
+                if req.contains("[9] ") && req.contains("2008102776") {
+                    saw_rank9_clone.store(true, Ordering::SeqCst);
+                }
+                let body = r#"{"choices":[{"message":{"content":"{\"answer\":\"2008102776\",\"memory_index\":9,\"confidence\":0.95}"}}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        let mut cands: Vec<ScoredMemory> = (0..9)
+            .map(|i| make_candidate(&format!("d{}", i), &format!("Distractor note {}", i), 0.5))
+            .collect();
+        cands.push(make_candidate(
+            "ssc10",
+            "10th SSC Regular March 2020 (Roll No. 2008102776)",
+            0.38,
+        ));
+
+        let reranker = OllamaReranker::new(
+            format!("http://127.0.0.1:{}", port),
+            Some("bonsai-2:2b".to_string()),
+        );
+        let res = reranker
+            .answer("what is my 10th roll number", &cands)
+            .unwrap();
+        let _ = handle.join();
+
+        assert!(
+            saw_reasoning_none.load(Ordering::SeqCst),
+            "Must send reasoning_effort: none to prevent thinking-token exhaustion"
+        );
+        assert!(
+            saw_rank_9.load(Ordering::SeqCst),
+            "Must include candidate index 9 (top-10) instead of truncating at 5"
+        );
+        assert_eq!(res.answer, "2008102776");
+        assert_eq!(res.selected_memory.unwrap().id, "ssc10");
     }
 }

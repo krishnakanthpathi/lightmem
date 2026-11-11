@@ -281,7 +281,7 @@ impl LightMemConfig {
         match norm.as_str() {
             "tinyroberta-squad2" => "tinyroberta-squad2 (local ONNX Extractive QA)".to_string(),
             "minilm-squad2" => "minilm-squad2 (local ONNX Extractive QA)".to_string(),
-            "ollama" => format!("ollama:auto (@ {})", eff_url),
+            "ollama" => format!("ollama:auto (prefers bonsai-2:2b @ {})", eff_url),
             "top1" => "top1 (0ms vector rank-1)".to_string(),
             other => format!("{} (local ONNX Extractive QA)", other),
         }

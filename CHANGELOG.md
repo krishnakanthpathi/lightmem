@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.6
+
+- Update GitHub Actions macOS build runners from retired `macos-14` to `macos-15` in `release.yml` and `pypi.yml` to unblock `aarch64-apple-darwin` binaries and `macosx_11_0_arm64` PyPI wheels.
+- Prioritize `bonsai-2:2b` (`bonsai-2:latest`) for local Ollama auto-resolution (`ollama:auto`) and shell completions, skipping `-cloud` models on localhost endpoints while preserving `ollama-cloud` preset behavior.
+- Harden `OllamaReranker` and `ObserverService` for reasoning models by sending `reasoning_effort: "none"` / `think: false` (with HTTP 400 fallback) and hardening balanced JSON extraction against `<think>...</think>` and duplicate pre-`</think>` payloads.
+- Expand `OllamaReranker::answer` to inspect the top 10 gated candidates, add grounded multi-memory synthesis for summary/listing queries with strict qualifier checks, and boost digit-bearing ordinal/identifier query tokens during hybrid search.
+- Guard `entity_index` QA shortcuts with whole-token matching, tautology/subject-in-question filtering, and explicit `--reranker` override adherence; honor local/offline reranker configs in `ObserverService::extract`.
+
 ## 0.7.5
 
 - Fix TCP connection resets (`ECONNRESET`) in `lmem docs` / `doc` / `web` under browsers and large HTTP headers by draining incoming request headers cleanly before socket write shutdown, handling `HEAD` and `405`, and serving requests concurrently.

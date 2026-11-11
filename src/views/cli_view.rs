@@ -1184,7 +1184,7 @@ impl CliView {
                     serde_json::json!({
                         "local": "100% offline (bge-small ONNX embeddings + minilm-squad2 QA reranker)",
                         "ollama-cloud": "Local ONNX embeddings + Ollama gemma4:31b-cloud reranker (via localhost:11434)",
-                        "ollama-local": "Local ONNX embeddings + Ollama localhost LLM reranker"
+                        "ollama-local": "Local ONNX embeddings + Ollama localhost LLM reranker (prefers bonsai-2:2b)"
                     }),
                 );
                 if let Some(key_val) = obj.get_mut("ollama_api_key") {
@@ -1307,7 +1307,7 @@ impl CliView {
             "    {}  {:<35} {}",
             Self::emerald_bold("3. ollama-local"),
             Self::slate("lmem config --preset ollama-local"),
-            Self::slate("ONNX embeddings + Ollama localhost LLM reranker")
+            Self::slate("ONNX embeddings + Ollama localhost LLM reranker (prefers bonsai-2:2b)")
         );
         Ok(())
     }

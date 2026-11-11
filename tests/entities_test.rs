@@ -186,3 +186,61 @@ fn test_entities_dedup_and_conflict_merge() {
         .iter()
         .any(|e| e.name == "pincode" && e.val == "500081"));
 }
+
+#[test]
+fn test_entity_index_guards_tautology_word_boundary_and_reranker_override() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("entity_guards.db");
+    let config = lightmem::models::LightMemConfig {
+        backend: "hash".to_string(),
+        reranker: "top1".to_string(),
+        ..Default::default()
+    };
+    let lm = LightMem::open_at(&db_path, config).unwrap();
+
+    let mut mem = lightmem::models::MemoryRecord::new(
+        MemoryType::Decision,
+        "SQLite WAL Decision".to_string(),
+        "LightMem uses SQLite WAL and FTS5 for hybrid retrieval.".to_string(),
+        vec!["sqlite".to_string()],
+        0.95,
+        None,
+    );
+    // Subject tautology ("lightmem" -> "LightMem"), substring trap ("id" inside "hybrid"), and pincode
+    mem.entities.push(EntityRecord::new("lightmem", "LightMem"));
+    mem.entities.push(EntityRecord::new("id", "99999"));
+    mem.entities.push(EntityRecord::new("engine", "SQLite WAL"));
+
+    let embedder = lightmem::services::embeddings::HashEmbeddingProvider;
+    let identity = lm.requested_embedding_identity();
+    lm.storage()
+        .insert_indexed_batch(&[mem], &embedder, identity, true)
+        .unwrap();
+
+    // Without override: must NOT echo tautological "LightMem" or substring "id" from "hybrid"
+    let ans_auto = lm
+        .answer(
+            "What does LightMem use for hybrid retrieval?",
+            None,
+            None,
+            5,
+            false,
+        )
+        .unwrap();
+    assert_eq!(ans_auto.reranker_used, "top1");
+    assert!(ans_auto.answer.contains("SQLite WAL"));
+
+    // Whole-word attribute match ("engine" -> "SQLite WAL") STILL uses entity_index when not overridden
+    let ans_entity = lm
+        .answer("What is the storage engine?", None, None, 5, false)
+        .unwrap();
+    assert_eq!(ans_entity.reranker_used, "entity_index");
+    assert_eq!(ans_entity.answer, "SQLite WAL");
+
+    // Explicit reranker override MUST bypass entity_index
+    let ans_override = lm
+        .answer_with_reranker("What is the storage engine?", None, None, 5, Some("top1"))
+        .unwrap();
+    assert_eq!(ans_override.reranker_used, "top1");
+    assert!(ans_override.answer.contains("SQLite WAL"));
+}
