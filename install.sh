@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.7.3"
+VERSION="v0.7.4"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 old_tty=""

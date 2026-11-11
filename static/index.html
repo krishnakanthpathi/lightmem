@@ -17,7 +17,7 @@
   <link rel="stylesheet" href="/landing.css" />
   <script type="module" src="/site.js"></script>
   <script type="module" src="/hex-vault.js"></script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"LightMem","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux, Windows","softwareVersion":"0.5.2","license":"https://opensource.org/license/mit","description":"Local persistent memory for AI agents, with a Rust CLI, Python SDK, and MCP server.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"LightMem","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux, Windows","softwareVersion":"0.7.4","license":"https://opensource.org/license/mit","description":"Local persistent memory for AI agents, with a Rust CLI, Python SDK, and MCP server.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -37,7 +37,7 @@
       <canvas class="hero-vault-canvas" id="heroVault" aria-hidden="true"></canvas>
       <div class="shell hero-grid">
         <div>
-          <a class="release-link" href="/docs#graph"><span class="badge badge-accent">v0.5.2</span> Knowledge graph entities & single-command installer <span aria-hidden="true">↗</span></a>
+          <a class="release-link" href="/docs#cli"><span class="badge badge-accent">v0.7.4</span> Multimodal embeddings, --open media viewer &amp; offline docs <span aria-hidden="true">↗</span></a>
           <h1 id="hero-title">New session.<br />Same <span>memory.</span></h1>
           <p class="hero-description">Your agent shouldn’t forget what you’ve already figured out. Give it persistent, searchable memory that lives right on your machine.</p>
           <div class="hero-actions">
@@ -105,6 +105,7 @@
         <div class="faq-list">
           <details open><summary>What is LightMem?</summary><p>LightMem is a local persistent memory engine for AI agents. A Rust CLI, Python SDK, and MCP server let your tools store and retrieve facts, preferences, decisions, and attachments across sessions.</p></details>
           <details><summary>Does it need a cloud service?</summary><p>The default engine uses local SQLite storage and local ONNX models. Models download on first use; once cached, the local configuration works offline. Ollama is optional and can use a local or remote endpoint.</p></details>
+          <details><summary>Can I browse documentation offline?</summary><p>Yes. Run <code>lmem docs</code> (or <code>lmem docs --port 8085</code>). It starts a zero-dependency local HTTP server embedded directly inside the compiled binary and opens the documentation in your browser. It runs in the foreground and stops immediately on Ctrl+C.</p></details>
           <details><summary>How do I transfer or back up my memories and videos?</summary><p>Use <code>lmem bundle export -o backup.zip</code> to package the SQLite database, all attached videos, images, and documents, and vector embeddings into a single compressed .zip file. On your new machine, run <code>lmem bundle import backup.zip</code> to restore everything in milliseconds without re-computing embeddings.</p></details>
           <details><summary>Can different agents share memory?</summary><p>Yes. Register your agent connections against the same user and project, then select the scope each tool should use. See the <a class="text-link" href="/docs#integrations">integration guide →</a> for setup.</p></details>
           <details><summary>How do I get started?</summary><p>Install with <code>pip install -U lmem</code> using Python 3.8 or newer. Native wheels are available for supported platforms; shell installers and source builds are also documented in the <a class="text-link" href="/docs#quickstart">quick start →</a>.</p></details>

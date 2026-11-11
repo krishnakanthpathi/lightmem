@@ -1738,6 +1738,132 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_vault_status_overview(
+        overview: &crate::models::VaultStatusOverview,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(overview)?);
+            return Ok(());
+        }
+
+        println!(
+            "\n  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("MANAGED MEMORY VAULTS & CONNECTIONS")
+        );
+        println!(
+            "  {}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                .bright_black()
+        );
+
+        let def_path = Self::format_path(&overview.default_vault.db_path);
+        let def_status = if overview.default_vault.db_exists {
+            format!(
+                "{} active  ·  {} total",
+                Self::emerald_bold(&overview.default_vault.active_memories.to_string()),
+                Self::slate(&overview.default_vault.total_memories.to_string())
+            )
+        } else {
+            Self::slate("uninitialized (created on first remember)").to_string()
+        };
+
+        println!(
+            "  {} {} {}",
+            Self::crimson_bold("◫"),
+            Self::white_bold("Default Vault"),
+            Self::slate(&format!("({})", def_path))
+        );
+        println!("  ├─ Status: {}", def_status);
+        println!(
+            "  ╰─ Scope:  {}",
+            Self::slate("global / standalone (no connection)")
+        );
+
+        println!();
+        println!(
+            "  {} {} {}",
+            Self::crimson_bold("◫"),
+            Self::white_bold("Registered Connections"),
+            Self::slate(&format!("({})", overview.connections.len()))
+        );
+
+        if overview.connections.is_empty() {
+            println!(
+                "  {}",
+                Self::slate("○ No harness connections registered yet.")
+            );
+            println!(
+                "    Run '{}' to bind a harness to a project or user.",
+                Self::gold("lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project>")
+            );
+        } else {
+            println!(
+                "  {}",
+                "────────────────────────────────────────────────────────────────────────────"
+                    .bright_black()
+            );
+            println!(
+                "  {:<12} {:<12} {:<10} {:<12} {:<8} {:<14} {}",
+                Self::slate("CONNECTION"),
+                Self::slate("HARNESS"),
+                Self::slate("USER"),
+                Self::slate("PROJECT"),
+                Self::slate("SCOPE"),
+                Self::slate("MEMORIES"),
+                Self::slate("PHYSICAL VAULT")
+            );
+            println!(
+                "  {}",
+                "────────────────────────────────────────────────────────────────────────────"
+                    .bright_black()
+            );
+
+            for c in &overview.connections {
+                let project_display = c.project_id.as_deref().unwrap_or("—");
+                let scope_display = match c.scope {
+                    crate::models::MemoryScope::User => "user",
+                    crate::models::MemoryScope::Project => "project",
+                    crate::models::MemoryScope::Agent => "agent",
+                };
+                let mem_display = if c.db_exists {
+                    format!("{} active", c.active_memories)
+                } else {
+                    "uninitialized".into()
+                };
+                let vault_path = Self::format_path(&c.db_path);
+
+                println!(
+                    "  {:<12} {:<12} {:<10} {:<12} {:<8} {:<14} {}",
+                    Self::white_bold(&c.connection_id),
+                    Self::violet_bold(&c.harness_id),
+                    Self::gold(&c.user_id),
+                    project_display,
+                    Self::slate(scope_display),
+                    if c.db_exists && c.active_memories > 0 {
+                        Self::emerald_bold(&mem_display)
+                    } else {
+                        Self::slate(&mem_display)
+                    },
+                    Self::slate(&vault_path)
+                );
+            }
+            println!(
+                "  {}",
+                "────────────────────────────────────────────────────────────────────────────"
+                    .bright_black()
+            );
+            println!(
+                "  {} Run {} to query or remember within a bound connection.",
+                Self::slate("Usage:"),
+                Self::gold("lmem --connection <id> recall \"query\"")
+            );
+        }
+        println!();
+        Ok(())
+    }
+
     pub fn render_observed_card(idx: usize, total: usize, candidate: &ObservedCandidate) {
         let conf_pct = (candidate.confidence * 100.0).round() as u32;
         println!(

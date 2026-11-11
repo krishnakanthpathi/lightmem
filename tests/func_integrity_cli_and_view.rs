@@ -784,3 +784,82 @@ fn test_new_cli_json_options_and_version() {
     let root_val: serde_json::Value = serde_json::from_slice(&root_json.stdout).unwrap();
     assert!(root_val.get("total_memories").is_some());
 }
+
+#[test]
+fn test_open_image_status_and_docs_cli_surface() {
+    let dir = tempdir().unwrap();
+    let cfg_dir = dir.path().join(".lightmem");
+    let db_path = cfg_dir.join("surface.db");
+    run_lmem(
+        &cfg_dir,
+        &db_path,
+        &["config", "--backend", "hash", "--reranker", "top1"],
+    );
+
+    // Help flags expose --open, --image, status/vaults, docs/doc/web
+    let rec_help = run_lmem(&cfg_dir, &db_path, &["recall", "--help"]);
+    assert!(rec_help.status.success());
+    let rec_help_str = String::from_utf8_lossy(&rec_help.stdout);
+    assert!(rec_help_str.contains("--open"));
+    assert!(rec_help_str.contains("--image"));
+
+    let insp_help = run_lmem(&cfg_dir, &db_path, &["inspect", "--help"]);
+    assert!(insp_help.status.success());
+    assert!(String::from_utf8_lossy(&insp_help.stdout).contains("--open"));
+
+    for alias in ["docs", "doc", "web"] {
+        let docs_help = run_lmem(&cfg_dir, &db_path, &[alias, "--help"]);
+        assert!(docs_help.status.success(), "{alias} --help failed");
+        let s = String::from_utf8_lossy(&docs_help.stdout);
+        assert!(s.contains("--port") && s.contains("--landing") && s.contains("--no-browser"));
+    }
+
+    // status and vaults aliases return valid JSON
+    for cmd_name in ["status", "vaults"] {
+        let st_out = run_lmem(&cfg_dir, &db_path, &[cmd_name, "--json"]);
+        assert!(st_out.status.success(), "{cmd_name} --json failed");
+        let v: serde_json::Value = serde_json::from_slice(&st_out.stdout).unwrap();
+        assert!(v.get("default_vault").is_some());
+        assert!(v.get("connections").is_some());
+    }
+
+    // recall --image with missing path exits non-zero cleanly
+    let bad_img = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &[
+            "recall",
+            "--image",
+            dir.path().join("missing.png").to_str().unwrap(),
+        ],
+    );
+    assert!(!bad_img.status.success());
+
+    // Text-only memory: recall --open --json & inspect --open --path do not spawn external GUI apps
+    let rem = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &["remember", "Text only entry", "--no-entities", "--json"],
+    );
+    assert!(rem.status.success());
+    let mem_id = serde_json::from_slice::<serde_json::Value>(&rem.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let rec_open = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &["recall", "Text only", "--open", "--json"],
+    );
+    assert!(rec_open.status.success());
+    let rec_arr: Vec<serde_json::Value> = serde_json::from_slice(&rec_open.stdout).unwrap();
+    assert!(rec_arr.is_empty());
+
+    let insp_open = run_lmem(
+        &cfg_dir,
+        &db_path,
+        &["inspect", &mem_id, "--open", "--path"],
+    );
+    assert!(!insp_open.status.success());
+}

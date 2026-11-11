@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use colored::*;
-use lightmem::{parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType};
+use lightmem::{
+    encode_base64, parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType,
+    MultimodalInput,
+};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -49,6 +52,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// View all managed memory vaults, active connections, and storage telemetry
+    #[command(visible_alias = "vaults")]
+    Status {
+        /// Output vault status as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Register and inspect users, agents, harnesses, and named connections
     Identity {
         #[command(subcommand)]
@@ -117,8 +127,13 @@ enum Commands {
 
     /// Recall memories via hybrid semantic + keyword search
     Recall {
-        /// Search query string
+        /// Search query string (optional if --image is supplied)
+        #[arg(default_value = "")]
         query: String,
+
+        /// Search multimodal vector memory with an image query
+        #[arg(long = "image", visible_alias = "img")]
+        image: Option<PathBuf>,
 
         /// Filter by category
         #[arg(short = 't', long = "type")]
@@ -159,6 +174,10 @@ enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
+
+        /// Open recalled attachment file(s) immediately using system default application
+        #[arg(long)]
+        open: bool,
 
         /// Output results as JSON for agent consumption
         #[arg(long)]
@@ -226,6 +245,10 @@ enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
+
+        /// Open inspected attachment file(s) immediately using system default application
+        #[arg(long)]
+        open: bool,
 
         /// Output memory details as JSON
         #[arg(long)]
@@ -621,6 +644,22 @@ enum Commands {
         json: bool,
     },
 
+    /// Launch an embedded local documentation and landing page web server (zero external processes)
+    #[command(visible_aliases = ["doc", "web"])]
+    Docs {
+        /// Port to bind the local HTTP server (defaults to auto-selecting 8080..8100)
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
+
+        /// Open the landing page instead of the documentation page
+        #[arg(long)]
+        landing: bool,
+
+        /// Do not automatically open browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+
     /// Uninstall LightMem binaries, shell completions, and optionally purge data
     Uninstall {
         /// Purge database (~/.lightmem/memories.db) and downloaded models
@@ -742,19 +781,29 @@ enum IdentityCommand {
     Show {
         id: String,
     },
+    /// View all managed memory vaults, active connections, and storage telemetry
+    Status,
 }
 
-fn run_identity(action: &IdentityCommand) -> Result<()> {
+fn run_identity(action: &IdentityCommand, json: bool, default_db: PathBuf) -> Result<()> {
     let registry = lightmem::IdentityRegistry::open_default()?;
-    let value = match action {
+    match action {
+        IdentityCommand::Status => {
+            let overview = registry.status_overview(default_db)?;
+            CliView::render_vault_status_overview(&overview, json)?;
+        }
         IdentityCommand::UserAdd { id, name } => {
-            serde_json::to_value(registry.add_user(id, name.as_deref())?)?
+            let value = serde_json::to_value(registry.add_user(id, name.as_deref())?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         IdentityCommand::AgentAdd { id, user, name } => {
-            serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?
+            let value = serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         IdentityCommand::HarnessAdd { id, path, name } => {
-            serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?
+            let value =
+                serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
         }
         IdentityCommand::ConnectionAdd {
             id,
@@ -763,18 +812,26 @@ fn run_identity(action: &IdentityCommand) -> Result<()> {
             harness,
             project,
             memory_scope,
-        } => serde_json::to_value(registry.add_connection(
-            id,
-            user,
-            agent,
-            harness,
-            project.clone(),
-            memory_scope.clone(),
-        )?)?,
-        IdentityCommand::List { kind } => registry.list(kind)?,
-        IdentityCommand::Show { id } => serde_json::to_value(registry.resolve(id, None, None)?)?,
-    };
-    println!("{}", serde_json::to_string_pretty(&value)?);
+        } => {
+            let value = serde_json::to_value(registry.add_connection(
+                id,
+                user,
+                agent,
+                harness,
+                project.clone(),
+                memory_scope.clone(),
+            )?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        IdentityCommand::List { kind } => {
+            let value = registry.list(kind)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+        IdentityCommand::Show { id } => {
+            let value = serde_json::to_value(registry.resolve(id, None, None)?)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+    }
     Ok(())
 }
 
@@ -851,6 +908,31 @@ fn migrate_embeddings(lm: &LightMem, yes: bool, machine_output: bool, force: boo
     Ok(true)
 }
 
+fn open_file_in_default_app(path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("Failed to open {} with 'open'", path.display()))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path.to_string_lossy()])
+            .spawn()
+            .with_context(|| format!("Failed to open {} with 'start'", path.display()))?;
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("Failed to open {} with 'xdg-open'", path.display()))?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     #[cfg(windows)]
     {
@@ -860,18 +942,30 @@ fn main() -> Result<()> {
     if cli.version {
         return CliView::render_version(cli.json);
     }
-    if let Some(Commands::Identity { action, .. }) = &cli.command {
-        return run_identity(action);
+    let env_db = std::env::var("LIGHTMEM_DB")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from);
+    let default_db = cli
+        .db
+        .as_deref()
+        .map(Path::to_path_buf)
+        .or_else(|| env_db.clone())
+        .unwrap_or_else(|| LightMemConfig::resolve_db_path(cli.global));
+
+    if let Some(Commands::Identity { action, json }) = &cli.command {
+        return run_identity(action, *json || cli.json, default_db);
+    }
+    if let Some(Commands::Status { json }) = &cli.command {
+        let registry = lightmem::IdentityRegistry::open_default()?;
+        let overview = registry.status_overview(default_db)?;
+        return CliView::render_vault_status_overview(&overview, *json || cli.json);
     }
     let connection_id = cli.connection.clone().or_else(|| {
         std::env::var("LIGHTMEM_CONNECTION")
             .ok()
             .filter(|v| !v.trim().is_empty())
     });
-    let env_db = std::env::var("LIGHTMEM_DB")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from);
     anyhow::ensure!(
         connection_id.is_some() || (cli.scope.is_none() && cli.session.is_none()),
         "--scope and --session require --connection"
@@ -911,7 +1005,7 @@ fn main() -> Result<()> {
     };
 
     match command {
-        Commands::Identity { .. } => unreachable!(),
+        Commands::Identity { .. } | Commands::Status { .. } => unreachable!(),
         Commands::Context { .. } => {
             let value = match connection {
                 Some(connection) => serde_json::to_value(connection)?,
@@ -985,6 +1079,7 @@ fn main() -> Result<()> {
 
         Commands::Recall {
             query,
+            image,
             category,
             media,
             as_of,
@@ -995,6 +1090,7 @@ fn main() -> Result<()> {
             multi_hop,
             save_to,
             path,
+            open,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
@@ -1005,18 +1101,40 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             if precision && !path {
+                anyhow::ensure!(
+                    !query.trim().is_empty(),
+                    "Search query cannot be blank with --precision"
+                );
                 let result =
                     lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
                 CliView::render_answer(&result, json)?;
             } else {
-                let filter_attachments = media.is_some() || path || save_to.is_some();
+                let filter_attachments = media.is_some() || path || save_to.is_some() || open;
                 let fetch_limit = if filter_attachments {
                     limit.max(100)
                 } else {
                     limit
                 };
-                let mut results = lm.recall_expanded(
-                    &query,
+                let img_b64 = if let Some(ref img_path) = image {
+                    let data = std::fs::read(img_path).with_context(|| {
+                        format!("Failed to read query image file: {}", img_path.display())
+                    })?;
+                    anyhow::ensure!(
+                        !data.is_empty(),
+                        "Query image file is empty: {}",
+                        img_path.display()
+                    );
+                    Some(encode_base64(&data))
+                } else {
+                    None
+                };
+                let mm_input = if let Some(ref b64) = img_b64 {
+                    MultimodalInput::with_image(&query, b64)
+                } else {
+                    MultimodalInput::text_only(&query)
+                };
+                let mut results = lm.recall_multimodal_expanded(
+                    &mm_input,
                     cat,
                     as_of_dt,
                     date,
@@ -1038,9 +1156,22 @@ fn main() -> Result<()> {
                     results.truncate(limit);
                 }
                 let ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
+                let display_query = if query.trim().is_empty() {
+                    image
+                        .as_ref()
+                        .map(|p| format!("[image: {}]", p.display()))
+                        .unwrap_or_default()
+                } else {
+                    query.clone()
+                };
                 if path {
                     let all_paths =
                         lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
+                    if open {
+                        for p in &all_paths {
+                            let _ = open_file_in_default_app(p);
+                        }
+                    }
                     if json {
                         println!("{}", serde_json::to_string_pretty(&all_paths)?);
                     } else {
@@ -1050,6 +1181,11 @@ fn main() -> Result<()> {
                     }
                 } else if let Some(ref target) = save_to {
                     let all_saved = lm.save_memories_attachments_to(&ids, target)?;
+                    if open {
+                        for p in &all_saved {
+                            let _ = open_file_in_default_app(p);
+                        }
+                    }
                     if json {
                         let mut offset = 0usize;
                         let json_items: Vec<serde_json::Value> = results
@@ -1071,7 +1207,7 @@ fn main() -> Result<()> {
                             .collect();
                         println!("{}", serde_json::to_string_pretty(&json_items)?);
                     } else {
-                        CliView::render_recall(&query, &results, lm.db_path(), false)?;
+                        CliView::render_recall(&display_query, &results, lm.db_path(), false)?;
                         if !all_saved.is_empty() {
                             println!();
                             for p in &all_saved {
@@ -1085,7 +1221,13 @@ fn main() -> Result<()> {
                         }
                     }
                 } else {
-                    CliView::render_recall(&query, &results, lm.db_path(), json)?;
+                    if open {
+                        let all_paths = lm.materialize_memories_attachments(&ids, None)?;
+                        for p in &all_paths {
+                            let _ = open_file_in_default_app(p);
+                        }
+                    }
+                    CliView::render_recall(&display_query, &results, lm.db_path(), json)?;
                 }
             }
         }
@@ -1213,6 +1355,7 @@ fn main() -> Result<()> {
             terms,
             save_to,
             path,
+            open,
             json,
         } => {
             let lm = open_controller(effective_db, global, connection)?;
@@ -1228,6 +1371,11 @@ fn main() -> Result<()> {
                     ids.push(record.id);
                 }
                 let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
+                if open {
+                    for p in &all_paths {
+                        let _ = open_file_in_default_app(p);
+                    }
+                }
                 if all_paths.is_empty() {
                     if json {
                         println!("[]");
@@ -1252,6 +1400,21 @@ fn main() -> Result<()> {
                     } else {
                         Vec::new()
                     };
+                    if open {
+                        if save_to.is_some() {
+                            for p in &saved_paths {
+                                let _ = open_file_in_default_app(p);
+                            }
+                        } else {
+                            let all_paths = lm.materialize_memories_attachments(
+                                std::slice::from_ref(&record.id),
+                                None,
+                            )?;
+                            for p in &all_paths {
+                                let _ = open_file_in_default_app(p);
+                            }
+                        }
+                    }
                     if json && save_to.is_some() {
                         let obj = serde_json::json!({
                             "memory": record,
@@ -1298,6 +1461,18 @@ fn main() -> Result<()> {
                 } else {
                     Vec::new()
                 };
+                if open {
+                    if save_to.is_some() {
+                        for p in &all_saved {
+                            let _ = open_file_in_default_app(p);
+                        }
+                    } else {
+                        let all_paths = lm.materialize_memories_attachments(&ids, None)?;
+                        for p in &all_paths {
+                            let _ = open_file_in_default_app(p);
+                        }
+                    }
+                }
                 let mut offset_idx = 0usize;
                 let mut json_items = Vec::new();
                 for record in records {
@@ -2207,6 +2382,19 @@ fn main() -> Result<()> {
 
         Commands::Version { json } => {
             CliView::render_version(json)?;
+        }
+
+        Commands::Docs {
+            port,
+            landing,
+            no_browser,
+        } => {
+            let options = lightmem::DocsOptions {
+                port,
+                open_landing: landing,
+                no_browser,
+            };
+            lightmem::serve_docs(options)?;
         }
 
         Commands::Uninstall {

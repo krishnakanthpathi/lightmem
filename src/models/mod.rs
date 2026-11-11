@@ -1,6 +1,7 @@
 pub mod identity;
 pub use identity::{
-    IdentityEntry, IdentityRegistry, MemoryContext, MemoryScope, ResolvedConnection,
+    inspect_vault_db, DefaultVaultStatus, IdentityEntry, IdentityRegistry, MemoryContext,
+    MemoryScope, ResolvedConnection, VaultConnectionStatus, VaultStatusOverview,
 };
 pub mod config;
 pub mod link;

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.4
+
+- Add `--open` flag on `lmem recall` and `lmem inspect` to materialize and open verified attachments directly in the system default application (`open` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows).
+- Restore native multimodal vector embeddings (`embeddinggemma-2` via Ollama `/api/embed` for images, video keyframes via `ffmpeg`, and audio clips >= 0.5s) and visual image similarity search via `lmem recall --image <path>` (`--img`).
+- Restore granular lowercase file-extension auto-tags (e.g., `#png`, `#mp4`) alongside media kind tags, plus batch and vault-wide SHA-256 duplicate attachment warnings (`find_attachments_by_sha256`).
+- Restore unified vault telemetry dashboard via `lmem status` (`lmem vaults`, `lmem identity status`) and Python SDK `vault_status()`.
+- Restore embedded offline documentation HTTP server via `lmem docs` (`lmem doc`, `lmem web`, `--port`, `--landing`, `--no-browser`) without any cloud sync dependencies.
+
 ## 0.7.3
 
 - Restore the clean pure-local architecture (`v0.5.3` baseline) for consistent single-machine usage across macOS and Linux.

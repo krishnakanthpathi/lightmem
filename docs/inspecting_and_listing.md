@@ -141,12 +141,15 @@ Output:
 /tmp/.lightmem_attachments/sample_schema.sql
 ```
 
-### Shell Automation & Piping
+### Shell Automation & Direct Opening (`--open`)
 ```bash
+# Open attachment directly in system default viewer
+lmem inspect 1ba8baf1 --open
+
 # View attachment contents
 cat $(lmem inspect 6d2c0d11 -p)
 
-# Open image attachment in system viewer
+# Open image attachment in system viewer via path substitution
 open $(lmem inspect 1ba8baf1 -p)
 ```
 

@@ -56,6 +56,7 @@ lmem remember "Architecture diagram" -f ./diagram.png --extract   # Opt-in: extr
 lmem inspect <MEMORY_ID> --save-to ./exported_files/              # Export SHA-256 verified binary attachment(s) back to disk
 lmem inspect <MEMORY_ID> --path                                   # Materialize verified attachment(s) and print ONLY absolute path(s) (alias: --paths, -p)
 lmem inspect <ID1> <ID2> --paths                                  # Print verified file paths across multiple memories (one path per line)
+lmem inspect <MEMORY_ID> --open                                   # Materialize and open attachment(s) immediately in default OS app
 
 # 1b. Conversational Ingestion & Observation (Extract candidate memories with confirmation)
 lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive review [y/n/a/q]
@@ -70,7 +71,9 @@ lmem observe chat.txt -r ollama:qwen2.5:3b             # Use LLM-assisted semant
 
 lmem recall "postgres port" -l 5
 lmem recall "ingress.png" --media image                # Filter recall by attachment media kind (image|audio|video|document|code|any)
+lmem recall --image ./query.png                        # Visual image-to-memory search (native multimodal embeddings e.g. embeddinggemma-2)
 lmem recall "itachi sharingan" -m video -l 1 --path    # Recall and print ONLY the verified file path(s) on disk
+lmem recall "itachi sharingan" -l 1 --open             # Recall attachment(s) and open immediately in system default app
 lmem list --media video --paths                        # List all video attachments and print ONLY their absolute file paths
 lmem list --media audio                                # List memories with audio attachments
 lmem recall "postgres port" -t fact --min-similarity 0.5 --json
@@ -148,6 +151,12 @@ lmem connect cursor                                # Deploy to Cursor (.cursor/r
 lmem connect all                                   # Deploy to all supported agent platforms
 lmem connect --list                                # Inspect detected agent platforms on the system
 lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
+
+# 11. Vault Dashboard, Identity Topology & Embedded Docs
+lmem status                                        # Visual dashboard of all managed vaults, active connections, and storage
+lmem vaults                                        # Alias for lmem status (or lmem identity status)
+lmem status --json                                 # Machine-readable vault and connection topology
+lmem docs                                          # Launch offline embedded docs HTTP server in foreground (aliases: doc, web)
 ```
 
 ---
@@ -232,11 +241,11 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 1. **Isolated Immutable BLOB Vault**:
    - Raw bytes are stored in `memory_attachments` (never bloating the `memories` table), protected by a `BEFORE UPDATE` SQLite trigger (`trg_attachments_immutable`) that blocks in-place tampering, verified by SHA-256 on every read/export, and enforced with `0600` owner-only file permissions.
    - Deleting a memory via `lmem forget <ID> --hard` cascades and purges its attachment BLOBs and materialized cache files automatically.
-2. **Metadata-First by Default, Opt-In Single-Model LLM Extraction (`--extract` / `-e`)**:
-   - By default (`lmem remember "caption" -f <file>`), no LLM or vision model is called: LightMem parses magic bytes, MIME type, media kind (`image`, `audio`, `video`, `document`, `code`, `archive`, `binary`), image/MP4 dimensions (`WxH`), WAV/MP4 duration (`s`), byte size, and SHA-256, and indexes all metadata into both FTS5 BM25 and the vector embedding.
+2. **Metadata-First by Default, Native Multimodal Embeddings & Opt-In LLM Extraction (`--extract` / `-e`)**:
+   - By default (`lmem remember "caption" -f <file>`), no LLM is called: LightMem parses magic bytes, MIME type, media kind (`image`, `audio`, `video`, `document`, `code`, `archive`, `binary`), image/MP4 dimensions (`WxH`), WAV/MP4 duration (`s`), byte size, and SHA-256, auto-tags both media kind (`#image`, `#video`) and lowercase extension (`#png`, `#mp4`), warns on duplicate SHA-256 blobs in batch/vault, and indexes everything into FTS5 BM25 + vector embeddings. When configured with a multimodal embedding model (`embeddinggemma-2`), images, video keyframes (via `ffmpeg`), and audio (>=0.5s) are embedded natively for visual/cross-modal `lmem recall --image <path>` search.
    - Only when `--extract` (`-e`) is explicitly passed (`lmem remember -f <file> --extract`), LightMem sends the attachment (or an automatically extracted JPEG keyframe for `.mp4`/`.mov`/`.mkv` videos via `ffmpeg`) to the single configured main LLM (`ollama:<model>` / OpenAI `/v1/chat/completions`) and appends the extracted description to the memory.
-3. **Printing Only Verified File Paths (`--path` / `--paths` / `-p`)**:
-   - Pass `--path` or `--paths` (`-p`) to `lmem inspect`, `lmem recall`, or `lmem list` to materialize SHA-256-verified attachment(s) into `~/.lightmem/attachments/` (or custom `-o <dir>`) and print **only** the absolute file path(s) (one per line, or JSON array with `--json`) — ideal for command substitution (`wallpaper "$(lmem -g recall 'itachi' -m video -l 1 --path)"`).
+3. **Printing Verified File Paths (`--path` / `-p`) & Direct Opening (`--open`)**:
+   - Pass `--path` or `--paths` (`-p`) to `lmem inspect`, `lmem recall`, or `lmem list` to materialize SHA-256-verified attachment(s) into `~/.lightmem/attachments/` (or custom `-o <dir>`) and print **only** the absolute file path(s) (one per line, or JSON array with `--json`) — ideal for command substitution (`wallpaper "$(lmem -g recall 'itachi' -m video -l 1 --path)"`). Pass `--open` to `lmem recall` or `lmem inspect` to launch verified attachments directly in the system default application.
 
 ---
 
@@ -279,7 +288,7 @@ LightMem stores raw files directly inside an isolated SQLite `memory_attachments
 
 When a harness supplies a registered connection, pass `--connection <id>` on every memory command (or set `LIGHTMEM_CONNECTION`). Inspect `lmem --connection <id> context --json` before writing. Use the selected user/project scope for shared decisions, `--scope user` for personal preferences, and `--scope agent` for dedicated agent context. Each command uses one vault; query other scopes explicitly when their context is needed. Use `--session <id>` when the harness supplies a session ID. Never combine a connection with `--db`, `LIGHTMEM_DB`, or `--global`.
 
-Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` to inspect bindings. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.
+Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` or `lmem status` (`lmem vaults`, `lmem identity status`) to inspect bindings and vault storage telemetry. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.
 
 ---
 

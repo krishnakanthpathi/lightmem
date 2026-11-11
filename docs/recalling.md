@@ -7,7 +7,7 @@ Command-driven reference for hybrid keyword and semantic memory retrieval in Lig
 ## 1. Syntax
 
 ```bash
-lmem recall [OPTIONS] <QUERY>
+lmem recall [OPTIONS] [QUERY]
 ```
 
 ---
@@ -100,9 +100,15 @@ Output:
 /tmp/.lightmem_attachments/architecture.png
 ```
 
-### Shell Piping & Automation
+### Shell Piping, Image Query & Direct Opening
 ```bash
-# Open image directly
+# Open image directly in system default viewer (--open)
+lmem recall "architecture diagram" -l 1 --open
+
+# Visual image similarity search (on multimodal backends e.g. embeddinggemma-2)
+lmem recall --image ./reference.png
+
+# Open image via path substitution
 open $(lmem recall "architecture diagram" -m image -p -l 1)
 
 # Inspect SQL file content

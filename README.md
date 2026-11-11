@@ -22,6 +22,8 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - [Identity-Aware Connections](#identity-aware-connections-v040)
 - [Single-File DB & Media Transfer Bundles](#single-file-db--media-transfer-bundles-v050)
 - [Knowledge Graph Entities](#knowledge-graph-entities-v052)
+- [Multimodal Embeddings & Direct Media Opening](#multimodal-embeddings--direct-media-opening-v074)
+- [Embedded Local Documentation Server](#-embedded-local-documentation-server-lmem-docs)
 - [Model Context Protocol (MCP) Server](#-model-context-protocol-mcp-server)
 - [Core CLI Reference](#-core-cli-reference)
 - [Switching Rerankers & Embedding Models](#-switching-rerankers--embedding-models)
@@ -87,6 +89,9 @@ $env:LIGHTMEM_SKIP_MODELS=1; irm https://raw.githubusercontent.com/krishnakanthp
 git clone https://github.com/krishnakanthpathi/lightmem.git
 cd lightmem
 cargo install --path . --force
+
+# Or install directly into ~/.local/bin:
+cargo install --path . --root ~/.local --force
 ```
 
 ---
@@ -178,6 +183,8 @@ lmem identity connection-add codex --user alice --agent coding --harness codex -
 lmem --connection agy --session chat-123 remember "Decision: use SQLite WAL" -t decision
 lmem --connection codex recall "database decision"
 lmem --connection codex context --json
+lmem status                          # Visual dashboard of all managed vaults, active tools, and storage
+lmem vaults                          # Alias for lmem status (or lmem identity status)
 lmem --connection codex --scope agent remember "Current debugging checkpoint"
 lmem --connection agy connect
 lmem --connection agy connect --mcp
@@ -215,7 +222,7 @@ print(saved.context)
 print(memory.context())
 ```
 
-Python also exposes `register_harness`, `identities`, `connection_info`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
+Python also exposes `register_harness`, `identities`, `connection_info`, `vault_status`, and `connect(mcp=True)`. Use different connection IDs for multiple harnesses while retaining the same user/project to share decisions.
 
 ---
 
@@ -272,6 +279,38 @@ mem = lm.remember("PostgreSQL primary runs on port 5432")
 for entity in mem.entities:
     print(f"Entity: {entity.name} = {entity.val}")
 ```
+
+---
+
+## Multimodal Embeddings & Direct Media Opening (v0.7.4)
+
+- **Native Multimodal Embeddings (`embeddinggemma-2`)**: Configure `embeddinggemma-2` with Ollama (`lmem config --backend ollama --model embeddinggemma-2`) to embed images, video keyframes (extracted via `ffmpeg`), and audio clips natively via `/api/embed`.
+- **Visual Image Query (`lmem recall --image`)**: Search stored memories by image similarity with optional text query: `lmem recall --image ./reference.png`.
+- **Direct Media Opening (`--open`)**: Launch recalled or inspected attachments immediately in your system default viewer (`open` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows): `lmem recall "diagram" --open` or `lmem inspect <ID> --open`.
+- **Granular Format Tags & Attachment Dedup**: Storing attachments auto-tags both media kind (`#image`, `#video`) and lowercase extension (`#png`, `#mp4`), while alerting on duplicate SHA-256 blobs in batch or vault.
+- **Unified Vault Telemetry Dashboard (`lmem status` / `vaults`)**: Inspect default and connection-scoped vaults, memory counts, and disk paths via `lmem status` (`lmem vaults`, `lmem identity status`, or Python `lm.vault_status()`).
+
+---
+
+## 📖 Embedded Local Documentation Server (`lmem docs`)
+
+Serve complete technical documentation and the landing page 100% offline directly from the standalone binary without external web servers or background daemons:
+
+```bash
+# Launch documentation server and open system browser automatically
+lmem docs                            # Aliases: lmem doc, lmem web
+
+# Bind to a custom port or open landing page
+lmem docs --port 8085
+lmem docs --landing
+
+# Run headlessly without launching the browser
+lmem docs --no-browser
+```
+
+- **Endpoints**: `http://localhost:8080/` (landing page) and `http://localhost:8080/docs` (full technical docs).
+- **Embedded Assets**: HTML, CSS, JavaScript, and icons are compiled directly into the `lmem` binary.
+- **Zero Daemons**: Runs strictly in the foreground and terminates cleanly on `Ctrl+C`.
 
 ---
 
@@ -340,6 +379,9 @@ lmem inspect <ID> --save-to ./exported/
 
 # Materialize & print ONLY absolute file path(s) on disk (one per line)
 lmem inspect <ID1> <ID2> --paths
+
+# Open inspected attachment(s) immediately in default OS app
+lmem inspect <ID> --open
 ```
 
 ### 2. Conversational Observation & Ingestion (`lmem observe`)
@@ -362,7 +404,9 @@ lmem recall "postgres port" --limit 5
 
 # Recall with media filter (image | audio | video | document | any)
 lmem recall "architecture diagram" -m image
+lmem recall --image ./diagram.png                     # Visual image-to-memory search (embeddinggemma-2)
 lmem recall "sharingan" -m video -l 1 --path          # Materialize & print ONLY verified file path(s)
+lmem recall "sharingan" -l 1 --open                   # Recall & open attachment directly in default viewer
 
 # Point-in-time and single-day temporal recall
 lmem recall "who is kk" --date 2026-09-21              # Created or updated on that exact UTC date
@@ -434,8 +478,10 @@ lmem export --bundle -o backup.zip
 lmem connect all                      # Antigravity, Codex, Hermes, Cursor, Claude
 lmem connect --mcp                    # Auto-configure MCP in Claude Desktop, Cursor, Antigravity
 
-# Vault telemetry & disk storage statistics
+# Vault telemetry, connection overview & offline embedded docs
 lmem stats
+lmem status                                           # Visual dashboard of all managed vaults & connections
+lmem docs                                             # Serve offline docs at http://localhost:8080/docs
 ```
 
 ---

@@ -12,7 +12,8 @@ pub use services::{bundle, connect, embeddings, exporter, importer, observer, re
 // Primary SDK Re-exports
 pub use controllers::{LightMem, MemoryController};
 pub use models::identity::{
-    IdentityEntry, IdentityRegistry, MemoryContext, MemoryScope, ResolvedConnection,
+    inspect_vault_db, DefaultVaultStatus, IdentityEntry, IdentityRegistry, MemoryContext,
+    MemoryScope, ResolvedConnection, VaultConnectionStatus, VaultStatusOverview,
 };
 pub use models::{
     compute_sha256_hex, decode_base64, detect_memory_conflict,
@@ -25,11 +26,12 @@ pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]
 pub use services::McpServer;
 pub use services::{
-    AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService,
-    BundleStats, ConnectResult, ConnectService, EmbeddingProvider, Exporter, HashEmbeddingProvider,
-    HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LlmReranker, MemoryImporter,
-    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
-    OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, Top1Reranker,
+    serve_docs, AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest,
+    BundleService, BundleStats, ConnectResult, ConnectService, DocsOptions, EmbeddingProvider,
+    Exporter, HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter,
+    LlmReranker, MemoryImporter, MultimodalInput, ObservedCandidate, ObserverService,
+    OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider,
+    OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, Top1Reranker,
 };
 
 pub use views::CliView;

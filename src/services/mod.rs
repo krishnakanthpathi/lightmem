@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod connect;
+pub mod docs_server;
 pub mod embeddings;
 pub mod exporter;
 pub mod graph_view;
@@ -14,12 +15,13 @@ pub use bundle::{
     BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService, BundleStats,
 };
 pub use connect::{ConnectResult, ConnectService, PlatformInfo};
+pub use docs_server::{serve_docs, DocsOptions};
 #[cfg(feature = "mcp")]
 pub use mcp::McpServer;
 
 pub use embeddings::{
-    cosine_similarity, EmbeddingProvider, HashEmbeddingProvider, OllamaEmbeddingProvider,
-    OnnxEmbeddingProvider,
+    cosine_similarity, EmbeddingProvider, HashEmbeddingProvider, MultimodalInput,
+    OllamaEmbeddingProvider, OnnxEmbeddingProvider,
 };
 pub use exporter::Exporter;
 pub use graph_view::render_terminal;

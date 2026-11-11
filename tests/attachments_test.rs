@@ -916,3 +916,221 @@ fn test_qa_regressions_attachments_webp_dedup_export_conflict_and_cli() {
         "OKF v2 export/import must preserve explicit memory_links"
     );
 }
+
+#[test]
+fn test_multimodal_embedding_and_tag_granularity() {
+    use lightmem::{EmbeddingProvider, MultimodalInput};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct MockMultimodalEmbedder {
+        saw_image: Arc<AtomicBool>,
+    }
+
+    impl EmbeddingProvider for MockMultimodalEmbedder {
+        fn name(&self) -> &str {
+            "mock-multimodal"
+        }
+        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5, 0.5, 0.5, 0.5])
+        }
+        fn supports_multimodal(&self) -> bool {
+            true
+        }
+        fn embed_multimodal(&self, input: &MultimodalInput<'_>) -> anyhow::Result<Vec<f32>> {
+            if input.image_b64.is_some() {
+                self.saw_image.store(true, Ordering::SeqCst);
+                Ok(vec![1.0, 0.0, 0.0, 0.0])
+            } else {
+                Ok(vec![0.0, 1.0, 0.0, 0.0])
+            }
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("multimodal_vault.db");
+    let saw_image = Arc::new(AtomicBool::new(false));
+    let embedder = MockMultimodalEmbedder {
+        saw_image: saw_image.clone(),
+    };
+
+    let png_path = dir.path().join("system_architecture.png");
+    let png_bytes = make_fake_png(800, 600);
+    std::fs::write(&png_path, &png_bytes).unwrap();
+
+    let storage = lightmem::Storage::open(&db_path).unwrap();
+    let att = lightmem::AttachmentInput::from_path(&png_path).unwrap();
+
+    let memory = lightmem::MemoryRecord::new(
+        MemoryType::Artifact,
+        "Architecture Overview".to_string(),
+        "Core service topology diagram".to_string(),
+        vec!["architecture".to_string()],
+        0.95,
+        None,
+    );
+
+    // Insert memory with attachment and mock multimodal embedder
+    let stored = storage
+        .insert_indexed_with_attachments(
+            &memory,
+            &[att],
+            &embedder,
+            "mock-multimodal-identity",
+            false,
+        )
+        .unwrap();
+
+    assert!(
+        saw_image.load(Ordering::SeqCst),
+        "Multimodal embedder must receive image_b64 for image attachment"
+    );
+    assert_eq!(stored.attachments.len(), 1);
+
+    // Verify image-only multimodal search against mock multimodal embedder
+    let img_b64 = "ZmFrZQ==";
+    let mm_hits = lightmem::HybridSearchEngine::search_multimodal_with_identity(
+        &storage,
+        &embedder,
+        &MultimodalInput::with_image("", img_b64),
+        None,
+        None,
+        None,
+        5,
+        None,
+        Some("mock-multimodal-identity"),
+    )
+    .unwrap();
+    assert_eq!(mm_hits.len(), 1);
+    assert_eq!(mm_hits[0].memory.id, stored.id);
+
+    // Verify tag granularity via MemoryController on fresh db
+    let db_path2 = dir.path().join("tags_vault.db");
+    let lm = LightMem::open_at(&db_path2, hash_config()).unwrap();
+    let (mem_with_tags, _) = lm
+        .remember_with_attachments(
+            Some("Detailed diagram"),
+            &[png_path],
+            false,
+            None,
+            None,
+            None,
+            vec![],
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        mem_with_tags.tags.contains(&"image".to_string()),
+        "Must have media_kind tag"
+    );
+    assert!(
+        mem_with_tags.tags.contains(&"png".to_string()),
+        "Must have format extension tag"
+    );
+
+    // Verify image-only recall gives clear error on non-multimodal hash backend
+    let mm_err = lm.recall_multimodal_expanded(
+        &MultimodalInput::with_image("", img_b64),
+        None,
+        None,
+        None,
+        5,
+        None,
+        false,
+    );
+    assert!(
+        mm_err.is_err(),
+        "Image-only search on non-multimodal backend should fail with clear guidance"
+    );
+}
+
+#[test]
+fn test_attachment_deduplication_warning_and_skipping() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("dedup_vault.db");
+    let lm = LightMem::open_at(&db_path, hash_config()).unwrap();
+
+    let img_a = dir.path().join("diagram_a.png");
+    std::fs::write(&img_a, make_fake_png(32, 32)).unwrap();
+
+    let img_b = dir.path().join("diagram_b.png");
+    std::fs::copy(&img_a, &img_b).unwrap();
+
+    // 1. First upload emits no duplicate warning
+    let (rec1, _, warn1) = lm
+        .remember_with_attachments_and_entities(
+            Some("First memory with diagram"),
+            std::slice::from_ref(&img_a),
+            false,
+            false,
+            None,
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    assert!(
+        warn1.is_none(),
+        "First upload should have no duplicate warnings"
+    );
+    assert_eq!(rec1.attachments.len(), 1);
+
+    // 2. Second upload with identical SHA-256 emits vault-level duplicate warning
+    let (_rec2, _, warn2) = lm
+        .remember_with_attachments_and_entities(
+            Some("Second memory referencing same diagram"),
+            std::slice::from_ref(&img_b),
+            false,
+            false,
+            None,
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    let w_str = warn2.expect("Uploading existing SHA-256 should emit a deduplication warning");
+    assert!(
+        w_str.contains("already exists in vault") && w_str.contains("deduplicated"),
+        "Warning was: {}",
+        w_str
+    );
+
+    // 3. Intra-batch duplicates skip redundant blob and warn
+    let img_c = dir.path().join("diagram_c.png");
+    std::fs::copy(&img_a, &img_c).unwrap();
+    let (rec3, _, warn3) = lm
+        .remember_with_attachments_and_entities(
+            Some("Third memory with batch duplicates"),
+            &[img_a, img_c],
+            false,
+            false,
+            None,
+            Some(MemoryType::Fact),
+            None,
+            vec![],
+            Some(0.9),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        rec3.attachments.len(),
+        1,
+        "Redundant blob in same batch must be skipped"
+    );
+    let w3_str = warn3.expect("Intra-batch duplicate should emit warning");
+    assert!(w3_str.contains("duplicate in batch") && w3_str.contains("skipping redundant blob"));
+}

@@ -172,7 +172,42 @@ impl HybridSearchEngine {
         min_similarity: Option<f32>,
         identity: Option<&str>,
     ) -> Result<Vec<ScoredMemory>> {
-        anyhow::ensure!(!query.trim().is_empty(), "Search query cannot be blank");
+        let input = crate::services::embeddings::MultimodalInput::text_only(query);
+        Self::search_multimodal_with_identity(
+            storage,
+            embedder,
+            &input,
+            category,
+            status,
+            as_of,
+            limit,
+            min_similarity,
+            identity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_multimodal_with_identity(
+        storage: &Storage,
+        embedder: &dyn EmbeddingProvider,
+        input: &crate::services::embeddings::MultimodalInput<'_>,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        limit: usize,
+        min_similarity: Option<f32>,
+        identity: Option<&str>,
+    ) -> Result<Vec<ScoredMemory>> {
+        let has_text = !input.text.trim().is_empty();
+        let has_media = input.image_b64.is_some() || input.audio_b64.is_some();
+        anyhow::ensure!(
+            has_text || has_media,
+            "Search query or image cannot be blank"
+        );
+        anyhow::ensure!(
+            has_text || !has_media || embedder.supports_multimodal(),
+            "Image-only recall (--image without a text query) requires a multimodal embedding backend (e.g. Ollama 'embeddinggemma-2'). Provide a text query alongside --image or configure a multimodal model."
+        );
         if let Some(min) = min_similarity {
             anyhow::ensure!(
                 min.is_finite() && (0.0..=1.0).contains(&min),
@@ -182,7 +217,7 @@ impl HybridSearchEngine {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let query_tokens = Self::extract_query_tokens(query);
+        let query_tokens = Self::extract_query_tokens(input.text);
         let is_bare_acronym_query = query_tokens.len() == 1
             && (2..=5).contains(&query_tokens[0].len())
             && !Self::NON_INITIAL_WORDS.contains(&query_tokens[0].as_str());
@@ -193,10 +228,13 @@ impl HybridSearchEngine {
         };
 
         // 1. BM25 Search via FTS5
-        let bm25_results = storage.search_bm25(query, category, status, as_of, fetch_limit)?;
         let mut bm25_ranks: HashMap<String, usize> = HashMap::new();
-        for (rank_idx, (id, _)) in bm25_results.iter().enumerate() {
-            bm25_ranks.insert(id.clone(), rank_idx + 1);
+        if has_text {
+            let bm25_results =
+                storage.search_bm25(input.text, category, status, as_of, fetch_limit)?;
+            for (rank_idx, (id, _)) in bm25_results.iter().enumerate() {
+                bm25_ranks.insert(id.clone(), rank_idx + 1);
+            }
         }
 
         // 2. Vector Cosine Search
@@ -204,7 +242,9 @@ impl HybridSearchEngine {
         let mut vector_scores: HashMap<String, f32> = HashMap::new();
 
         {
-            let query_vector = embedder.embed(query).context("Query embedding failed")?;
+            let query_vector = embedder
+                .embed_multimodal(input)
+                .context("Query embedding failed")?;
             crate::embeddings::validate_vector(&query_vector)?;
             let candidates =
                 storage.get_candidate_vectors_checked(category, status, as_of, identity)?;

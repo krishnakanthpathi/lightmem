@@ -122,7 +122,39 @@ impl LightMem {
             let embedder = self.embedder()?;
             for batch in memories.chunks(32) {
                 let texts: Vec<String> = batch.iter().map(MemoryRecord::to_card_text).collect();
-                let embeddings = embedder.embed_batch(&texts)?;
+                let embeddings = if embedder.supports_multimodal() {
+                    let mut media_payloads = Vec::with_capacity(batch.len());
+                    for rec in batch {
+                        let media = if !rec.attachments.is_empty() {
+                            self.storage.primary_multimodal_payload(&rec.id)?
+                        } else {
+                            None
+                        };
+                        media_payloads.push(media);
+                    }
+                    let inputs: Vec<crate::services::embeddings::MultimodalInput> = texts
+                        .iter()
+                        .zip(&media_payloads)
+                        .map(|(text, media)| match media.as_ref() {
+                            Some((Some(img), _)) => {
+                                crate::services::embeddings::MultimodalInput::with_image(
+                                    text,
+                                    img.as_str(),
+                                )
+                            }
+                            Some((_, Some(aud))) => {
+                                crate::services::embeddings::MultimodalInput::with_audio(
+                                    text,
+                                    aud.as_str(),
+                                )
+                            }
+                            _ => crate::services::embeddings::MultimodalInput::text_only(text),
+                        })
+                        .collect();
+                    embedder.embed_multimodal_batch(&inputs)?
+                } else {
+                    embedder.embed_batch(&texts)?
+                };
                 anyhow::ensure!(
                     embeddings.len() == batch.len(),
                     "Embedding provider returned the wrong batch size"
@@ -315,7 +347,7 @@ impl LightMem {
     }
 
     /// Store a memory with optional file attachments and optional LLM entity extraction.
-    /// Returns the stored record, detected conflicts, and an optional warning if entity extraction failed.
+    /// Returns the stored record, detected conflicts, and an optional warning if entity extraction failed or duplicates were found.
     #[allow(clippy::too_many_arguments)]
     pub fn remember_with_attachments_and_entities(
         &self,
@@ -333,17 +365,45 @@ impl LightMem {
         provenance: Option<String>,
     ) -> Result<(MemoryRecord, Vec<MemoryConflict>, Option<String>)> {
         let mut attachment_inputs = Vec::with_capacity(files.len());
-        let mut seen_sha = HashSet::new();
+        let mut seen_batch_sha = HashSet::new();
+        let mut warnings = Vec::new();
         for path in files {
             let att = AttachmentInput::from_path(path)?;
-            if !seen_sha.insert(att.metadata.sha256.clone()) {
+            if !seen_batch_sha.insert(att.metadata.sha256.clone()) {
+                warnings.push(format!(
+                    "Attachment '{}' duplicate in batch (sha256:{}) - skipping redundant blob.",
+                    att.metadata.filename,
+                    &att.metadata.sha256[..att.metadata.sha256.len().min(8)]
+                ));
                 continue;
+            }
+            if let Ok(existing_refs) = self
+                .storage
+                .find_attachments_by_sha256(&att.metadata.sha256)
+            {
+                if !existing_refs.is_empty() {
+                    let (ref ex_mem_id, ref ex_filename) = existing_refs[0];
+                    let short_mem: String = ex_mem_id.chars().take(8).collect();
+                    warnings.push(format!(
+                        "Attachment '{}' already exists in vault ('{}', memory {}) - deduplicated.",
+                        att.metadata.filename, ex_filename, short_mem
+                    ));
+                }
             }
             if !tags
                 .iter()
                 .any(|t| t.eq_ignore_ascii_case(&att.metadata.media_kind))
             {
                 tags.push(att.metadata.media_kind.clone());
+            }
+            if let Some(ext) = std::path::Path::new(&att.metadata.filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+            {
+                if !ext.is_empty() && !tags.iter().any(|t| t.eq_ignore_ascii_case(&ext)) {
+                    tags.push(ext);
+                }
             }
             attachment_inputs.push(att);
         }
@@ -564,7 +624,17 @@ impl LightMem {
             .storage
             .auto_link_memory(&stored.id, &format!("{}\n{}", stored.title, stored.content));
 
-        Ok((stored, conflicts, entity_warning))
+        let mut final_warnings = warnings;
+        if let Some(ew) = entity_warning {
+            final_warnings.push(ew);
+        }
+        let warning_output = if final_warnings.is_empty() {
+            None
+        } else {
+            Some(final_warnings.join(" | "))
+        };
+
+        Ok((stored, conflicts, warning_output))
     }
 
     /// Scan active memories by finding each memory's closest vector neighbor and checking overlap.
@@ -748,8 +818,56 @@ impl LightMem {
         min_similarity: Option<f32>,
         multi_hop: bool,
     ) -> Result<Vec<ScoredMemory>> {
-        let base_results =
-            self.recall_with_date(query, category, as_of, on_date, limit, min_similarity)?;
+        let input = crate::services::embeddings::MultimodalInput::text_only(query);
+        self.recall_multimodal_expanded(
+            &input,
+            category,
+            as_of,
+            on_date,
+            limit,
+            min_similarity,
+            multi_hop,
+        )
+    }
+
+    /// Multimodal Hybrid Recall (text + optional image/audio) with optional 1-hop graph expansion
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_multimodal_expanded(
+        &self,
+        input: &crate::services::embeddings::MultimodalInput<'_>,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        limit: usize,
+        min_similarity: Option<f32>,
+        multi_hop: bool,
+    ) -> Result<Vec<ScoredMemory>> {
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let fetch_limit = if on_date.is_some() {
+            limit.max(250)
+        } else {
+            limit
+        };
+        let embedder = self.embedder()?;
+        let mut base_results = HybridSearchEngine::search_multimodal_with_identity(
+            &self.storage,
+            embedder.as_ref(),
+            input,
+            category,
+            Some(MemoryStatus::Active),
+            as_of,
+            fetch_limit,
+            min_similarity,
+            Some(&self.embedding_identity),
+        )?;
+        if let Some(target_day) = on_date {
+            base_results.retain(|r| {
+                r.memory.created_at.date_naive() == target_day
+                    || r.memory.updated_at.date_naive() == target_day
+            });
+            base_results.truncate(limit);
+        }
         if !multi_hop || base_results.is_empty() {
             return Ok(base_results);
         }

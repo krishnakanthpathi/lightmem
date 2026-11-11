@@ -179,10 +179,11 @@ lmem remember "UI demo recording" -f ./demo.mp4
 lmem remember "Release assets" -f ./app.tar.gz -f ./checksums.txt
 ```
 * Stored inside isolated SQLite `attachments` table (`0600` permissions).
-* Computes SHA-256 digest for deduplication and tamper detection.
+* Computes SHA-256 digest for batch/vault deduplication warnings and tamper detection.
 * Extracts metadata: MIME type, file size, image/video dimensions, media kind.
 * Inferred category: `artifact`.
-* Automatically appends media tag (e.g. `#image`, `#video`, `#code`).
+* Automatically appends media kind tag (e.g. `#image`, `#video`, `#code`) and lowercase format extension tag (e.g. `#png`, `#mp4`, `#sql`).
+* When configured with a multimodal embedding model (`embeddinggemma-2`), natively indexes images, video keyframes (`ffmpeg`), and audio clips (>= 0.5s).
 
 ### LLM Visual / Document Extraction (`-e, --extract`)
 ```bash
