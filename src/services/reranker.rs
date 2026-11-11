@@ -1792,6 +1792,36 @@ mod tests {
         assert!(parse_and_ground_ollama_answer_with_mode(abstained, &gated, true).is_none());
     }
 
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        use std::io::{BufRead, BufReader};
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut reader = BufReader::new(stream);
+        let mut headers = String::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    headers.push_str(&line);
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = v.trim().parse::<usize>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+        }
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            let _ = reader.read_exact(&mut body);
+        }
+        format!("{}{}", headers, String::from_utf8_lossy(&body))
+    }
+
     #[test]
     fn test_ollama_resolve_model_prefers_bonsai_over_cloud_on_localhost() {
         use std::io::Write;
@@ -1801,8 +1831,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 2048];
-                let _ = stream.read(&mut buf);
+                let _ = read_http_request(&mut stream);
                 let body = r#"{"object":"list","data":[{"id":"gemma4:31b-cloud","object":"model"},{"id":"embeddinggemma-2:latest","object":"model"},{"id":"qwen2.5:3b","object":"model"},{"id":"bonsai-2:2b","object":"model"}]}"#;
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1811,7 +1840,6 @@ mod tests {
                 );
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
-                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
         });
 
@@ -1837,9 +1865,7 @@ mod tests {
 
         let handle = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 8192];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
+                let req = read_http_request(&mut stream);
                 if req.contains("\"reasoning_effort\":\"none\"") {
                     saw_reasoning_clone.store(true, Ordering::SeqCst);
                 }
@@ -1854,7 +1880,6 @@ mod tests {
                 );
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
-                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
         });
 

@@ -1103,7 +1103,9 @@ fn e2e_cli_multimodal_recall_image_and_live_docs_server() {
         while !stop_srv.load(std::sync::atomic::Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let mut reader = BufReader::new(&mut stream);
                     let mut content_len = 0usize;
                     let mut line = String::new();
                     loop {
@@ -1115,13 +1117,16 @@ fn e2e_cli_multimodal_recall_image_and_live_docs_server() {
                             break;
                         }
                         if let Some((k, v)) = line.split_once(':') {
-                            if k.eq_ignore_ascii_case("content-length") {
+                            if k.trim().eq_ignore_ascii_case("content-length") {
                                 content_len = v.trim().parse().unwrap_or(0);
                             }
                         }
                     }
                     let mut body_buf = vec![0u8; content_len];
-                    let _ = reader.read_exact(&mut body_buf);
+                    if content_len > 0 {
+                        let _ = reader.read_exact(&mut body_buf);
+                    }
+                    drop(reader);
                     let req_json: serde_json::Value =
                         serde_json::from_slice(&body_buf).unwrap_or_default();
                     let vec_for_item = |item: &serde_json::Value| -> Vec<f32> {

@@ -128,13 +128,36 @@ fn approved_model_change_commits_new_vectors_then_saves_config() {
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    use std::io::BufRead;
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
-                    let mut bytes = [0; 4096];
-                    let _ = stream.read(&mut bytes).unwrap();
+                    let mut reader = std::io::BufReader::new(&mut stream);
+                    let mut content_len = 0usize;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0
+                            || line == "\r\n"
+                            || line == "\n"
+                        {
+                            break;
+                        }
+                        if let Some((k, v)) = line.split_once(':') {
+                            if k.trim().eq_ignore_ascii_case("content-length") {
+                                content_len = v.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                    if content_len > 0 {
+                        let mut body_buf = vec![0u8; content_len];
+                        let _ = reader.read_exact(&mut body_buf);
+                    }
+                    drop(reader);
                     let body = r#"{"embedding":[1.0,0.0]}"#;
                     write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+                    let _ = stream.flush();
                     break;
                 }
                 Err(e)

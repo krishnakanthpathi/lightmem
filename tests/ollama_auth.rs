@@ -2,11 +2,41 @@ use lightmem::{
     EmbeddingProvider, MemoryRecord, MemoryType, OllamaEmbeddingProvider, OllamaReranker, Reranker,
     ScoredMemory,
 };
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
+
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut reader = BufReader::new(stream);
+    let mut headers = String::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                headers.push_str(&line);
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        let _ = reader.read_exact(&mut body);
+    }
+    format!("{}{}", headers, String::from_utf8_lossy(&body))
+}
 
 #[test]
 fn test_ollama_embedding_provider_sends_authorization_header() {
@@ -17,9 +47,7 @@ fn test_ollama_embedding_provider_sends_authorization_header() {
 
     let handle = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
+            let req = read_http_request(&mut stream);
             if req.contains("Authorization: Bearer secret-test-token-42") {
                 auth_received_clone.store(true, Ordering::SeqCst);
             }
@@ -31,7 +59,6 @@ fn test_ollama_embedding_provider_sends_authorization_header() {
             );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
-            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
 
@@ -59,9 +86,7 @@ fn test_ollama_reranker_sends_authorization_header() {
 
     let handle = thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
+            let req = read_http_request(&mut stream);
             if req.contains("Authorization: Bearer reranker-secret-99") {
                 auth_received_clone.store(true, Ordering::SeqCst);
             }
@@ -73,7 +98,6 @@ fn test_ollama_reranker_sends_authorization_header() {
             );
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
-            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.7
+
+- Fix loopback HTTP mock servers across Ollama unit and integration tests (`reranker.rs`, `ollama_auth.rs`, `cli_migration.rs`, `func_integrity_services.rs`) to frame complete HTTP headers + `Content-Length` bodies before replying, eliminating the TCP split-read race that broke `v0.7.6` CI (`exit 101`) so macOS 15 ARM64 binaries and PyPI wheels publish cleanly.
+- Harden knowledge-graph link visibility on soft forget (`status = 'expired'`): `get_links_for_memory` (`lmem inspect`), `traverse_multi_hop` (`lmem related`), and `get_graph_snapshot` (`lmem graph`) now filter out expired endpoints and prevent expired nodes from bridging multi-hop neighborhoods, while preserving lossless `all_links()` / `export --json` backups until `--hard` cascade deletion.
+- Add regression test `test_forget_soft_and_hard_prunes_links_without_error` verifying error-free link pruning across both soft and hard forget paths.
+
 ## 0.7.6
 
 - Update GitHub Actions macOS build runners from retired `macos-14` to `macos-15` in `release.yml` and `pypi.yml` to unblock `aarch64-apple-darwin` binaries and `macosx_11_0_arm64` PyPI wheels.

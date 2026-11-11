@@ -16,9 +16,39 @@ use lightmem::services::{
     OllamaReranker, OnnxQaReranker, Reranker, Top1Reranker,
 };
 use lightmem::Storage;
-use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 use tempfile::tempdir;
+
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut reader = BufReader::new(stream);
+    let mut headers = String::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                headers.push_str(&line);
+                if line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        let _ = reader.read_exact(&mut body);
+    }
+    format!("{}{}", headers, String::from_utf8_lossy(&body))
+}
 
 fn make_mem(id: &str, title: &str, content: &str, cat: MemoryType) -> MemoryRecord {
     let mut m = MemoryRecord::new(
@@ -86,9 +116,7 @@ fn func_and_integrity_ollama_embedding_provider_fallback_and_empty_error() {
     let handle = std::thread::spawn(move || {
         for step in 0..3 {
             if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
+                let req = read_http_request(&mut stream);
                 let resp = match step {
                     0 => {
                         assert!(req.contains("POST /api/embeddings"));
@@ -115,7 +143,6 @@ fn func_and_integrity_ollama_embedding_provider_fallback_and_empty_error() {
                 };
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
-                let _ = stream.shutdown(std::net::Shutdown::Both);
             }
         }
     });
@@ -261,8 +288,7 @@ fn integrity_reranker_low_score_gating_and_hallucination_rejection() {
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            let _ = read_http_request(&mut stream);
             let body = r#"{"choices":[{"message":{"content":"{\"answer\":\"hallucinated_9999\",\"memory_index\":0,\"confidence\":0.99}"}}],"response":"{\"answer\":\"hallucinated_9999\",\"memory_index\":0,\"confidence\":0.99}"}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -271,7 +297,6 @@ fn integrity_reranker_low_score_gating_and_hallucination_rejection() {
             );
             let _ = stream.write_all(resp.as_bytes());
             let _ = stream.flush();
-            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     });
 

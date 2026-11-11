@@ -1517,14 +1517,31 @@ impl Storage {
 
     pub fn get_links_for_memory(&self, memory_term: &str) -> Result<Vec<MemoryLink>> {
         let conn = self.conn.lock().unwrap();
+        let _ = expire_due_conn(&conn);
         let id = resolve_id_or_title(&conn, memory_term)?
             .with_context(|| format!("Memory '{}' not found", memory_term))?;
-        let mut stmt = conn.prepare(
+        let is_active: bool = conn
+            .query_row(
+                "SELECT status = 'active' FROM memories WHERE id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let sql = if is_active {
+            "SELECT l.source_id, l.target_id, l.relation, l.weight, l.created_at
+             FROM memory_links l
+             JOIN memories s ON l.source_id = s.id
+             JOIN memories t ON l.target_id = t.id
+             WHERE (l.source_id = ?1 OR l.target_id = ?1)
+               AND s.status = 'active' AND t.status = 'active'
+             ORDER BY l.created_at DESC"
+        } else {
             "SELECT source_id, target_id, relation, weight, created_at
              FROM memory_links
              WHERE source_id = ?1 OR target_id = ?1
-             ORDER BY created_at DESC",
-        )?;
+             ORDER BY created_at DESC"
+        };
+        let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map([id], |r| {
             let created_at_str: String = r.get(4)?;
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
@@ -1551,6 +1568,16 @@ impl Storage {
         let Some(start_id) = resolve_id_or_title(&conn, start_term)? else {
             return Ok(Vec::new());
         };
+        let start_active: bool = conn
+            .query_row(
+                "SELECT status = 'active' FROM memories WHERE id = ?1",
+                [&start_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !start_active {
+            return Ok(Vec::new());
+        }
 
         let max_hops = max_hops.clamp(1, 10);
         let mut visited = std::collections::HashSet::new();
@@ -1644,6 +1671,19 @@ impl Storage {
         let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(focus) = focus_term
         {
             if let Some(start_id) = resolve_id_or_title(&conn, focus)? {
+                let start_active: bool = conn
+                    .query_row(
+                        "SELECT status = 'active' FROM memories WHERE id = ?1",
+                        [&start_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(false);
+                if !start_active {
+                    return Ok(GraphSnapshot {
+                        nodes: Vec::new(),
+                        edges: Vec::new(),
+                    });
+                }
                 let hops = max_hops.unwrap_or(2).clamp(1, 10);
                 let mut set = std::collections::HashSet::new();
                 set.insert(start_id.clone());
@@ -1655,9 +1695,15 @@ impl Storage {
                     }
                     let mut stmt = conn.prepare(
                         r#"
-                        SELECT target_id FROM memory_links WHERE source_id = ?1
+                        SELECT l.target_id
+                        FROM memory_links l
+                        JOIN memories m ON m.id = l.target_id
+                        WHERE l.source_id = ?1 AND m.status = 'active'
                         UNION
-                        SELECT source_id FROM memory_links WHERE target_id = ?1
+                        SELECT l.source_id
+                        FROM memory_links l
+                        JOIN memories m ON m.id = l.source_id
+                        WHERE l.target_id = ?1 AND m.status = 'active'
                         "#,
                     )?;
                     let nbrs = stmt
@@ -3324,5 +3370,100 @@ mod fts_tests {
             )
             .unwrap();
         assert!(!has_tombstones);
+    }
+
+    #[test]
+    fn test_forget_soft_and_hard_prunes_links_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("forget_links.db");
+        let storage = Storage::open(&db_path).unwrap();
+
+        let mem_a = MemoryRecord::new(
+            MemoryType::Decision,
+            "Auth Service".to_string(),
+            "Uses [[Session Store]] for tokens".to_string(),
+            vec!["auth".to_string()],
+            0.9,
+            None,
+        );
+        let mem_b = MemoryRecord::new(
+            MemoryType::Fact,
+            "Session Store".to_string(),
+            "Backed by [[Redis Cluster]]".to_string(),
+            vec!["session".to_string()],
+            0.9,
+            None,
+        );
+        let mem_c = MemoryRecord::new(
+            MemoryType::Fact,
+            "Redis Cluster".to_string(),
+            "Runs on port 6379".to_string(),
+            vec!["redis".to_string()],
+            0.9,
+            None,
+        );
+
+        storage.insert_memory(&mem_a, Some(&[1.0, 0.0])).unwrap();
+        storage.insert_memory(&mem_b, Some(&[0.5, 0.5])).unwrap();
+        storage.insert_memory(&mem_c, Some(&[0.0, 1.0])).unwrap();
+        storage.auto_link_memory(&mem_a.id, &mem_a.content).unwrap();
+        storage.auto_link_memory(&mem_b.id, &mem_b.content).unwrap();
+
+        assert_eq!(storage.get_links_for_memory(&mem_a.id).unwrap().len(), 1);
+        assert_eq!(storage.traverse_multi_hop(&mem_a.id, 3).unwrap().len(), 2);
+        assert_eq!(storage.all_links().unwrap().len(), 2);
+
+        // 1. Soft forget mem_b: live link views prune expired node and do not bridge A -> B -> C
+        assert!(storage.forget_memory(&mem_b.id, false).unwrap());
+        assert_eq!(storage.get_links_for_memory(&mem_a.id).unwrap().len(), 0);
+        assert_eq!(storage.get_links_for_memory(&mem_c.id).unwrap().len(), 0);
+        // Inspecting expired mem_b directly still preserves its historical links without error
+        assert_eq!(storage.get_links_for_memory(&mem_b.id).unwrap().len(), 2);
+
+        assert!(storage.traverse_multi_hop(&mem_a.id, 3).unwrap().is_empty());
+        assert!(storage.traverse_multi_hop(&mem_b.id, 3).unwrap().is_empty());
+
+        let snap_all = storage.get_graph_snapshot(None, None).unwrap();
+        assert_eq!(snap_all.nodes.len(), 2);
+        assert!(snap_all.edges.is_empty());
+
+        let snap_focus_a = storage
+            .get_graph_snapshot(Some(&mem_a.id), Some(3))
+            .unwrap();
+        assert_eq!(snap_focus_a.nodes.len(), 1);
+        assert_eq!(snap_focus_a.nodes[0].id, mem_a.id);
+        assert!(snap_focus_a.edges.is_empty());
+
+        let snap_focus_b = storage
+            .get_graph_snapshot(Some(&mem_b.id), Some(2))
+            .unwrap();
+        assert!(snap_focus_b.nodes.is_empty());
+        assert!(snap_focus_b.edges.is_empty());
+
+        // Lossless backup still holds historical edge until hard deletion
+        assert_eq!(storage.all_links().unwrap().len(), 2);
+
+        // 2. Hard forget mem_b: ON DELETE CASCADE removes all memory_links rows cleanly
+        assert!(storage.forget_memory(&mem_b.id, true).unwrap());
+        assert!(storage.all_links().unwrap().is_empty());
+
+        // Subsequent queries on active or deleted IDs succeed cleanly without errors
+        assert!(!storage.forget_memory(&mem_b.id, true).unwrap());
+        assert!(storage.get_links_for_memory(&mem_a.id).unwrap().is_empty());
+        assert!(storage.get_links_for_memory(&mem_c.id).unwrap().is_empty());
+        assert!(storage.traverse_multi_hop(&mem_a.id, 3).unwrap().is_empty());
+        assert!(storage.traverse_multi_hop(&mem_b.id, 3).unwrap().is_empty());
+
+        let snap_after_hard = storage.get_graph_snapshot(None, None).unwrap();
+        assert_eq!(snap_after_hard.nodes.len(), 2);
+        assert!(snap_after_hard.edges.is_empty());
+        let snap_missing = storage
+            .get_graph_snapshot(Some(&mem_b.id), Some(2))
+            .unwrap();
+        assert!(snap_missing.nodes.is_empty());
+        assert!(snap_missing.edges.is_empty());
+
+        // Autolink vault skips deleted/expired memories without errors
+        let _ = storage.autolink_vault(0.75).unwrap();
     }
 }
