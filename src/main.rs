@@ -1365,12 +1365,18 @@ fn main() -> Result<()> {
                 let mut ids = Vec::new();
                 for term in &terms {
                     let Some(record) = lm.get(term)? else {
-                        if !json {
-                            eprintln!("Memory not found: {}", term);
-                        }
-                        std::process::exit(1);
+                        continue; // Skip missing memories in path mode.
                     };
                     ids.push(record.id);
+                }
+                if ids.is_empty() {
+                    if json {
+                        println!("[]");
+                        std::process::exit(0);
+                    } else {
+                        eprintln!("Memory not found: {}", terms.join(", "));
+                        std::process::exit(1);
+                    }
                 }
                 let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
                 if open {
@@ -1379,10 +1385,11 @@ fn main() -> Result<()> {
                 if all_paths.is_empty() {
                     if json {
                         println!("[]");
+                        std::process::exit(0);
                     } else {
                         eprintln!("No attachments found for: {}", terms.join(", "));
+                        std::process::exit(1);
                     }
-                    std::process::exit(1);
                 }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&all_paths)?);
@@ -1435,21 +1442,26 @@ fn main() -> Result<()> {
                 } else {
                     if json {
                         println!("null");
+                        std::process::exit(0);
                     } else {
                         eprintln!("Memory not found: {}", term);
+                        std::process::exit(1);
                     }
-                    std::process::exit(1);
                 }
             } else {
                 let mut records = Vec::new();
                 for term in &terms {
-                    let Some(record) = lm.get(term)? else {
-                        if !json {
-                            eprintln!("Memory not found: {}", term);
-                        }
-                        std::process::exit(1);
-                    };
-                    records.push(record);
+                    if let Some(record) = lm.get(term)? {
+                        records.push(record);
+                    }
+                }
+                if json && records.is_empty() {
+                    println!("[]");
+                    std::process::exit(0);
+                }
+                if records.is_empty() {
+                    eprintln!("Memory not found: {}", terms.join(", "));
+                    std::process::exit(1);
                 }
                 let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
                 let all_saved = if let Some(ref target) = save_to {
@@ -1822,7 +1834,7 @@ fn main() -> Result<()> {
                 }
                 cfg.save()?;
             }
-            CliView::render_config(&cfg, changed, json)?;
+            CliView::render_config(&cfg, changed, json, effective_db, global)?;
         }
 
         Commands::Setup {
@@ -1939,7 +1951,7 @@ fn main() -> Result<()> {
                 }
                 cfg.save()?;
             }
-            CliView::render_config(&cfg, changed, json)?;
+            CliView::render_config(&cfg, changed, json, effective_db, global)?;
         }
 
         Commands::Reindex { yes, json } => {

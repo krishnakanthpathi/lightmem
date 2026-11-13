@@ -8,7 +8,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
-$Branch = "main"
 $ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.7.7" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
@@ -44,14 +43,23 @@ if (-not $Downloaded) {
         $RustupInit = Join-Path $env:TEMP "rustup-init.exe"
         Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $RustupInit -UseBasicParsing
         & $RustupInit -y
+        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
         $env:PATH = "$HOME\.cargo\bin;$env:PATH"
     }
-    Write-Host "  ◈ Building lmem from $Repo ($Branch)..." -ForegroundColor Cyan
-    & cargo install --git "https://github.com/$Repo.git" --branch $Branch --locked --force
+    Write-Host "  ◈ Building lmem from $Repo ($ReleaseTag)..." -ForegroundColor Cyan
+    & cargo install --git "https://github.com/$Repo.git" --tag $ReleaseTag --locked --force
+    if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
     $CargoBin = Join-Path $HOME ".cargo\bin\lmem.exe"
-    if (Test-Path $CargoBin) {
-        Copy-Item $CargoBin $ExePath -Force
-    }
+    if (-not (Test-Path $CargoBin)) { throw "cargo succeeded but lmem.exe was not found" }
+    Copy-Item $CargoBin $ExePath -Force
+}
+
+if (-not (Test-Path $ExePath)) { throw "Installed lmem.exe was not found" }
+$ExpectedVersion = $ReleaseTag -replace '^v', ''
+$InstalledVersion = & $ExePath --version
+if ($LASTEXITCODE -ne 0) { throw "lmem --version failed (exit $LASTEXITCODE)" }
+if (($InstalledVersion | Out-String).Trim() -ne "lmem $ExpectedVersion") {
+    throw "Installed version mismatch: expected lmem $ExpectedVersion; got $InstalledVersion"
 }
 
 # Add InstallDir to User PATH if not already present
@@ -71,7 +79,9 @@ if (-not $SkipModelsFlag) {
     $PrevErrPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     & $ExePath config --download bge-small
+    if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
     & $ExePath config --download minilm-squad2
+    if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
     $ErrorActionPreference = $PrevErrPref
 } else {
     Write-Host "  ↷ Skipped downloading local models (run 'lmem config --download <model>' anytime)" -ForegroundColor DarkGray
@@ -97,6 +107,7 @@ switch -Wildcard ($LlmChoice) {
         $CloudModel = Read-Host "  ▸ Enter Ollama Cloud model [default: gemma4:31b-cloud]"
         if ([string]::IsNullOrWhiteSpace($CloudModel)) { $CloudModel = "gemma4:31b-cloud" }
         & $ExePath config --preset ollama-cloud --reranker "ollama:$CloudModel" --yes
+        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
         Write-Host "  ✓ Configured Ollama Cloud ($CloudModel)" -ForegroundColor Green
     }
     "3" {
@@ -105,14 +116,17 @@ switch -Wildcard ($LlmChoice) {
         $CustomModel = Read-Host "  ▸ Enter LLM model name [default: qwen2.5:3b]"
         if ([string]::IsNullOrWhiteSpace($CustomModel)) { $CustomModel = "qwen2.5:3b" }
         & $ExePath config --url $CustomUrl --reranker "ollama:$CustomModel" --yes
+        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
         Write-Host "  ✓ Configured custom LLM ($CustomUrl · $CustomModel)" -ForegroundColor Green
     }
     "4" {
         & $ExePath config --preset local --yes
+        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
         Write-Host "  ✓ Configured 100% offline local ONNX mode" -ForegroundColor Green
     }
     Default {
         & $ExePath config --preset ollama-local --yes
+        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
         try {
             $testResp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
             Write-Host "  ✓ Configured Local Ollama (connected at http://localhost:11434)" -ForegroundColor Green
@@ -126,6 +140,7 @@ switch -Wildcard ($LlmChoice) {
 $PrevErrPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 & $ExePath connect | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
 $ErrorActionPreference = $PrevErrPref
 Write-Host "  ✓ Deployed LightMem skill to detected AI agents" -ForegroundColor Green
 
@@ -134,6 +149,7 @@ $McpPrompt = Read-Host "  ▸ Configure Model Context Protocol (MCP) in AI clien
 if ($McpPrompt -match "^[yY]") {
     $ErrorActionPreference = "Continue"
     & $ExePath connect --mcp | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
     $ErrorActionPreference = $PrevErrPref
     Write-Host "  ✓ Configured LightMem MCP in detected client configs" -ForegroundColor Green
 } else {

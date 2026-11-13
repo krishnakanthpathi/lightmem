@@ -729,7 +729,7 @@ fn test_qa_regressions_attachments_webp_dedup_export_conflict_and_cli() {
             "--db",
             conflict_db.to_str().unwrap(),
             "remember",
-            "Production API gateway does not run on port 8080, migrated to port 9090",
+            "Production API gateway runs on port 8080",
             "--tags",
             "api,gateway,port",
             "--supersede",
@@ -737,7 +737,11 @@ fn test_qa_regressions_attachments_webp_dedup_export_conflict_and_cli() {
         ])
         .output()
         .unwrap();
-    assert!(sup_out.status.success());
+    assert!(
+        sup_out.status.success(),
+        "supersede stderr: {}",
+        String::from_utf8_lossy(&sup_out.stderr)
+    );
     let sup_json: serde_json::Value = serde_json::from_slice(&sup_out.stdout).unwrap();
     assert_eq!(
         sup_json["attachments"].as_array().unwrap().len(),

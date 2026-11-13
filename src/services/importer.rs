@@ -1,6 +1,6 @@
 use crate::models::{
-    compute_sha256_hex, decode_base64, AttachmentInput, AttachmentMetadata, MemoryLink,
-    MemoryRecord, MemoryStatus, MemoryType,
+    compute_sha256_hex, decode_base64, AttachmentInput, AttachmentMetadata, EntityRecord,
+    MemoryLink, MemoryRecord, MemoryStatus, MemoryType,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -26,6 +26,8 @@ pub struct ImportCandidate {
     pub status: Option<MemoryStatus>,
     #[serde(default)]
     pub attachments: Vec<AttachmentMetadata>,
+    #[serde(default)]
+    pub entities: Vec<EntityRecord>,
 }
 
 impl ImportCandidate {
@@ -65,6 +67,7 @@ impl ImportCandidate {
             record.updated_at = ts;
         }
         record.context = self.context;
+        record.entities = self.entities;
         record.updated_at = self.updated_at.unwrap_or(record.updated_at);
         record.expired_at = self.expired_at;
         record.status = self.status.unwrap_or(MemoryStatus::Active);
@@ -143,6 +146,7 @@ impl From<MemoryRecord> for ImportCandidate {
             expired_at: m.expired_at,
             status: Some(m.status),
             attachments: m.attachments,
+            entities: m.entities,
         }
     }
 }
@@ -477,6 +481,7 @@ fn parse_json_candidate(val: &serde_json::Value, _enrich: bool) -> Option<Import
         expired_at: None,
         status: None,
         attachments,
+        entities: Vec::new(),
     })
 }
 
@@ -734,6 +739,7 @@ impl OkfMemoryImporter {
             expired_at: None,
             status: None,
             attachments: Vec::new(),
+            entities: Vec::new(),
         })
     }
 }
@@ -804,6 +810,7 @@ impl MemoryImporter for OkfMemoryImporter {
                         expired_at: None,
                         status: None,
                         attachments: Vec::new(),
+                        entities: Vec::new(),
                     });
                 }
             }

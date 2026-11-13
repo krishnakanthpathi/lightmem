@@ -6,24 +6,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn write_secure_file(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("Failed to create secure file {:?}", path))?;
-        std::io::Write::write_all(&mut f, content.as_ref())?;
-        f.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, content.as_ref())?;
-    }
+    // A fresh private inode avoids following a leaf symlink and never exposes a
+    // partially-written export through a pre-existing world-readable file.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut staged, content.as_ref())?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist(path)
+        .with_context(|| format!("Failed to publish secure file {:?}", path))?;
     Ok(())
 }
 

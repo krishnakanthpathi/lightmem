@@ -17,11 +17,11 @@ where
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    #[allow(dead_code)]
     jsonrpc: String,
     #[serde(default, deserialize_with = "deserialize_some_value")]
     id: Option<Value>,
-    method: String,
+    #[serde(default)]
+    method: Option<Value>,
     #[serde(default)]
     params: Option<Value>,
 }
@@ -135,7 +135,64 @@ impl McpServer {
             }
         };
 
-        match req.method.as_str() {
+        // Validate jsonrpc version.
+        if req.jsonrpc != "2.0" {
+            return Some(JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32600,
+                    message: "Invalid Request: jsonrpc must be \"2.0\"".into(),
+                    data: None,
+                }),
+            });
+        }
+
+        // Validate method: must be present and a string.
+        let method = match req.method {
+            Some(Value::String(ref m)) => m.clone(),
+            Some(_) => {
+                return Some(JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32600,
+                        message: "Invalid Request: method must be a string".into(),
+                        data: None,
+                    }),
+                });
+            }
+            None => {
+                return Some(JsonRpcResponse {
+                    jsonrpc: "2.0",
+                    id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32600,
+                        message: "Invalid Request: method missing".into(),
+                        data: None,
+                    }),
+                });
+            }
+        };
+
+        // Validate id: must be String, Number, or Null per JSON-RPC 2.0.
+        if !matches!(&id, Value::String(_) | Value::Number(_) | Value::Null) {
+            return Some(JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32600,
+                    message: "Invalid Request: id must be String, Number, or Null".into(),
+                    data: None,
+                }),
+            });
+        }
+
+        match method.as_str() {
             "initialize" => {
                 let result = json!({
                     "protocolVersion": "2024-11-05",
@@ -802,7 +859,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(1)),
-            method: "initialize".to_string(),
+            method: Some(json!("initialize")),
             params: Some(json!({
                 "protocolVersion": "2024-11-05"
             })),
@@ -821,7 +878,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(2)),
-            method: "tools/list".to_string(),
+            method: Some(json!("tools/list")),
             params: None,
         };
 
@@ -846,7 +903,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!("ping-1")),
-            method: "ping".to_string(),
+            method: Some(json!("ping")),
             params: None,
         };
 
@@ -861,7 +918,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: None,
-            method: "notifications/initialized".to_string(),
+            method: Some(json!("notifications/initialized")),
             params: None,
         };
 
@@ -875,7 +932,7 @@ mod tests {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(json!(99)),
-            method: "unknown/method".to_string(),
+            method: Some(json!("unknown/method")),
             params: None,
         };
 

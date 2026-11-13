@@ -817,16 +817,39 @@ impl Storage {
             src_db_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        // Copy into a private staging connection first. Schema checks and migrations
+        // must never run against the live vault until the candidate is usable.
+        let mut staged_conn = Connection::open_in_memory()?;
+        {
+            let backup = rusqlite::backup::Backup::new(&src_conn, &mut staged_conn)?;
+            backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+        }
+        let staged = Self {
+            conn: Arc::new(Mutex::new(staged_conn)),
+            path: PathBuf::from(":memory:"),
+            context: None,
+        };
+        conn_settings(&staged)?;
+        staged.migrate()?;
+        let staged_conn = staged.conn.lock().unwrap();
+        let integrity: String =
+            staged_conn.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        anyhow::ensure!(
+            integrity == "ok",
+            "Restore integrity check failed: {integrity}"
+        );
+        let foreign_key_error = staged_conn
+            .prepare("PRAGMA foreign_key_check")?
+            .exists([])?;
+        anyhow::ensure!(!foreign_key_error, "Restore contains invalid foreign keys");
+        drop(staged_conn);
+
         let mut conn = self.conn.lock().unwrap();
-        let backup = rusqlite::backup::Backup::new(&src_conn, &mut conn)?;
+        let staged_conn = staged.conn.lock().unwrap();
+        // SQLite's backup transaction publishes the validated snapshot atomically;
+        // an interrupted/failed backup rolls back the destination transaction.
+        let backup = rusqlite::backup::Backup::new(&staged_conn, &mut conn)?;
         backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
-        drop(backup);
-        drop(src_conn);
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        drop(conn);
-        self.migrate()?;
         Ok(())
     }
 
@@ -870,6 +893,9 @@ impl Storage {
         })?;
 
         let mut count = 0;
+        // Child rows belong only to the source memories accepted by this merge.
+        // An existing target ID is not permission to import source-owned children.
+        let mut accepted_ids = std::collections::HashSet::new();
         for row in rows {
             let (
                 id,
@@ -905,17 +931,28 @@ impl Storage {
                     updated_at, expired_at, context_json, dedup_key
                 ],
             )?;
+            accepted_ids.insert(id);
             count += 1;
         }
 
         // Vectors
-        let src_has_vectors: bool = src_conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM memory_vectors)", [], |r| {
-                r.get(0)
-            })
-            .unwrap_or(false);
+        let mut vec_stmt = src_conn.prepare("SELECT id, embedding, dims FROM memory_vectors")?;
+        let vec_rows = vec_stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        let mut accepted_vectors = Vec::new();
+        for row in vec_rows {
+            let vector = row?;
+            if accepted_ids.contains(&vector.0) {
+                accepted_vectors.push(vector);
+            }
+        }
 
-        if src_has_vectors {
+        if !accepted_vectors.is_empty() {
             let target_state: Option<(String, i64)> = tx
                 .query_row(
                     "SELECT identity, dims FROM embedding_state WHERE singleton=1",
@@ -934,9 +971,7 @@ impl Storage {
             let target_vec_dims: Option<i64> = tx
                 .query_row("SELECT dims FROM memory_vectors LIMIT 1", [], |r| r.get(0))
                 .optional()?;
-            let src_vec_dims: Option<i64> = src_conn
-                .query_row("SELECT dims FROM memory_vectors LIMIT 1", [], |r| r.get(0))
-                .optional()?;
+            let src_vec_dims = accepted_vectors.first().map(|v| v.2);
 
             let target_dims = target_state.as_ref().map(|s| s.1).or(target_vec_dims);
             let src_dims = src_state.as_ref().map(|s| s.1).or(src_vec_dims);
@@ -973,35 +1008,18 @@ impl Storage {
                 tx.execute("DELETE FROM embedding_state", [])?;
             }
 
-            let mut vec_stmt =
-                src_conn.prepare("SELECT id, embedding, dims FROM memory_vectors")?;
-            let vec_rows = vec_stmt.query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            })?;
-            for v in vec_rows {
-                let (id, emb, dims) = v?;
-                let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
-                    [&id],
-                    |r| r.get(0),
-                )?;
-                if exists {
-                    if replace {
-                        tx.execute(
-                            "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)
-                             ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
-                            rusqlite::params![id, emb, dims],
-                        )?;
-                    } else {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
-                            rusqlite::params![id, emb, dims],
-                        )?;
-                    }
+            for (id, emb, dims) in accepted_vectors {
+                if replace {
+                    tx.execute(
+                        "INSERT INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)
+                         ON CONFLICT(id) DO UPDATE SET embedding=excluded.embedding, dims=excluded.dims",
+                        rusqlite::params![id, emb, dims],
+                    )?;
+                } else {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO memory_vectors (id, embedding, dims) VALUES (?1, ?2, ?3)",
+                        rusqlite::params![id, emb, dims],
+                    )?;
                 }
             }
         }
@@ -1039,12 +1057,7 @@ impl Storage {
                 data,
                 created_at,
             ) = a?;
-            let mem_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
-                [&memory_id],
-                |r| r.get(0),
-            )?;
-            if mem_exists {
+            if accepted_ids.contains(&memory_id) {
                 tx.execute(
                     "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -1095,7 +1108,7 @@ impl Storage {
                     [&memory_id],
                     |r| r.get(0),
                 )?;
-                if mem_exists {
+                if accepted_ids.contains(&memory_id) && mem_exists {
                     let already_exists: bool = tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM memory_entities WHERE memory_id=?1 AND entity_name=?2 AND entity_val=?3)",
                         rusqlite::params![memory_id, entity_name, entity_val],
@@ -1126,17 +1139,7 @@ impl Storage {
         })?;
         for l in link_rows {
             let (s, t, rel, weight, created_at) = l?;
-            let s_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
-                [&s],
-                |r| r.get(0),
-            )?;
-            let t_exists: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1)",
-                [&t],
-                |r| r.get(0),
-            )?;
-            if s_exists && t_exists {
+            if accepted_ids.contains(&s) && accepted_ids.contains(&t) {
                 tx.execute(
                     "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5)",

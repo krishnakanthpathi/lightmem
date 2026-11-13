@@ -233,14 +233,14 @@ Transfer complete memory vaults between machines, servers, or workstations in a 
 ```bash
 # Export complete vault with clean SQLite checkpoint (VACUUM INTO) & all physical media
 lmem bundle export -o my-vault.zip
-lmem export --bundle -o my-vault.zip
+lmem export --bundle -o my-vault.zip        # -o specifies output path for bundle export
 
 # Inspect archive contents, record counts, and attachments without unzipping
 lmem bundle info my-vault.zip
 
 # Restore on a new machine with zero re-indexing or re-embedding overhead
-lmem bundle import my-vault.zip              # Clean restore (default: replace)
-lmem bundle import my-vault.zip --merge      # Merge into existing memories
+lmem bundle import my-vault.zip --replace   # Explicit replace mode (default)
+lmem bundle import my-vault.zip --merge     # Merge into existing memories without wiping
 ```
 
 Bundles use the standard `.zip` (or `.lmbundle`) format containing:

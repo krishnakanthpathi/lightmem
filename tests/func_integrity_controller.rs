@@ -346,7 +346,7 @@ fn integrity_controller_conflict_merge_transfers_attachments_links_and_retires_o
 
     let newer = mem
         .remember(
-            "Deployment port for backend service is 9090 in staging.",
+            "Deployment port for backend service is 8080 in staging.",
             Some(MemoryType::Fact),
             Some("Backend Service Port".to_string()),
             vec!["staging".to_string()],
@@ -425,7 +425,7 @@ fn func_controller_recall_expanded_list_pagination_and_get() {
             None,
             None,
             Some(today),
-            1,
+            5,
             None,
             true,
         )

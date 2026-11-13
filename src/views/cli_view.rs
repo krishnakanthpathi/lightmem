@@ -1152,9 +1152,17 @@ impl CliView {
         Ok(())
     }
 
-    pub fn render_config(cfg: &LightMemConfig, updated: bool, json: bool) -> Result<()> {
+    pub fn render_config(
+        cfg: &LightMemConfig,
+        updated: bool,
+        json: bool,
+        effective_db: Option<&Path>,
+        global: bool,
+    ) -> Result<()> {
         if json {
-            let active_db = LightMemConfig::resolve_db_path(false);
+            let active_db = effective_db
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
             let mut val = serde_json::to_value(cfg)?;
             if let Some(obj) = val.as_object_mut() {
                 obj.insert(
@@ -1265,7 +1273,9 @@ impl CliView {
             Self::slate("Ollama Embed Model"),
             Self::slate(&cfg.embedding_model)
         );
-        let active_db = LightMemConfig::resolve_db_path(false);
+        let active_db = effective_db
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
         let db_mode = if active_db == LightMemConfig::global_db_path() {
             "(global)"
         } else {

@@ -147,7 +147,7 @@ fn func_cli_view_all_render_methods_human_and_json() {
             reranker_used: "top1".to_string(),
         };
         CliView::render_answer(&ans, json).unwrap();
-        CliView::render_config(&LightMemConfig::default(), true, json).unwrap();
+        CliView::render_config(&LightMemConfig::default(), true, json, None, false).unwrap();
         CliView::render_stats(&stats, &db_path, json).unwrap();
         CliView::render_link(&rec.id, "target-12345678", "relates_to", 1.0, json).unwrap();
         CliView::render_unlink(&rec.id, "target-12345678", Some("relates_to"), true, json).unwrap();
