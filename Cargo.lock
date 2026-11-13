@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "lightmem"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1136,6 +1136,7 @@ dependencies = [
  "colored",
  "dirs 5.0.1",
  "fastembed",
+ "libc",
  "ndarray",
  "ort",
  "regex",

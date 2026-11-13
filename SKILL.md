@@ -157,7 +157,10 @@ lmem status                                        # Visual dashboard of all man
 lmem vaults                                        # Alias for lmem status (or lmem identity status)
 lmem status --json                                 # Machine-readable vault and connection topology
 lmem context                                       # Show active vault or remote connection status
-lmem serve --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server for multi-device network access
+lmem serve --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server in foreground
+lmem serve -d --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server as background daemon
+lmem serve --status                                    # Check background daemon health and status
+lmem serve --stop                                      # Stop background daemon server cleanly
 lmem config --remote http://server:8080 --api-key "secret" # Configure client to talk to remote backend
 lmem config --clear-remote                         # Revert back to local embedded SQLite mode
 lmem docs                                         # Launch offline embedded docs HTTP server in foreground (aliases: doc, web, --port 8085)

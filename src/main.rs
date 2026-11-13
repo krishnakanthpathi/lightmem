@@ -6,6 +6,7 @@ use lightmem::{
     encode_base64, parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType,
     MultimodalInput,
 };
+use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -699,6 +700,18 @@ enum Commands {
         /// Run server without requiring authentication (development only)
         #[arg(long)]
         no_auth: bool,
+
+        /// Run backend server in background as a daemon
+        #[arg(short = 'd', long)]
+        daemon: bool,
+
+        /// Stop running background daemon server
+        #[arg(long)]
+        stop: bool,
+
+        /// Check status of running background daemon server
+        #[arg(long)]
+        status: bool,
     },
 
     /// Uninstall LightMem binaries, shell completions, and optionally purge data
@@ -899,8 +912,9 @@ fn handle_remote_command(
         } => {
             let mut attachment_payloads = Vec::new();
             for fpath in files {
-                let data = std::fs::read(fpath)
-                    .with_context(|| format!("Failed to read attachment file: {}", fpath.display()))?;
+                let data = std::fs::read(fpath).with_context(|| {
+                    format!("Failed to read attachment file: {}", fpath.display())
+                })?;
                 let fname = fpath
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -1115,7 +1129,13 @@ fn handle_remote_command(
             json: cmd_json,
         } => {
             let unlinked = client.unlink(source, target, relation.as_deref())?;
-            CliView::render_unlink(source, target, relation.as_deref(), unlinked, *cmd_json || json)?;
+            CliView::render_unlink(
+                source,
+                target,
+                relation.as_deref(),
+                unlinked,
+                *cmd_json || json,
+            )?;
             Ok(true)
         }
 
@@ -1157,16 +1177,27 @@ fn handle_remote_command(
                 println!();
                 println!("  \x1b[1;38;2;220;38;38m❖\x1b[0m \x1b[1mLightMem Remote Context\x1b[0m");
                 println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
-                println!("  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} \x1b[38;2;96;165;250m{}\x1b[0m", "Remote Endpoint", client.base_url);
+                println!(
+                    "  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} \x1b[38;2;96;165;250m{}\x1b[0m",
+                    "Remote Endpoint", client.base_url
+                );
                 println!(
                     "  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} {}",
                     "Server Status",
-                    if is_online { "\x1b[1;32m● Online\x1b[0m" } else { "\x1b[1;31m○ Unreachable\x1b[0m" }
+                    if is_online {
+                        "\x1b[1;32m● Online\x1b[0m"
+                    } else {
+                        "\x1b[1;31m○ Unreachable\x1b[0m"
+                    }
                 );
                 println!(
                     "  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} {}",
                     "Authentication",
-                    if client.api_key.is_some() { "\x1b[38;2;234;179;8mBearer Token (Configured)\x1b[0m" } else { "\x1b[38;2;148;163;184mNone\x1b[0m" }
+                    if client.api_key.is_some() {
+                        "\x1b[38;2;234;179;8mBearer Token (Configured)\x1b[0m"
+                    } else {
+                        "\x1b[38;2;148;163;184mNone\x1b[0m"
+                    }
                 );
                 if let Ok(st) = stats_res {
                     println!(
@@ -1353,12 +1384,14 @@ fn main() -> Result<()> {
     let global = cli.global;
 
     let cfg = LightMemConfig::try_load().unwrap_or_default();
-    let effective_remote_url = cli
-        .remote
-        .or_else(|| cfg.effective_remote_url());
-    let effective_api_key = cli
-        .api_key
-        .or_else(|| cfg.effective_api_key());
+    let effective_remote_url = if cli.remote.is_some() {
+        cli.remote
+    } else if cli.db.is_some() || env_db.is_some() {
+        None
+    } else {
+        cfg.effective_remote_url()
+    };
+    let effective_api_key = cli.api_key.or_else(|| cfg.effective_api_key());
 
     if let Some(ref remote_url) = effective_remote_url {
         let client = lightmem::RemoteClient::new(remote_url, effective_api_key.clone());
@@ -2809,15 +2842,24 @@ fn main() -> Result<()> {
             port,
             api_key,
             no_auth,
+            daemon,
+            stop,
+            status,
         } => {
-            let lm = open_controller(effective_db, global, connection)?;
-            let options = lightmem::ServerOptions {
+            handle_serve(
                 host,
                 port,
                 api_key,
                 no_auth,
-            };
-            lightmem::serve_api(Arc::new(lm), options)?;
+                daemon,
+                stop,
+                status,
+                effective_db,
+                global,
+                connection,
+                cli.db.as_deref(),
+                cli.connection.as_deref(),
+            )?;
         }
 
         Commands::Uninstall {
@@ -2829,6 +2871,352 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ServerDaemonInfo {
+    pid: u32,
+    host: String,
+    port: u16,
+    started_at: String,
+}
+
+#[cfg(unix)]
+fn is_pid_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn is_pid_alive(pid: u32) -> bool {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid)])
+        .output();
+    if let Ok(out) = output {
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.contains(&pid.to_string())
+    } else {
+        false
+    }
+}
+
+#[cfg(unix)]
+fn terminate_pid(pid: u32) -> bool {
+    unsafe {
+        let _ = libc::kill(pid as i32, libc::SIGTERM);
+    }
+    for _ in 0..30 {
+        if !is_pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    unsafe {
+        let _ = libc::kill(pid as i32, libc::SIGKILL);
+    }
+    !is_pid_alive(pid)
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32) -> bool {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .status();
+    !is_pid_alive(pid)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_serve(
+    host: String,
+    port: u16,
+    api_key: Option<String>,
+    no_auth: bool,
+    daemon: bool,
+    stop: bool,
+    status: bool,
+    effective_db: Option<&Path>,
+    global: bool,
+    connection: Option<&lightmem::ResolvedConnection>,
+    cli_db: Option<&Path>,
+    cli_connection: Option<&str>,
+) -> Result<()> {
+    let pid_file = LightMemConfig::config_dir().join("server.pid");
+
+    if stop {
+        if !pid_file.exists() {
+            println!("\x1b[38;2;148;163;184mLightMem server daemon is not running (no PID file found).\x1b[0m");
+            return Ok(());
+        }
+        let content = std::fs::read_to_string(&pid_file)?;
+        let info: Result<ServerDaemonInfo, _> = serde_json::from_str(&content);
+        let pid = match info {
+            Ok(ref d) => d.pid,
+            Err(_) => content
+                .trim()
+                .parse::<u32>()
+                .context("Invalid PID in server.pid")?,
+        };
+
+        if is_pid_alive(pid) {
+            if terminate_pid(pid) {
+                let _ = std::fs::remove_file(&pid_file);
+                println!(
+                    "  \x1b[1;32m✓\x1b[0m LightMem server daemon stopped (PID: {}).",
+                    pid
+                );
+            } else {
+                anyhow::bail!(
+                    "Failed to terminate LightMem server process with PID {}",
+                    pid
+                );
+            }
+        } else {
+            let _ = std::fs::remove_file(&pid_file);
+            println!(
+                "\x1b[38;2;148;163;184mLightMem server daemon was not running (cleaned up stale PID file: {}).\x1b[0m",
+                pid
+            );
+        }
+        return Ok(());
+    }
+
+    if status {
+        if !pid_file.exists() {
+            println!(
+                "  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M  Daemon Status\x1b[0m"
+            );
+            println!(
+                "  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
+            );
+            println!("  \x1b[1;38;2;239;68;68m▸\x1b[0m State:         \x1b[1;31mSTOPPED\x1b[0m");
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Command:       lmem serve -d\n");
+            return Ok(());
+        }
+        let content = std::fs::read_to_string(&pid_file)?;
+        let info: Result<ServerDaemonInfo, _> = serde_json::from_str(&content);
+        let (pid, host_str, port_num, started) = match info {
+            Ok(ref d) => (d.pid, d.host.clone(), d.port, Some(d.started_at.clone())),
+            Err(_) => {
+                let p = content
+                    .trim()
+                    .parse::<u32>()
+                    .context("Invalid PID in server.pid")?;
+                (p, "127.0.0.1".to_string(), 8080, None)
+            }
+        };
+
+        if is_pid_alive(pid) {
+            let probe_url = format!("http://127.0.0.1:{}/v1/health", port_num);
+            let responding = ureq::get(&probe_url)
+                .timeout(std::time::Duration::from_millis(500))
+                .call()
+                .is_ok();
+            println!(
+                "\n  \x1b[1;38;2;34;197;94m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M  Daemon Status\x1b[0m"
+            );
+            println!(
+                "  \x1b[38;2;34;197;94m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
+            );
+            println!(
+                "  \x1b[1;38;2;34;197;94m▸\x1b[0m State:         \x1b[1;32mRUNNING\x1b[0m {}",
+                if responding {
+                    "\x1b[38;2;148;163;184m(HTTP 200 OK)\x1b[0m"
+                } else {
+                    "\x1b[38;2;234;179;8m(Starting...)\x1b[0m"
+                }
+            );
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Process PID:   {}", pid);
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Address:       http://{}:{}",
+                host_str, port_num
+            );
+            if let Some(s) = started {
+                println!("  \x1b[38;2;113;113;122m▸\x1b[0m Started:       {}", s);
+            }
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Logs:          {}/server.log",
+                LightMemConfig::config_dir().display()
+            );
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Stop:          lmem serve --stop\n");
+        } else {
+            let _ = std::fs::remove_file(&pid_file);
+            println!(
+                "  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M  Daemon Status\x1b[0m"
+            );
+            println!(
+                "  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
+            );
+            println!(
+                "  \x1b[1;38;2;239;68;68m▸\x1b[0m State:         \x1b[1;31mSTOPPED\x1b[0m \x1b[38;2;148;163;184m(stale PID {} cleaned up)\x1b[0m",
+                pid
+            );
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Command:       lmem serve -d\n");
+        }
+        return Ok(());
+    }
+
+    if daemon {
+        if pid_file.exists() {
+            let content = std::fs::read_to_string(&pid_file).unwrap_or_default();
+            let pid = serde_json::from_str::<ServerDaemonInfo>(&content)
+                .map(|d| d.pid)
+                .or_else(|_| content.trim().parse::<u32>())
+                .unwrap_or(0);
+            if pid > 0 && is_pid_alive(pid) {
+                anyhow::bail!(
+                    "LightMem server daemon is already running (PID: {}). Run 'lmem serve --stop' first.",
+                    pid
+                );
+            }
+            let _ = std::fs::remove_file(&pid_file);
+        }
+
+        let key = if no_auth {
+            None
+        } else {
+            Some(api_key.unwrap_or_else(|| {
+                let u = uuid::Uuid::new_v4().to_string().replace('-', "");
+                format!("lm_{}", &u[..16])
+            }))
+        };
+
+        let config_dir = LightMemConfig::config_dir();
+        std::fs::create_dir_all(&config_dir)?;
+        let log_path = config_dir.join("server.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .with_context(|| format!("Failed to open log file {}", log_path.display()))?;
+        let err_file = log_file.try_clone()?;
+
+        let exe = std::env::current_exe()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("serve")
+            .arg("--host")
+            .arg(&host)
+            .arg("--port")
+            .arg(port.to_string());
+
+        if let Some(ref k) = key {
+            cmd.arg("--api-key").arg(k);
+        }
+        if no_auth {
+            cmd.arg("--no-auth");
+        }
+        if let Some(db) = cli_db {
+            cmd.arg("--db").arg(db);
+        }
+        if global {
+            cmd.arg("--global");
+        }
+        if let Some(conn) = cli_connection {
+            cmd.arg("--connection").arg(conn);
+        }
+
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(log_file)
+            .stderr(err_file);
+
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+
+        let child = cmd
+            .spawn()
+            .context("Failed to spawn background daemon process")?;
+        let child_pid = child.id();
+
+        // Brief delay to ensure it didn't exit immediately due to bind error
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        if !is_pid_alive(child_pid) {
+            let err_msg = std::fs::read_to_string(&log_path)
+                .ok()
+                .and_then(|logs| {
+                    logs.lines()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .into()
+                })
+                .unwrap_or_default();
+            anyhow::bail!(
+                "LightMem server daemon failed to start (process exited immediately).\nLogs:\n{}",
+                err_msg
+            );
+        }
+
+        let daemon_info = ServerDaemonInfo {
+            pid: child_pid,
+            host: host.clone(),
+            port,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+        std::fs::write(&pid_file, serde_json::to_string_pretty(&daemon_info)?)?;
+
+        println!(
+            "\n  \x1b[1;38;2;34;197;94m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M  Daemon Started\x1b[0m"
+        );
+        println!(
+            "  \x1b[38;2;34;197;94m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
+        );
+        println!(
+            "  \x1b[1;38;2;34;197;94m▸\x1b[0m PID:           {}",
+            child_pid
+        );
+        println!(
+            "  \x1b[38;2;113;113;122m▸\x1b[0m Listening:     http://{}:{}",
+            host, port
+        );
+        if let Some(ref k) = key {
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m API Key:       \x1b[1;38;2;234;179;8m{}\x1b[0m  (Keep this secret!)",
+                k
+            );
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Client Setup:  lmem config --remote http://127.0.0.1:{} --api-key \"{}\"",
+                port, k
+            );
+        } else {
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Authentication: None (--no-auth)");
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Client Setup:  lmem config --remote http://127.0.0.1:{}",
+                port
+            );
+        }
+        println!(
+            "  \x1b[38;2;113;113;122m▸\x1b[0m Health Probe:  http://127.0.0.1:{}/v1/health",
+            port
+        );
+        println!(
+            "  \x1b[38;2;113;113;122m▸\x1b[0m Logs:          {}",
+            log_path.display()
+        );
+        println!("  \x1b[38;2;113;113;122m▸\x1b[0m Status:        lmem serve --status");
+        println!("  \x1b[38;2;113;113;122m▸\x1b[0m Stop:          lmem serve --stop\n");
+
+        return Ok(());
+    }
+
+    // Foreground mode
+    let lm = open_controller(effective_db, global, connection)?;
+    let options = lightmem::ServerOptions {
+        host,
+        port,
+        api_key,
+        no_auth,
+    };
+    lightmem::serve_api(Arc::new(lm), options)?;
     Ok(())
 }
 

@@ -297,11 +297,20 @@ for entity in mem.entities:
 Run LightMem as a centralized, high-throughput memory backend on any device (home server, Mac mini, Linux VPS, Raspberry Pi, or local network) and connect from any client device:
 
 ```bash
-# 1. Start the server on any machine
+# 1. Start the server (foreground)
 lmem serve --host 0.0.0.0 --port 8080 --api-key "my-super-secret-key"
 
+# 2. Run in background as a daemon
+lmem serve -d --host 0.0.0.0 --port 8080 --api-key "my-super-secret-key"
+
+# 3. Check daemon status & health
+lmem serve --status
+
+# 4. Stop background daemon cleanly
+lmem serve --stop
+
 # Auto-generates a secure random bearer token if --api-key is omitted
-lmem serve --port 8080
+lmem serve -d --port 8080
 
 # Or run without authentication for local trusted networks
 lmem serve --port 8080 --no-auth

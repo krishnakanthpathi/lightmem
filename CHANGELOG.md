@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.9
+
+- **Persistent Backend Server**: Added `lmem serve` multi-threaded HTTP REST API server with Bearer token authentication, CORS support, LAN binding (`--host 0.0.0.0 --port <PORT>`), and seamless remote CLI routing (`lmem config --remote <URL> --api-key <KEY>`).
+- **Daemon Background Task Management**: Added `--daemon` (`-d`), `--stop`, and `--status` flags to `lmem serve` to run the persistent server in the background as a detached daemon process, monitor its PID and health over HTTP, and terminate it cleanly.
+- **Local Database Precedence**: Fixed CLI database routing so explicit local database flags (`--db <path>`, `LIGHTMEM_DB`) take precedence over configured remote URLs, preventing unwanted remote delegation during local operations.
+- **Universal Installer Release Pipeline**: Formatted all Rust sources to strict `cargo fmt` specifications, ensuring GitHub Actions CI builds pre-compiled standalone release binaries across macOS, Linux, Windows, and Android Termux for instant single-line curl installation.
+
 ## 0.7.7
 
 - Fix loopback HTTP mock servers across Ollama unit and integration tests (`reranker.rs`, `ollama_auth.rs`, `cli_migration.rs`, `func_integrity_services.rs`) to frame complete HTTP headers + `Content-Length` bodies before replying, eliminating the TCP split-read race that broke `v0.7.6` CI (`exit 101`) so macOS 15 ARM64 binaries and PyPI wheels publish cleanly.

@@ -1,3 +1,8 @@
+use crate::controllers::LightMem;
+use crate::models::{
+    compute_sha256_hex, decode_base64, detect_mime_and_kind, parse_ttl_duration, AttachmentInput,
+    AttachmentMetadata, MemoryStatus, MemoryType,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -5,11 +10,6 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use crate::controllers::LightMem;
-use crate::models::{
-    compute_sha256_hex, decode_base64, detect_mime_and_kind, parse_ttl_duration,
-    AttachmentInput, AttachmentMetadata, MemoryStatus, MemoryType,
-};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentPayload {
@@ -427,8 +427,7 @@ fn handle_connection(
                             return;
                         }
                     };
-                    let (inferred_mime, inferred_kind) =
-                        detect_mime_and_kind(&att.name, &bytes);
+                    let (inferred_mime, inferred_kind) = detect_mime_and_kind(&att.name, &bytes);
                     let mime_type = att.mime.unwrap_or(inferred_mime);
                     let sha256 = compute_sha256_hex(&bytes);
                     let meta = AttachmentMetadata {
@@ -489,7 +488,11 @@ fn handle_connection(
                 }
             };
 
-            let req_limit = if payload.limit == 0 { 10 } else { payload.limit };
+            let req_limit = if payload.limit == 0 {
+                10
+            } else {
+                payload.limit
+            };
             let fetch_limit = if payload.media.is_some() {
                 req_limit.max(100)
             } else {
@@ -565,7 +568,9 @@ fn handle_connection(
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             let page: Option<usize> = req.query.get("page").and_then(|v| v.parse().ok());
-            let offset = page.map(|p| (p.saturating_sub(1)) * limit).unwrap_or(offset);
+            let offset = page
+                .map(|p| (p.saturating_sub(1)) * limit)
+                .unwrap_or(offset);
 
             let category = req
                 .query
@@ -594,17 +599,19 @@ fn handle_connection(
             }
         }
 
-        ("GET", "/v1/get")
-        | ("GET", "/get")
-        | ("GET", "/v1/inspect")
-        | ("GET", "/inspect") => {
+        ("GET", "/v1/get") | ("GET", "/get") | ("GET", "/v1/inspect") | ("GET", "/inspect") => {
             let term = req
                 .query
                 .get("id")
                 .or_else(|| req.query.get("term"))
                 .map(String::as_str);
             let Some(term) = term else {
-                send_error(stream, 400, "Bad Request", "Missing 'id' or 'term' query parameter");
+                send_error(
+                    stream,
+                    400,
+                    "Bad Request",
+                    "Missing 'id' or 'term' query parameter",
+                );
                 return;
             };
 
@@ -648,7 +655,8 @@ fn handle_connection(
             } else if let Some(ref id) = payload.id {
                 match controller.forget(id, payload.hard) {
                     Ok(ok) => {
-                        let res = serde_json::json!({ "success": ok, "deleted": if ok { 1 } else { 0 } });
+                        let res =
+                            serde_json::json!({ "success": ok, "deleted": if ok { 1 } else { 0 } });
                         send_json(stream, 200, "OK", &res);
                     }
                     Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
@@ -700,7 +708,11 @@ fn handle_connection(
                 }
             };
 
-            match controller.unlink(&payload.source, &payload.target, payload.relation.as_deref()) {
+            match controller.unlink(
+                &payload.source,
+                &payload.target,
+                payload.relation.as_deref(),
+            ) {
                 Ok(unlinked) => {
                     let res = serde_json::json!({ "unlinked": unlinked });
                     send_json(stream, 200, "OK", &res);

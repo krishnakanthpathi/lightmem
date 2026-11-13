@@ -1,15 +1,15 @@
-use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
-use std::time::Duration;
+use crate::models::link::{GraphSnapshot, RelatedMemory};
 use crate::models::{
     MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory, StorageStats,
 };
-use crate::models::link::{GraphSnapshot, RelatedMemory};
 use crate::services::api_server::{
-    AnswerRequest, ClearPayload, ForgetPayload, LinkRequest, RecallRequest,
-    RememberRequest, UnlinkRequest,
+    AnswerRequest, ClearPayload, ForgetPayload, LinkRequest, RecallRequest, RememberRequest,
+    UnlinkRequest,
 };
 use crate::services::reranker::AnswerResult;
+use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDate, Utc};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -69,8 +69,15 @@ impl RemoteClient {
                 )
             }
             ureq::Error::Status(code, resp) => {
-                let body = resp.into_string().unwrap_or_else(|_| format!("HTTP {}", code));
-                anyhow::anyhow!("Remote server error ({}) at {}: {}", code, self.base_url, body)
+                let body = resp
+                    .into_string()
+                    .unwrap_or_else(|_| format!("HTTP {}", code));
+                anyhow::anyhow!(
+                    "Remote server error ({}) at {}: {}",
+                    code,
+                    self.base_url,
+                    body
+                )
             }
             ureq::Error::Transport(t) => {
                 anyhow::anyhow!(
@@ -154,7 +161,10 @@ impl RemoteClient {
         date: Option<NaiveDate>,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<PaginatedMemories> {
-        let mut url = format!("{}/v1/list?limit={}&offset={}", self.base_url, limit, offset);
+        let mut url = format!(
+            "{}/v1/list?limit={}&offset={}",
+            self.base_url, limit, offset
+        );
         if let Some(p) = page {
             url.push_str(&format!("&page={}", p));
         }

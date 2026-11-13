@@ -25,11 +25,7 @@ fn test_api_server_and_remote_client_full_lifecycle() {
     let server_lm = Arc::clone(&lm);
     let server_key = api_key.clone();
     std::thread::spawn(move || {
-        let _ = lightmem::services::api_server::serve_loop(
-            listener,
-            server_lm,
-            Some(server_key),
-        );
+        let _ = lightmem::services::api_server::serve_loop(listener, server_lm, Some(server_key));
     });
 
     // 1. Health check works without auth
@@ -45,7 +41,11 @@ fn test_api_server_and_remote_client_full_lifecycle() {
     let err = unauthed_client.remember(&req);
     assert!(err.is_err(), "Unauthenticated request should fail");
     let err_str = err.unwrap_err().to_string();
-    assert!(err_str.contains("401") || err_str.contains("Unauthorized"), "Error was: {}", err_str);
+    assert!(
+        err_str.contains("401") || err_str.contains("Unauthorized"),
+        "Error was: {}",
+        err_str
+    );
 
     // 3. Authenticated client
     let client = RemoteClient::new(&base_url, Some(api_key));
@@ -63,7 +63,9 @@ fn test_api_server_and_remote_client_full_lifecycle() {
 
     // Store second memory
     let req2 = RememberRequest {
-        content: Some("Remote clients connect to LightMem server via Bearer token API key".to_string()),
+        content: Some(
+            "Remote clients connect to LightMem server via Bearer token API key".to_string(),
+        ),
         category: Some(MemoryType::Decision),
         tags: Some(vec!["auth".to_string(), "server".to_string()]),
         ..Default::default()
@@ -107,11 +109,15 @@ fn test_api_server_and_remote_client_full_lifecycle() {
     assert_eq!(fetched.unwrap().id, mem1.id);
 
     // List
-    let listed = client.list(10, 0, None, None, None, None, None, None).unwrap();
+    let listed = client
+        .list(10, 0, None, None, None, None, None, None)
+        .unwrap();
     assert_eq!(listed.total, 3);
 
     // Link
-    let link = client.link(&mem1.id, &mem2.id, Some("secures"), Some(1.5)).unwrap();
+    let link = client
+        .link(&mem1.id, &mem2.id, Some("secures"), Some(1.5))
+        .unwrap();
     assert_eq!(link.relation, "secures");
     assert_eq!(link.weight, 1.5);
 
@@ -156,11 +162,7 @@ fn test_cli_remote_binary_e2e() {
     let server_lm = Arc::clone(&lm);
     let server_key = api_key.clone();
     std::thread::spawn(move || {
-        let _ = lightmem::services::api_server::serve_loop(
-            listener,
-            server_lm,
-            Some(server_key),
-        );
+        let _ = lightmem::services::api_server::serve_loop(listener, server_lm, Some(server_key));
     });
 
     let exe = env!("CARGO_BIN_EXE_lmem");
@@ -230,4 +232,98 @@ fn test_cli_remote_binary_e2e() {
     assert_eq!(ctx["mode"], "remote");
     assert_eq!(ctx["status"], "online");
     assert_eq!(ctx["api_key_configured"], true);
+}
+
+#[test]
+fn test_cli_serve_daemon_lifecycle() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let db_path = dir.path().join("daemon_vault.db");
+
+    // Reserve an open port
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let exe = env!("CARGO_BIN_EXE_lmem");
+
+    // 1. Start Daemon
+    let start_out = std::process::Command::new(exe)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args([
+            "serve",
+            "-d",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--api-key",
+            "test_daemon_key",
+            "--db",
+            db_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute serve -d");
+
+    assert!(
+        start_out.status.success(),
+        "Daemon start failed: {}",
+        String::from_utf8_lossy(&start_out.stderr)
+    );
+    let start_text = String::from_utf8_lossy(&start_out.stdout);
+    assert!(start_text.contains("Daemon Started"));
+
+    let pid_file = config_dir.join("server.pid");
+    assert!(pid_file.exists(), "PID file should exist");
+
+    // 2. Status Check: Running
+    let status_out = std::process::Command::new(exe)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(["serve", "--status"])
+        .output()
+        .expect("Failed to execute serve --status");
+    assert!(status_out.status.success());
+    let status_text = String::from_utf8_lossy(&status_out.stdout);
+    assert!(status_text.contains("RUNNING"));
+
+    // 3. HTTP Health Probe
+    let health_url = format!("http://127.0.0.1:{}/v1/health", port);
+    let mut responding = false;
+    for _ in 0..20 {
+        if ureq::get(&health_url)
+            .timeout(std::time::Duration::from_millis(500))
+            .call()
+            .is_ok()
+        {
+            responding = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        responding,
+        "Server daemon should respond on HTTP /v1/health"
+    );
+
+    // 4. Stop Daemon
+    let stop_out = std::process::Command::new(exe)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(["serve", "--stop"])
+        .output()
+        .expect("Failed to execute serve --stop");
+    assert!(stop_out.status.success());
+    let stop_text = String::from_utf8_lossy(&stop_out.stdout);
+    assert!(stop_text.contains("stopped"));
+
+    // 5. Status Check: Stopped & PID file cleaned up
+    assert!(!pid_file.exists(), "PID file should be removed after stop");
+    let status_after = std::process::Command::new(exe)
+        .env("LIGHTMEM_CONFIG_DIR", &config_dir)
+        .args(["serve", "--status"])
+        .output()
+        .expect("Failed to execute serve --status");
+    assert!(status_after.status.success());
+    let status_after_text = String::from_utf8_lossy(&status_after.stdout);
+    assert!(status_after_text.contains("STOPPED"));
 }
