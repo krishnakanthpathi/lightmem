@@ -222,7 +222,7 @@ fn bench_bulk_ingestion(bench_dir: &Path) -> Result<Vec<IngestionResult>> {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark 2: Hybrid Recall Latency & Accuracy
+// Benchmark 2: Hybrid Recall Latency & Nonempty Results
 // ---------------------------------------------------------------------------
 
 #[allow(dead_code)]
@@ -232,7 +232,7 @@ struct RecallStats {
     p95_ms: f64,
     p99_ms: f64,
     mean_ms: f64,
-    hit_rate_pct: f64,
+    nonempty_result_rate_pct: f64,
 }
 
 fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
@@ -242,7 +242,7 @@ fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
     );
     println!(
         "{}",
-        "  BENCHMARK 2: Hybrid Recall Latency & Accuracy (100 queries)"
+        "  BENCHMARK 2: Hybrid Recall Latency & Nonempty Results (100 queries)"
             .bold()
             .cyan()
     );
@@ -389,7 +389,7 @@ fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
     let p99 = latencies_ms[latencies_ms.len() * 99 / 100];
     let sum: f64 = latencies_ms.iter().sum();
     let mean = sum / (latencies_ms.len() as f64);
-    let hit_rate = (hits as f64 / queries.len() as f64) * 100.0;
+    let nonempty_result_rate = (hits as f64 / queries.len() as f64) * 100.0;
 
     println!("  Total Queries Tested: {}", queries.len());
     println!("  P50 Recall Latency:   {:>6.2} ms", p50);
@@ -397,8 +397,8 @@ fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
     println!("  P99 Recall Latency:   {:>6.2} ms", p99);
     println!("  Mean Recall Latency:  {:>6.2} ms", mean);
     println!(
-        "  Search Hit Rate:      {:>6.1} % ({} of 100 queries matched)",
-        hit_rate, hits
+        "  Nonempty-result rate:      {:>6.1} % ({} of 100 queries returned at least one result)",
+        nonempty_result_rate, hits
     );
 
     Ok(RecallStats {
@@ -407,7 +407,7 @@ fn bench_hybrid_recall(bench_dir: &Path) -> Result<RecallStats> {
         p95_ms: p95,
         p99_ms: p99,
         mean_ms: mean,
-        hit_rate_pct: hit_rate,
+        nonempty_result_rate_pct: nonempty_result_rate,
     })
 }
 
@@ -1028,12 +1028,13 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
         }
     }
 
-    let recovery_rate = (orig_list.len() as f64 / test_memories.len() as f64) * 100.0;
+    let recovered_count = imported_by_title.len();
+    let recovery_rate = (recovered_count as f64 / orig_list.len() as f64) * 100.0;
 
     println!(
         "  Total Memories Recovered:  {}/{} ({:.1}%)",
+        recovered_count,
         orig_list.len(),
-        test_memories.len(),
         recovery_rate
     );
     println!(
@@ -1078,12 +1079,20 @@ fn bench_okf_roundtrip(bench_dir: &Path) -> Result<OkfResult> {
     );
     println!(
         "  OKF Data Corruption:       {}",
-        "0.0% (Zero Corruption)".green().bold()
+        format!(
+            "field checks all intact: {}",
+            categories_intact
+                && titles_intact
+                && tags_intact
+                && confidence_intact
+                && content_intact
+        )
+        .normal()
     );
 
     Ok(OkfResult {
-        original_count: test_memories.len(),
-        imported_count: orig_list.len(),
+        original_count: orig_list.len(),
+        imported_count: recovered_count,
         recovery_rate_pct: recovery_rate,
         categories_intact,
         titles_intact,
@@ -1113,22 +1122,43 @@ fn generate_markdown_report(
         "**Execution Date:** `{}`  \n",
         Utc::now().to_rfc3339()
     ));
-    md.push_str("**Environment:** Apple Silicon (macOS) | Rust 1.8x | SQLite 3.4x (WAL Mode) | ONNX bge-small (384d)\n\n");
-    md.push_str("---\n\n");
-
-    md.push_str("## 📊 Executive Summary\n\n");
-    md.push_str("| Benchmark Domain | Primary Metric | Result | Target / Standard | Status |\n");
-    md.push_str("|---|---|---|---|---|\n");
-    md.push_str(&format!("| **1. Ingestion Throughput** | 1,000 Bulk Ingest Speed | **{:.1} mem/sec** ({:.2} ms/mem) | > 100 mem/sec (ONNX) | ✅ **PASS** |\n", b1[2].throughput_ops_sec, b1[2].avg_latency_ms));
-    md.push_str(&format!("| **2. Hybrid Recall Latency** | P50 / P95 / P99 Latency | **{:.2} ms / {:.2} ms / {:.2} ms** | P95 < 25 ms | ✅ **PASS** |\n", b2.p50_ms, b2.p95_ms, b2.p99_ms));
-    md.push_str(&format!("| **3. Temporal Recall Accuracy** | Historical Query Precision | **{:.1}%** (0 false positives/negatives) | 100.0% | ✅ **PASS** |\n", b3.accuracy_pct));
-    md.push_str("| **4. Multi-Process Contention** | 5 Processes WAL Stress | **0 Lock Errors** (Integrity: OK) | 0 Lock Timeouts | ✅ **PASS** |\n");
-    md.push_str(&format!("| **5. Memory Footprint** | RSS Delta over 1,000 Ops | **{:+0.2} MB** (Peak: {:.1} MB) | Bounded (< 500 MB) | ✅ **PASS** |\n", b5.rss_delta_mb, b5.rss_peak_mb));
-    md.push_str(&format!("| **6. OKF Roundtrip Integrity** | Export/Wipe/Import Recovery | **{:.1}%** (0% Corruption) | 100.0% | ✅ **PASS** |\n", b6.recovery_rate_pct));
-    md.push_str("\n---\n\n");
+    let config = LightMemConfig::load();
+    md.push_str(&format!(
+        "**Runtime platform:** {} / {}\n\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    md.push_str(&format!("**Configured backend (not independently verified):** {}; ONNX model: {:?}; embedding model: {}; reranker: {}\n\n", config.backend, config.onnx_model, config.embedding_model, config.reranker));
+    md.push_str(&format!(
+        "**SQLite runtime version:** {}\n\n",
+        rusqlite::version()
+    ));
+    md.push_str("**Provenance limits:** CPU model, RAM, Rust toolchain, model-cache state and actual inference fallback are not measured. Record these independently when publishing results. Configuration is loaded from the invoking environment; keep it unchanged throughout the run.\n\n");
+    md.push_str("**Timing methodology:** Ingestion times in-process remember calls, excluding database open and synthetic data generation. Recall times in-process recall calls on an existing database, with no dedicated warm-up; the first query may include lazy model initialization. Recall does not run answer reranking. These numbers do not measure CLI startup or end-to-end answer latency. Contention includes worker process startup; OKF export/import invokes the CLI but has no separate latency measurement. Percentiles describe one ordered query pass, not repeated cold/warm trials. RSS is sampled via ps; unsupported measurements are reported as zero, not evidence of zero memory use.\n\n");
+    md.push_str("## Observations (no acceptance thresholds evaluated)\n\n");
+    md.push_str(&format!(
+        "- Recall P50 / P95 / P99: {:.2} / {:.2} / {:.2} ms\n",
+        b2.p50_ms, b2.p95_ms, b2.p99_ms
+    ));
+    md.push_str(&format!(
+        "- Temporal assertion agreement: {:.1}% over {} assertions\n",
+        b3.accuracy_pct, b3.total_verifications
+    ));
+    md.push_str(&format!(
+        "- Contention worker errors: {}; database integrity check OK: {}\n",
+        b4.errors, b4.integrity_ok
+    ));
+    md.push_str(&format!(
+        "- Sampled RSS peak: {:.2} MB; delta: {:+.2} MB\n",
+        b5.rss_peak_mb, b5.rss_delta_mb
+    ));
+    md.push_str(&format!(
+        "- OKF record recovery: {:.1}% (field checks below)\n\n",
+        b6.recovery_rate_pct
+    ));
 
     md.push_str("## 1. Bulk Ingestion Throughput\n\n");
-    md.push_str("Synthetic memories across all 14 categories (Fact, Decision, Instruction, Preference, Learning, Goal, Commitment, Artifact, Event, Relationship, Observation, Error, Context, Password) were inserted with ONNX vector embeddings and FTS5 synchronization.\n\n");
+    md.push_str("Synthetic memories across all 14 categories (Fact, Decision, Instruction, Preference, Learning, Goal, Commitment, Artifact, Event, Relationship, Observation, Error, Context, Password) were inserted using the configured embedding backend and FTS5 synchronization.\n\n");
     md.push_str("| Batch Size | Elapsed Time (ms) | Avg Latency (ms/mem) | Throughput (mem/sec) | DB File Size (MB) |\n");
     md.push_str("|---|---|---|---|---|\n");
     for row in b1 {
@@ -1139,8 +1169,8 @@ fn generate_markdown_report(
     }
     md.push_str("\n---\n\n");
 
-    md.push_str("## 2. Hybrid Recall Latency & Accuracy\n\n");
-    md.push_str("100 randomized queries (35 exact keywords, 35 typos/fuzzy, 30 semantic concepts) were executed against the 1,000-memory database.\n\n");
+    md.push_str("## 2. Hybrid Recall Latency & Nonempty Results\n\n");
+    md.push_str("100 fixed queries (35 exact keywords, 35 typos/fuzzy, 30 semantic concepts) were executed against the 1,000-memory database.\n\n");
     md.push_str("| Metric | Latency (ms) |\n");
     md.push_str("|---|---|\n");
     md.push_str(&format!("| **P50 (Median)** | **{:.2} ms** |\n", b2.p50_ms));
@@ -1151,9 +1181,8 @@ fn generate_markdown_report(
         b2.mean_ms
     ));
     md.push_str(&format!(
-        "| **Search Hit Rate** | **{:.1}%** ({}/100 queries returned valid ranked results) |\n",
-        b2.hit_rate_pct,
-        (b2.hit_rate_pct as usize)
+        "| **Nonempty-result rate** | **{:.1}%** (over {} queries; not retrieval accuracy) |\n",
+        b2.nonempty_result_rate_pct, b2.total_queries
     ));
     md.push_str("\n---\n\n");
 
@@ -1161,15 +1190,24 @@ fn generate_markdown_report(
     md.push_str("- **Dataset:** 100 memories backdated across 3 months in 4 cohort dates (Day -90, Day -60, Day -30, Day 0).\n");
     md.push_str("- **Retirements:** 20 memories (20%) soft-retired with `forget`.\n");
     md.push_str(&format!("- **Historical Snapshots:** 5 discrete historical dates evaluated across {} individual assertions.\n", b3.total_verifications));
-    md.push_str(&format!("- **Verification Result:** **{:.2}% Accuracy** — Retired memories are returned if and only if they were active on the target historical date.\n\n", b3.accuracy_pct));
+    md.push_str(&format!("- **Verification Result:** **{:.2}% Accuracy** — Agreement with the synthetic cohort assertions, not a general retrieval-quality evaluation.\n\n", b3.accuracy_pct));
     md.push_str("---\n\n");
 
     md.push_str("## 4. Concurrent Multi-Process Contention (SQLite WAL Stress)\n\n");
-    md.push_str("- **Concurrency Level:** 5 OS processes executing simultaneously.\n");
+    md.push_str(&format!(
+        "- **Concurrency Level:** {} OS worker processes.\n",
+        b4.processes
+    ));
     md.push_str(&format!("- **Operations:** {} total mixed operations (writes, hybrid searches, chronological lists, soft-retirements).\n", b4.total_ops));
     md.push_str(&format!("- **Elapsed Time:** {:.2} ms\n", b4.elapsed_ms));
-    md.push_str("- **Locking Errors:** **0** (`SQLITE_BUSY` occurrences: 0).\n");
-    md.push_str("- **Database Integrity:** `PRAGMA integrity_check` returned **\"ok\"**.\n\n");
+    md.push_str(&format!(
+        "- **Worker errors (not classified by SQLite error code):** {}\n",
+        b4.errors
+    ));
+    md.push_str(&format!(
+        "- **Database integrity check OK:** {}\n\n",
+        b4.integrity_ok
+    ));
     md.push_str("---\n\n");
 
     md.push_str("## 5. Memory Footprint & RSS\n\n");
@@ -1208,7 +1246,9 @@ fn generate_markdown_report(
         "| **Net RSS Delta** | **{:+0.2} MB** |\n\n",
         b5.rss_delta_mb
     ));
-    md.push_str("Memory consumption remains strictly bounded within expectations for localized in-process ONNX model inference without memory leaks.\n\n");
+    md.push_str(
+        "Sampled RSS values do not establish a memory bound or prove absence of leaks.\n\n",
+    );
     md.push_str("---\n\n");
 
     md.push_str("## 6. Roundtrip OKF Data Integrity\n\n");
@@ -1218,17 +1258,21 @@ fn generate_markdown_report(
     md.push_str("2. Exported via `lmem export --okf -o okf_export_bundle.md`.\n");
     md.push_str("3. Wiped storage and imported into fresh database via `lmem import okf_export_bundle.md`.\n");
     md.push_str("4. Performed deep field-by-field equality validation:\n\n");
-    md.push_str("| Field Attribute | Survival Rate | Integrity Status |\n");
-    md.push_str("|---|---|---|\n");
+    md.push_str("| Field check | Observed result |\n|---|---|\n");
     md.push_str(&format!(
-        "| **Total Memories Recovered** | **{}/{} ({:.1}%)** | ✅ PERFECT |\n",
+        "| Recovered records | {}/{} ({:.1}%) |\n",
         b6.imported_count, b6.original_count, b6.recovery_rate_pct
     ));
-    md.push_str("| **Category Classification** | **100.0%** | ✅ ALL 14 CATEGORIES INTACT |\n");
-    md.push_str("| **Titles & Identifiers** | **100.0%** | ✅ PERFECT MATCH |\n");
-    md.push_str("| **Tags & Shards** | **100.0%** | ✅ PERFECT MATCH |\n");
-    md.push_str("| **Confidence Scores** | **100.0%** | ✅ PRESERVED (< 0.02 delta) |\n");
-    md.push_str("| **Content Body** | **100.0%** | ✅ 0 BYTES CORRUPTED |\n\n");
+    for (name, intact) in [
+        ("Categories", b6.categories_intact),
+        ("Titles (identifiers not compared)", b6.titles_intact),
+        ("Tags", b6.tags_intact),
+        ("Confidence (within 0.02)", b6.confidence_intact),
+        ("Trimmed content", b6.content_intact),
+    ] {
+        md.push_str(&format!("| {} | {} |\n", name, intact));
+    }
+    md.push_str("\nThese fixtures do not test structured entities, attachments, vectors, links or every backup field.\n\n");
     md.push_str("---\n");
 
     fs::write(target_file, md)?;
@@ -1255,7 +1299,7 @@ fn main() -> Result<()> {
             .green()
     );
 
-    let bench_dir = PathBuf::from("/tmp/lightmem_bench");
+    let bench_dir = std::env::temp_dir().join("lightmem_bench");
     fs::create_dir_all(&bench_dir)?;
 
     let t_all = Instant::now();
@@ -1290,7 +1334,7 @@ fn main() -> Result<()> {
     );
     println!(
         "{}",
-        "  ALL 6 BENCHMARKS COMPLETED SUCCESSFULLY! 🎉"
+        "  ALL 6 BENCHMARK MEASUREMENTS COLLECTED (see observed checks)"
             .bold()
             .green()
     );

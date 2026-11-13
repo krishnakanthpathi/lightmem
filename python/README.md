@@ -5,7 +5,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/lmem.svg)](https://pypi.org/project/lmem/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor conflict merging**, and **temporal point-in-time (`as_of`) & single-day (`date`) queries** — with zero Python dependencies.
+LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor conflict merging**, and **temporal point-in-time (`as_of`) & single-day (`date`) queries** — with zero Python dependencies. Default embedding backend is ONNX bge-small-en-v1.5.
 
 ---
 

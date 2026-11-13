@@ -26,7 +26,7 @@ pub trait Reranker: Send + Sync {
     fn name(&self) -> &str;
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult>;
     fn merge_conflict(&self, older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
-        Ok(default_merge_conflict(older, newer))
+        default_merge_conflict(older, newer)
     }
 }
 
@@ -545,7 +545,7 @@ impl Reranker for OnnxQaReranker {
                 }
             }
         }
-        Ok(default_merge_conflict(older, newer))
+        default_merge_conflict(older, newer)
     }
 }
 
@@ -981,7 +981,7 @@ impl Reranker for OllamaReranker {
             }
         }
 
-        Ok(default_merge_conflict(older, newer))
+        default_merge_conflict(older, newer)
     }
 }
 
@@ -1027,17 +1027,26 @@ pub fn build_merged_record(
     merged
 }
 
-pub fn default_merge_conflict(older: &MemoryRecord, newer: &MemoryRecord) -> MemoryRecord {
-    let old_toks = content_tokens(&older.content);
-    let new_toks = content_tokens(&newer.content);
-    // If newer is a pure subset of older (older has strictly more detail and no new tokens in newer), keep older's text
-    let (chosen_content, chosen_title) =
-        if new_toks.is_subset(&old_toks) && old_toks.len() > new_toks.len() {
-            (older.content.clone(), older.title.clone())
-        } else {
-            (newer.content.clone(), newer.title.clone())
-        };
-    build_merged_record(older, newer, chosen_content, chosen_title)
+pub fn default_merge_conflict(older: &MemoryRecord, newer: &MemoryRecord) -> Result<MemoryRecord> {
+    // Local fallback for conflict merge: prefer newer content to allow supersede,
+    // but preserve older's attachments when newer has none.
+    // This is a simple strategy; for semantic conflicts, configure an explicit merge provider.
+    let merged_content = if newer.content.trim().is_empty() {
+        older.content.clone()
+    } else {
+        newer.content.clone()
+    };
+    let merged_title = if newer.title.trim().is_empty() {
+        older.title.clone()
+    } else {
+        newer.title.clone()
+    };
+    Ok(build_merged_record(
+        older,
+        newer,
+        merged_content,
+        merged_title,
+    ))
 }
 
 pub(crate) fn is_synthesis_query(question: &str) -> bool {

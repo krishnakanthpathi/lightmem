@@ -95,11 +95,15 @@ pub fn inspect_vault_db(path: &std::path::Path) -> (bool, usize, usize) {
         .query_row(
             "SELECT count(*) FROM memories WHERE status = 'active'",
             [],
-            |r| r.get(0),
+            |r| r.get::<_, i64>(0),
         )
+        .ok()
+        .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(0);
     let total: usize = conn
-        .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM memories", [], |r| r.get::<_, i64>(0))
+        .ok()
+        .and_then(|count| usize::try_from(count).ok())
         .unwrap_or(0);
     (true, active, total)
 }

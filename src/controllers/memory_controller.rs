@@ -358,17 +358,53 @@ impl LightMem {
         reranker_override: Option<&str>,
         category: Option<MemoryType>,
         title: Option<String>,
-        mut tags: Vec<String>,
+        tags: Vec<String>,
         confidence: Option<f32>,
         ttl: Option<chrono::Duration>,
         supersede: bool,
         provenance: Option<String>,
     ) -> Result<(MemoryRecord, Vec<MemoryConflict>, Option<String>)> {
         let mut attachment_inputs = Vec::with_capacity(files.len());
+        for path in files {
+            attachment_inputs.push(AttachmentInput::from_path(path)?);
+        }
+        self.remember_with_attachment_inputs(
+            content,
+            attachment_inputs,
+            extract_llm,
+            extract_entities,
+            reranker_override,
+            category,
+            title,
+            tags,
+            confidence,
+            ttl,
+            supersede,
+            provenance,
+        )
+    }
+
+    /// Stores a memory with pre-loaded attachment inputs (useful for remote backends and programmatic APIs).
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_attachment_inputs(
+        &self,
+        content: Option<&str>,
+        attachments: Vec<AttachmentInput>,
+        extract_llm: bool,
+        extract_entities: bool,
+        reranker_override: Option<&str>,
+        category: Option<MemoryType>,
+        title: Option<String>,
+        mut tags: Vec<String>,
+        confidence: Option<f32>,
+        ttl: Option<chrono::Duration>,
+        supersede: bool,
+        provenance: Option<String>,
+    ) -> Result<(MemoryRecord, Vec<MemoryConflict>, Option<String>)> {
+        let mut attachment_inputs = Vec::with_capacity(attachments.len());
         let mut seen_batch_sha = HashSet::new();
         let mut warnings = Vec::new();
-        for path in files {
-            let att = AttachmentInput::from_path(path)?;
+        for att in attachments {
             if !seen_batch_sha.insert(att.metadata.sha256.clone()) {
                 warnings.push(format!(
                     "Attachment '{}' duplicate in batch (sha256:{}) - skipping redundant blob.",
@@ -780,8 +816,13 @@ impl LightMem {
     ) -> Result<Vec<ScoredMemory>> {
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        let fetch_limit = if on_date.is_some() {
-            limit.max(250)
+        // Day filtering must see the complete eligible pool, not a global top-250
+        // prefix. Each search lane is bounded by at least this many records, so
+        // no day-eligible hit can be discarded before the day predicate runs.
+        let fetch_limit = if on_date.is_some() && limit > 0 {
+            self.storage
+                .count_memories(category, Some(MemoryStatus::Active), as_of)?
+                .max(limit)
         } else {
             limit
         };
@@ -844,8 +885,13 @@ impl LightMem {
     ) -> Result<Vec<ScoredMemory>> {
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        let fetch_limit = if on_date.is_some() {
-            limit.max(250)
+        // Day filtering must see the complete eligible pool, not a global top-250
+        // prefix. Each search lane is bounded by at least this many records, so
+        // no day-eligible hit can be discarded before the day predicate runs.
+        let fetch_limit = if on_date.is_some() && limit > 0 {
+            self.storage
+                .count_memories(category, Some(MemoryStatus::Active), as_of)?
+                .max(limit)
         } else {
             limit
         };
@@ -884,7 +930,30 @@ impl LightMem {
         for (id, score) in top_candidates {
             if let Ok(related) = self.storage.traverse_multi_hop(&id, 1) {
                 for rel in related {
-                    if seen_ids.insert(rel.memory.id.clone()) {
+                    let memory = &rel.memory;
+                    if let Some(cat) = category {
+                        if memory.category != cat {
+                            continue;
+                        }
+                    }
+                    if let Some(at) = as_of {
+                        if memory.created_at > at {
+                            continue;
+                        }
+                        if let Some(expired) = memory.expired_at {
+                            if expired <= at {
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(day) = on_date {
+                        if memory.created_at.date_naive() != day
+                            && memory.updated_at.date_naive() != day
+                        {
+                            continue;
+                        }
+                    }
+                    if seen_ids.insert(memory.id.clone()) {
                         expanded.push(ScoredMemory {
                             memory: rel.memory,
                             score: score * 0.8,
@@ -895,6 +964,8 @@ impl LightMem {
                 }
             }
         }
+        expanded.sort_by(|a, b| b.score.total_cmp(&a.score));
+        expanded.truncate(limit);
         Ok(expanded)
     }
 

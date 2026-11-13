@@ -61,6 +61,113 @@ pub struct BundleImportResult {
     pub mode: String, // "restore" or "merged"
 }
 
+// Publication uses whole-directory renames: existing files (including symlinks)
+// are moved, never opened for writing. On ordinary errors the original tree is
+// restored. This is not a crash-atomic transaction with SQLite.
+struct AttachmentSwap {
+    staging: Option<tempfile::TempDir>,
+    destination: PathBuf,
+    had_previous: bool,
+    published: bool,
+    committed: bool,
+}
+
+impl AttachmentSwap {
+    fn publish(staging: tempfile::TempDir, destination: &Path, merge: bool) -> Result<Self> {
+        let mut swap = Self {
+            staging: Some(staging),
+            destination: destination.into(),
+            had_previous: false,
+            published: false,
+            committed: false,
+        };
+        let stage = swap.staging.as_ref().unwrap().path().to_path_buf();
+        let previous = stage.join("previous");
+        match std::fs::rename(destination, &previous) {
+            Ok(()) => swap.had_previous = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        let next = stage.join("next");
+        std::fs::create_dir(&next)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o700))?;
+        }
+        if swap.had_previous && merge {
+            copy_private_tree(&previous, &next)?;
+        }
+        for entry in std::fs::read_dir(stage.join("incoming"))? {
+            let entry = entry?;
+            std::fs::rename(entry.path(), next.join(entry.file_name()))?;
+        }
+        std::fs::rename(&next, destination)?;
+        swap.published = true;
+        Ok(swap)
+    }
+
+    fn rollback(&mut self) -> Result<()> {
+        if self.published {
+            std::fs::rename(
+                &self.destination,
+                self.staging.as_ref().unwrap().path().join("failed"),
+            )?;
+            self.published = false;
+        }
+        if self.had_previous {
+            std::fs::rename(
+                self.staging.as_ref().unwrap().path().join("previous"),
+                &self.destination,
+            )?;
+            self.had_previous = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AttachmentSwap {
+    fn drop(&mut self) {
+        if !self.committed && self.rollback().is_err() {
+            // Never delete the only surviving original tree on rollback failure.
+            if let Some(staging) = self.staging.take() {
+                eprintln!(
+                    "Attachment rollback failed; recovery data retained at {:?}",
+                    staging.keep()
+                );
+            }
+        }
+    }
+}
+
+fn copy_private_tree(source: &Path, destination: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "Attachment root must be a real directory"
+    );
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "Symlinks are not allowed in the attachment tree"
+        );
+        let target = destination.join(entry.file_name());
+        if metadata.is_dir() {
+            std::fs::create_dir(&target)?;
+            copy_private_tree(&entry.path(), &target)?;
+        } else {
+            anyhow::ensure!(metadata.is_file(), "Non-regular attachment file");
+            let mut input = File::open(entry.path())?;
+            let mut output = tempfile::NamedTempFile::new_in(destination)?;
+            std::io::copy(&mut input, &mut output)?;
+            output.persist(target)?;
+        }
+    }
+    Ok(())
+}
+
 pub struct BundleService;
 
 impl BundleService {
@@ -168,27 +275,12 @@ impl BundleService {
         };
 
         // 4. Create the ZIP archive
-        let zip_file = {
-            #[cfg(unix)]
-            {
-                use std::fs::OpenOptions;
-                use std::os::unix::fs::OpenOptionsExt;
-                OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&target_path)
-                    .with_context(|| format!("Failed to create bundle file at {:?}", target_path))?
-            }
-            #[cfg(not(unix))]
-            {
-                File::create(&target_path)
-                    .with_context(|| format!("Failed to create bundle file at {:?}", target_path))?
-            }
-        };
-
-        let mut zip = ZipWriter::new(zip_file);
+        let parent = target_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut staged_export = tempfile::NamedTempFile::new_in(parent)?;
+        let mut zip = ZipWriter::new(staged_export.as_file_mut());
         let options_deflate =
             SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
@@ -208,6 +300,10 @@ impl BundleService {
         }
 
         zip.finish()?;
+        staged_export.as_file().sync_all()?;
+        staged_export
+            .persist(&target_path)
+            .with_context(|| format!("Failed to publish bundle at {:?}", target_path))?;
         Ok(target_path)
     }
 
@@ -244,13 +340,25 @@ impl BundleService {
         replace: bool,
         merge: bool,
     ) -> Result<BundleImportResult> {
+        let existing_count = storage.count_memories(None, None, None)?;
+        anyhow::ensure!(merge || replace || existing_count == 0,
+            "Target database already contains {} memories. Pass --replace to completely overwrite the vault with this transfer bundle, or --merge to combine them.", existing_count);
         let manifest = Self::inspect_bundle(bundle_path)?;
 
         let file = File::open(bundle_path)?;
         let mut archive = ZipArchive::new(file)?;
 
         // 1. Extract and verify memories.db
-        let temp_dir = tempfile::tempdir()?;
+        let parent = storage
+            .path()
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()?;
+        let attachments_dir = parent.join("attachments");
+        let temp_dir = tempfile::Builder::new()
+            .prefix(".lightmem-import-")
+            .tempdir_in(&parent)?;
         let temp_db_path = temp_dir.path().join("memories.db");
         {
             let mut db_file = archive
@@ -276,114 +384,98 @@ impl BundleService {
             actual_db_sha
         );
 
-        // 2. Extract and verify all video, image, document attachments into destination attachments/ folder
-        let attachments_dir = storage
-            .path()
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."))
-            .join("attachments");
-        std::fs::create_dir_all(&attachments_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&attachments_dir, std::fs::Permissions::from_mode(0o700));
-        }
+        anyhow::ensure!(
+            db_bytes.len() as u64 == manifest.db_size_bytes && db_bytes.len() as u64 <= MAX_DB_SIZE,
+            "Database decompressed size does not match manifest"
+        );
 
+        // Validate every declared member in a private directory. Nothing under
+        // the live attachments root is opened during extraction.
+        let incoming = temp_dir.path().join("incoming");
+        std::fs::create_dir(&incoming)?;
         let mut extracted_count = 0;
         let mut total_extracted_bytes = 0u64;
-
+        let mut destinations = HashSet::new();
         for att in &manifest.attachments {
-            if let Ok(mut zip_att) = archive.by_name(&att.entry_path) {
-                anyhow::ensure!(
-                    att.size_bytes <= MAX_ATTACHMENT_SIZE,
-                    "Attachment '{}' declared size ({} bytes) exceeds maximum limit",
-                    att.filename,
-                    att.size_bytes
-                );
-                let alloc_capacity = (att.size_bytes as usize).min(MAX_PREALLOCATION_BYTES);
-                let mut data = Vec::with_capacity(alloc_capacity);
-                zip_att
-                    .by_ref()
-                    .take(MAX_ATTACHMENT_SIZE + 1)
-                    .read_to_end(&mut data)?;
-                anyhow::ensure!(
-                    data.len() as u64 <= MAX_ATTACHMENT_SIZE,
-                    "Attachment '{}' decompressed data exceeded maximum allowed size",
-                    att.filename
-                );
-                anyhow::ensure!(
-                    data.len() as u64 == att.size_bytes,
-                    "Attachment '{}' decompressed size mismatch: expected {} bytes, got {} bytes",
-                    att.filename,
-                    att.size_bytes,
-                    data.len()
-                );
-                let actual_sha = compute_sha256_hex(&data);
-                anyhow::ensure!(
-                    actual_sha == att.sha256,
-                    "Attachment integrity verification failed for '{}' in bundle",
-                    att.filename
-                );
-
-                let safe_entry_filename = Path::new(&att.entry_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .filter(|s| {
-                        !s.is_empty() && !s.contains("..") && !s.contains('/') && !s.contains('\\')
-                    })
-                    .unwrap_or_else(|| {
-                        Path::new(&att.filename)
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .filter(|s| {
-                                !s.is_empty()
-                                    && !s.contains("..")
-                                    && !s.contains('/')
-                                    && !s.contains('\\')
-                            })
-                            .unwrap_or("attachment.bin")
-                    });
-
-                let target_file = attachments_dir.join(safe_entry_filename);
-                #[cfg(unix)]
-                {
-                    use std::fs::OpenOptions;
-                    use std::os::unix::fs::OpenOptionsExt;
-                    let mut f = OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .mode(0o600)
-                        .open(&target_file)?;
-                    f.write_all(&data)?;
-                }
-                #[cfg(not(unix))]
-                {
-                    std::fs::write(&target_file, &data)?;
-                }
-                extracted_count += 1;
-                total_extracted_bytes += data.len() as u64;
-            }
+            let filename = att
+                .entry_path
+                .strip_prefix("attachments/")
+                .filter(|name| {
+                    !name.is_empty()
+                        && *name != "."
+                        && *name != ".."
+                        && !name.contains('/')
+                        && !name.contains('\\')
+                })
+                .with_context(|| format!("Invalid attachment entry path: {}", att.entry_path))?;
+            anyhow::ensure!(
+                destinations.insert(filename.to_string()),
+                "Duplicate attachment destination: {}",
+                filename
+            );
+            anyhow::ensure!(
+                att.size_bytes <= MAX_ATTACHMENT_SIZE,
+                "Attachment '{}' exceeds maximum size",
+                att.filename
+            );
+            let mut member = archive.by_name(&att.entry_path).with_context(|| {
+                format!("Bundle is missing declared attachment {}", att.entry_path)
+            })?;
+            anyhow::ensure!(
+                !member.is_dir()
+                    && member
+                        .unix_mode()
+                        .is_none_or(|mode| mode & 0o170000 != 0o120000),
+                "Attachment member is not a regular file"
+            );
+            let mut data =
+                Vec::with_capacity((att.size_bytes as usize).min(MAX_PREALLOCATION_BYTES));
+            member
+                .by_ref()
+                .take(MAX_ATTACHMENT_SIZE + 1)
+                .read_to_end(&mut data)?;
+            anyhow::ensure!(
+                data.len() as u64 == att.size_bytes,
+                "Attachment '{}' decompressed size mismatch",
+                att.filename
+            );
+            anyhow::ensure!(
+                compute_sha256_hex(&data) == att.sha256,
+                "Attachment integrity verification failed for '{}' in bundle",
+                att.filename
+            );
+            let mut file = tempfile::NamedTempFile::new_in(&incoming)?;
+            file.write_all(&data)?;
+            file.as_file().sync_all()?;
+            file.persist(incoming.join(filename))?;
+            extracted_count += 1;
+            total_extracted_bytes += data.len() as u64;
         }
 
-        // 3. Database import / restore logic
-        let existing_count = storage.count_memories(None, None, None)?;
-        let (memories_imported, mode) = if merge {
-            let temp_storage = Storage::open(&temp_db_path)?;
-            let merged = storage.merge_vault(&temp_storage, replace)?;
-            (merged, "merged".to_string())
-        } else if replace || existing_count == 0 {
-            storage.restore_from_db_file(&temp_db_path)?;
-            let restored_count = storage.count_memories(None, None, None)?;
-            (restored_count, "restore".to_string())
+        // Opening/migrating the private database rejects incompatible schemas
+        // before any live filesystem publication (restore also validates itself).
+        let temp_storage = Storage::open(&temp_db_path)?;
+        let restored_count = temp_storage.count_memories(None, None, None)?;
+        let mut attachment_swap = AttachmentSwap::publish(temp_dir, &attachments_dir, merge)?;
+        let imported = if merge {
+            storage
+                .merge_vault(&temp_storage, replace)
+                .map(|count| (count, "merged".to_string()))
         } else {
-            anyhow::bail!(
-                "Target database already contains {} memories. Pass --replace to completely overwrite the vault with this transfer bundle, or --merge to combine them.",
-                existing_count
-            );
+            storage
+                .restore_from_db_file(&temp_db_path)
+                .map(|()| (restored_count, "restore".to_string()))
         };
+        let (memories_imported, mode) = match imported {
+            Ok(result) => result,
+            Err(error) => {
+                attachment_swap.rollback().context(
+                    "Failed to roll back attachment publication; backup retained in staging",
+                )?;
+                return Err(error);
+            }
+        };
+        attachment_swap.committed = true;
 
         Ok(BundleImportResult {
             bundle_file: bundle_path.to_path_buf(),

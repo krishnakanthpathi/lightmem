@@ -26,12 +26,15 @@ pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]
 pub use services::McpServer;
 pub use services::{
-    serve_docs, AnswerResult, BundleAttachmentEntry, BundleImportResult, BundleManifest,
-    BundleService, BundleStats, ConnectResult, ConnectService, DocsOptions, EmbeddingProvider,
-    Exporter, HashEmbeddingProvider, HybridSearchEngine, ImportCandidate, JsonMemoryImporter,
-    LlmReranker, MemoryImporter, MultimodalInput, ObservedCandidate, ObserverService,
-    OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider,
-    OnnxQaReranker, PlatformInfo, PrecisionReranker, Reranker, Top1Reranker,
+    serve_api, AnswerRequest, AnswerResult, AttachmentPayload, BundleAttachmentEntry,
+    BundleImportResult, BundleManifest, BundleService, BundleStats, ClearPayload,
+    ConnectResult, ConnectService, DocsOptions, EmbeddingProvider, Exporter,
+    ForgetPayload, HashEmbeddingProvider, HybridSearchEngine, ImportCandidate,
+    JsonMemoryImporter, LinkRequest, LinkResult, LlmReranker, MemoryImporter, MultimodalInput,
+    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider,
+    OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker,
+    RecallRequest, RememberRequest, RemoteClient, Reranker, ServerOptions, serve_docs,
+    Top1Reranker, UnlinkRequest,
 };
 
 pub use views::CliView;

@@ -130,14 +130,14 @@ lmem import ./backup.json --enrich             # Transactional import with heuri
 # 9. Engine, Reranker & Setup Wizard
 lmem setup                                         # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
 lmem setup --preset ollama-local                   # Configure Local Ollama LLM backend
-lmem setup --preset local                          # Configure 100% offline local ONNX mode
+lmem setup --preset local                          # Configure 100% offline local ONNX mode (bge-small + minilm-squad2)
 lmem config                                        # View active settings & available setup presets
 lmem config --json                                 # Machine-readable JSON configuration
 lmem config --preset local                         # Preset 1: 100% offline (bge-small ONNX + minilm-squad2 QA)
 lmem config --preset ollama-cloud                  # Preset 2: Local ONNX embeddings + Ollama gemma4:31b-cloud reranker
 lmem config --preset ollama-local                  # Preset 3: Local ONNX embeddings + Ollama localhost LLM reranker
 lmem config --download all                         # Pre-cache ONNX embedding + QA models for offline use
-lmem answer "test question" -r minilm-squad2       # Per-query local ONNX override
+lmem answer "test question" -r minilm-squad2       # Per-query ONNX reranker override
 lmem answer "test question" -r ollama:gemma4:31b-cloud # Per-query Ollama override
 
 # 10. AI Agent Platform Connection & Model Context Protocol (MCP)
@@ -152,11 +152,15 @@ lmem connect all                                   # Deploy to all supported age
 lmem connect --list                                # Inspect detected agent platforms on the system
 lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
 
-# 11. Vault Dashboard, Identity Topology & Embedded Docs
+# 11. Vault Dashboard, Identity Topology, Remote Backend Server & Embedded Docs
 lmem status                                        # Visual dashboard of all managed vaults, active connections, and storage
 lmem vaults                                        # Alias for lmem status (or lmem identity status)
 lmem status --json                                 # Machine-readable vault and connection topology
-lmem docs                                          # Launch offline embedded docs HTTP server in foreground (aliases: doc, web)
+lmem context                                       # Show active vault or remote connection status
+lmem serve --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server for multi-device network access
+lmem config --remote http://server:8080 --api-key "secret" # Configure client to talk to remote backend
+lmem config --clear-remote                         # Revert back to local embedded SQLite mode
+lmem docs                                         # Launch offline embedded docs HTTP server in foreground (aliases: doc, web, --port 8085)
 ```
 
 ---
@@ -313,7 +317,7 @@ When migrating, sharing, or transferring a memory vault between machines, use **
    # Export complete vault (DB + all video, photo, audio & doc files) into a portable .zip bundle
    lmem bundle export -o ./my_vault_backup.zip
    # Alternative shorthand:
-   lmem export --bundle -o ./my_vault_backup.zip
+   lmem export --bundle -o my_vault_backup.zip
 
    # Inspect bundle contents (manifest, memory count, video resolutions, audio durations, byte sizes) without extracting
    lmem bundle info ./my_vault_backup.zip
@@ -325,5 +329,5 @@ When migrating, sharing, or transferring a memory vault between machines, use **
    lmem import ./my_vault_backup.zip
 
    # Merge bundle into an existing database without overwriting existing memories
-   lmem bundle import ./my_vault_backup.zip --merge
+   lmem bundle import my_vault_backup.zip --merge
    ```

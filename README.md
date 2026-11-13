@@ -233,14 +233,14 @@ Transfer complete memory vaults between machines, servers, or workstations in a 
 ```bash
 # Export complete vault with clean SQLite checkpoint (VACUUM INTO) & all physical media
 lmem bundle export -o my-vault.zip
-lmem export --bundle -o my-vault.zip
+lmem export --bundle -o my-vault.zip        # -o specifies output path for bundle export
 
 # Inspect archive contents, record counts, and attachments without unzipping
 lmem bundle info my-vault.zip
 
 # Restore on a new machine with zero re-indexing or re-embedding overhead
-lmem bundle import my-vault.zip              # Clean restore (default: replace)
-lmem bundle import my-vault.zip --merge      # Merge into existing memories
+lmem bundle import my-vault.zip --replace   # Explicit replace mode (default)
+lmem bundle import my-vault.zip --merge     # Merge into existing memories without wiping
 ```
 
 Bundles use the standard `.zip` (or `.lmbundle`) format containing:
@@ -289,6 +289,41 @@ for entity in mem.entities:
 - **Direct Media Opening (`--open`)**: Launch recalled or inspected attachments immediately in your system default viewer (`open` on macOS, `xdg-open` on Linux, `cmd /C start` on Windows): `lmem recall "diagram" --open` or `lmem inspect <ID> --open`.
 - **Granular Format Tags & Attachment Dedup**: Storing attachments auto-tags both media kind (`#image`, `#video`) and lowercase extension (`#png`, `#mp4`), while alerting on duplicate SHA-256 blobs in batch or vault.
 - **Unified Vault Telemetry Dashboard (`lmem status` / `vaults`)**: Inspect default and connection-scoped vaults, memory counts, and disk paths via `lmem status` (`lmem vaults`, `lmem identity status`, or Python `lm.vault_status()`).
+
+---
+
+## 🌐 Remote Backend Server & Multi-Device Access (`lmem serve`)
+
+Run LightMem as a centralized, high-throughput memory backend on any device (home server, Mac mini, Linux VPS, Raspberry Pi, or local network) and connect from any client device:
+
+```bash
+# 1. Start the server on any machine
+lmem serve --host 0.0.0.0 --port 8080 --api-key "my-super-secret-key"
+
+# Auto-generates a secure random bearer token if --api-key is omitted
+lmem serve --port 8080
+
+# Or run without authentication for local trusted networks
+lmem serve --port 8080 --no-auth
+```
+
+### Connect Client Devices
+
+Any machine or agent with `lmem` installed can connect to the remote backend:
+
+```bash
+# Option A: Save in persistent configuration
+lmem config --remote http://my-server.local:8080 --api-key "my-super-secret-key"
+
+# Option B: Per-session or agent environment variables
+export LIGHTMEM_REMOTE_URL="http://my-server.local:8080"
+export LIGHTMEM_API_KEY="my-super-secret-key"
+
+# Option C: Direct one-off command flag
+lmem --remote http://my-server.local:8080 --api-key "my-super-secret-key" recall "project status"
+```
+
+When connected to a remote backend, standard CLI commands (`remember`, `recall`, `answer`, `list`, `inspect`, `forget`, `clear`, `link`, `related`, `graph`, `stats`, `context`) execute transparently over HTTP with identical formatting, tables, and JSON outputs.
 
 ---
 

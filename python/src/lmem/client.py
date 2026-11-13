@@ -65,6 +65,12 @@ class LightMem:
     def _call(self, subcommand: str, extra_args: List[str], input_text: Optional[str] = None) -> Any:
         full_args = self._build_base_args() + [subcommand, "--json"] + extra_args
         code, stdout, stderr = execute_lmem(full_args, input_text=input_text)
+        # Exit 1 with a machine-readable miss is distinct from an operational error.
+        # For get/inspect with missing IDs, the CLI exits 1 with empty/null output.
+        if (code == 1 and subcommand in {"get", "inspect"}
+                and not stderr.strip()
+                and (not stdout.strip() or stdout.strip() in {"null", "[]"})):
+            return json.loads(stdout) if stdout.strip() else None
         if code != 0:
             err = stderr.strip() or stdout.strip()
             raise RuntimeError(f"lmem {subcommand} failed (exit code {code}): {err}")
@@ -175,7 +181,7 @@ class LightMem:
         save_to: Optional[str | Path] = None,
         path: bool = False,
     ) -> List[ScoredMemory] | List[str]:
-        args = [query, "-l", str(limit)]
+        args = ["-l", str(limit)]
         if category:
             args.extend(["-t", category])
         if media:
@@ -193,6 +199,7 @@ class LightMem:
         if path:
             args.append("--path")
 
+        args.extend(["--", query])
         data = self._call("recall", args)
         if path:
             return [str(p) for p in data] if isinstance(data, list) else []
@@ -210,7 +217,7 @@ class LightMem:
         as_of: Optional[str] = None,
         date: Optional[str] = None,
     ) -> AnswerResult:
-        args = [question, "-l", str(limit)]
+        args = ["-l", str(limit)]
         if category:
             args.extend(["-t", category])
         if reranker:
@@ -220,6 +227,7 @@ class LightMem:
         if date:
             args.extend(["--date", date])
 
+        args.extend(["--", question])
         data = self._call("answer", args)
         return AnswerResult.from_dict(data)
 
@@ -272,11 +280,8 @@ class LightMem:
 
     # 5. Get Single Memory
     def get(self, memory_id: str) -> Optional[Memory]:
-        try:
-            data = self._call("get", [memory_id])
-            return Memory.from_dict(data) if data else None
-        except RuntimeError:
-            return None
+        data = self._call("get", [memory_id])
+        return Memory.from_dict(data) if data else None
 
     # 5b. Inspect Memory & Graph Links
     def inspect(
@@ -299,15 +304,15 @@ class LightMem:
         if path:
             args.append("--path")
 
-        try:
-            data = self._call("inspect", args)
-            if path:
-                return [str(p) for p in data] if isinstance(data, list) else []
-            if isinstance(data, list):
-                return [MemoryInspection.from_dict(item) for item in data]
-            return MemoryInspection.from_dict(data) if data else None
-        except RuntimeError:
-            return [] if (path or len(terms) > 1) else None
+        data = self._call("inspect", args)
+        if path:
+            return [str(p) for p in data] if isinstance(data, list) else []
+        if isinstance(data, list):
+            return [MemoryInspection.from_dict(item) for item in data]
+        if data is None:
+            # Return [] for multi-id miss, None for single-id miss
+            return [] if len(terms) > 1 else None
+        return MemoryInspection.from_dict(data)
 
     # 6. Forget (Soft or Hard)
     def forget(self, memory_id: str, hard: bool = False) -> bool:
