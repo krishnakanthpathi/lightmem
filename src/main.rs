@@ -8,6 +8,7 @@ use lightmem::{
 };
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "lmem")]
@@ -40,6 +41,14 @@ struct Cli {
     /// Explicit path to SQLite database file
     #[arg(long, global = true)]
     db: Option<PathBuf>,
+
+    /// Remote LightMem backend server URL (e.g. http://192.168.1.100:8080)
+    #[arg(long, global = true)]
+    remote: Option<String>,
+
+    /// Secret API key for remote LightMem backend authentication
+    #[arg(long, global = true)]
+    api_key: Option<String>,
 
     /// Print version information (use with --json for machine-readable JSON)
     #[arg(short = 'V', long = "version")]
@@ -418,6 +427,18 @@ enum Commands {
         #[arg(long)]
         yes: bool,
 
+        /// Remote LightMem backend server URL (e.g. http://my-server:8080)
+        #[arg(long, visible_alias = "remote-url")]
+        remote: Option<String>,
+
+        /// Secret API key for authenticating with the remote server
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Clear saved remote server configuration and revert to local mode
+        #[arg(long)]
+        clear_remote: bool,
+
         /// Output configuration as JSON
         #[arg(long)]
         json: bool,
@@ -660,6 +681,26 @@ enum Commands {
         no_browser: bool,
     },
 
+    /// Launch a persistent HTTP backend server for remote multi-device memory access
+    #[command(visible_aliases = ["server"])]
+    Serve {
+        /// Host interface to bind (defaults to 0.0.0.0 for LAN/remote access)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// Port to listen on
+        #[arg(short = 'p', long, default_value = "8080")]
+        port: u16,
+
+        /// Secret API key required for client requests (auto-generated if omitted)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Run server without requiring authentication (development only)
+        #[arg(long)]
+        no_auth: bool,
+    },
+
     /// Uninstall LightMem binaries, shell completions, and optionally purge data
     Uninstall {
         /// Purge database (~/.lightmem/memories.db) and downloaded models
@@ -835,6 +876,317 @@ fn run_identity(action: &IdentityCommand, json: bool, default_db: PathBuf) -> Re
     Ok(())
 }
 
+fn handle_remote_command(
+    client: &lightmem::RemoteClient,
+    command: &Commands,
+    json: bool,
+) -> Result<bool> {
+    match command {
+        Commands::Remember {
+            content,
+            files,
+            extract: _,
+            reranker: _,
+            category,
+            title,
+            tags,
+            confidence: _,
+            ttl,
+            supersede: _,
+            provenance,
+            no_entities,
+            json: cmd_json,
+        } => {
+            let mut attachment_payloads = Vec::new();
+            for fpath in files {
+                let data = std::fs::read(fpath)
+                    .with_context(|| format!("Failed to read attachment file: {}", fpath.display()))?;
+                let fname = fpath
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                let (mime, _) = lightmem::detect_mime_and_kind(&fname, &data);
+                let data_base64 = lightmem::encode_base64(&data);
+                attachment_payloads.push(lightmem::AttachmentPayload {
+                    name: fname,
+                    mime: Some(mime),
+                    data_base64,
+                });
+            }
+            let req = lightmem::RememberRequest {
+                content: content.clone(),
+                category: *category,
+                tags: tags
+                    .as_ref()
+                    .map(|t| t.split(',').map(|s| s.trim().to_string()).collect()),
+                source: provenance.clone().or_else(|| Some("cli".to_string())),
+                title: title.clone(),
+                ttl: ttl.map(|d| format!("{}s", d.num_seconds())),
+                no_entities: Some(*no_entities),
+                attachments: if attachment_payloads.is_empty() {
+                    None
+                } else {
+                    Some(attachment_payloads)
+                },
+            };
+            let memory = client.remember(&req)?;
+            if *cmd_json || json {
+                println!("{}", serde_json::to_string_pretty(&memory)?);
+            } else {
+                CliView::render_remembered(&memory, Path::new(&client.base_url), false)?;
+            }
+            Ok(true)
+        }
+
+        Commands::Recall {
+            query,
+            image: _,
+            category,
+            media,
+            as_of,
+            date,
+            limit,
+            min_similarity,
+            precision,
+            multi_hop,
+            save_to: _,
+            path: _,
+            open: _,
+            json: cmd_json,
+        } => {
+            let req = lightmem::RecallRequest {
+                query: query.clone(),
+                category: *category,
+                media: media.clone(),
+                as_of: *as_of,
+                date: *date,
+                limit: *limit,
+                min_similarity: *min_similarity,
+                precision: *precision,
+                multi_hop: *multi_hop,
+            };
+            let results = client.recall(&req)?;
+            if *cmd_json || json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                CliView::render_recall(query, &results, Path::new(&client.base_url), false)?;
+            }
+            Ok(true)
+        }
+
+        Commands::Answer {
+            question,
+            precision,
+            reranker,
+            category,
+            as_of,
+            date,
+            limit,
+            json: cmd_json,
+        } => {
+            let req = lightmem::AnswerRequest {
+                question: question.clone(),
+                precision: *precision,
+                reranker: reranker.clone(),
+                category: *category,
+                as_of: *as_of,
+                date: *date,
+                limit: *limit,
+            };
+            let result = client.answer(&req)?;
+            CliView::render_answer(&result, *cmd_json || json)?;
+            Ok(true)
+        }
+
+        Commands::List {
+            category,
+            media,
+            status,
+            as_of,
+            date,
+            limit,
+            offset,
+            page,
+            save_to: _,
+            path: _,
+            json: cmd_json,
+        } => {
+            let paginated = client.list(
+                *limit,
+                *offset,
+                *page,
+                *category,
+                Some(*status),
+                media.clone(),
+                *date,
+                *as_of,
+            )?;
+            CliView::render_paginated_list(
+                &paginated,
+                Path::new(&client.base_url),
+                *cmd_json || json,
+            )?;
+            Ok(true)
+        }
+
+        Commands::Inspect {
+            terms,
+            save_to: _,
+            path: _,
+            open: _,
+            json: cmd_json,
+        } => {
+            let mut found_any = false;
+            for term in terms {
+                if let Some(record) = client.get(term)? {
+                    found_any = true;
+                    CliView::render_inspect(
+                        &record,
+                        &[],
+                        Path::new(&client.base_url),
+                        *cmd_json || json,
+                    )?;
+                }
+            }
+            if !found_any {
+                if *cmd_json || json {
+                    println!("null");
+                } else {
+                    eprintln!("Memory not found: {}", terms.join(", "));
+                }
+            }
+            Ok(true)
+        }
+
+        Commands::Forget {
+            id,
+            all,
+            hard,
+            json: cmd_json,
+        } => {
+            let ok = client.forget(id.as_deref(), *all, *hard)?;
+            CliView::render_forget(id.as_deref().unwrap_or("*"), ok, *hard, *cmd_json || json)?;
+            Ok(true)
+        }
+
+        Commands::Clear {
+            soft,
+            json: cmd_json,
+        } => {
+            let removed = client.clear(*soft)?;
+            CliView::render_clear(
+                removed,
+                !*soft,
+                Path::new(&client.base_url),
+                *cmd_json || json,
+            )?;
+            Ok(true)
+        }
+
+        Commands::Stats { json: cmd_json } => {
+            let stats = client.stats()?;
+            CliView::render_stats(&stats, Path::new(&client.base_url), *cmd_json || json)?;
+            Ok(true)
+        }
+
+        Commands::Link {
+            source,
+            target,
+            relation,
+            weight,
+            json: cmd_json,
+        } => {
+            let link = client.link(source, target, Some(relation), Some(*weight))?;
+            CliView::render_link(
+                &link.source_id,
+                &link.target_id,
+                &link.relation,
+                link.weight,
+                *cmd_json || json,
+            )?;
+            Ok(true)
+        }
+
+        Commands::Unlink {
+            source,
+            target,
+            relation,
+            json: cmd_json,
+        } => {
+            let unlinked = client.unlink(source, target, relation.as_deref())?;
+            CliView::render_unlink(source, target, relation.as_deref(), unlinked, *cmd_json || json)?;
+            Ok(true)
+        }
+
+        Commands::Related {
+            id,
+            hops,
+            json: cmd_json,
+        } => {
+            let results = client.related(id, *hops)?;
+            CliView::render_related(id, &results, *cmd_json || json)?;
+            Ok(true)
+        }
+
+        Commands::Graph {
+            focus,
+            hops,
+            json: cmd_json,
+        } => {
+            let snapshot = client.graph(focus.as_deref(), Some(*hops))?;
+            CliView::render_graph(&snapshot, *cmd_json || json)?;
+            Ok(true)
+        }
+
+        Commands::Context { json: cmd_json } => {
+            let stats_res = client.stats();
+            let health_res = client.health();
+            let is_online = health_res.is_ok();
+            let info = serde_json::json!({
+                "mode": "remote",
+                "remote_url": client.base_url,
+                "status": if is_online { "online" } else { "unreachable" },
+                "api_key_configured": client.api_key.is_some(),
+                "total_memories": stats_res.as_ref().map(|s| s.total_memories).unwrap_or(0),
+                "active_memories": stats_res.as_ref().map(|s| s.active_memories).unwrap_or(0),
+            });
+            if *cmd_json || json {
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!();
+                println!("  \x1b[1;38;2;220;38;38m❖\x1b[0m \x1b[1mLightMem Remote Context\x1b[0m");
+                println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+                println!("  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} \x1b[38;2;96;165;250m{}\x1b[0m", "Remote Endpoint", client.base_url);
+                println!(
+                    "  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} {}",
+                    "Server Status",
+                    if is_online { "\x1b[1;32m● Online\x1b[0m" } else { "\x1b[1;31m○ Unreachable\x1b[0m" }
+                );
+                println!(
+                    "  \x1b[38;2;113;113;122m├─\x1b[0m {:<20} {}",
+                    "Authentication",
+                    if client.api_key.is_some() { "\x1b[38;2;234;179;8mBearer Token (Configured)\x1b[0m" } else { "\x1b[38;2;148;163;184mNone\x1b[0m" }
+                );
+                if let Ok(st) = stats_res {
+                    println!(
+                        "  \x1b[38;2;113;113;122m└─\x1b[0m {:<20} \x1b[1m{} active\x1b[0m ({} total)",
+                        "Remote Vault",
+                        st.active_memories,
+                        st.total_memories
+                    );
+                } else {
+                    println!("  \x1b[38;2;113;113;122m└─\x1b[0m {:<20} \x1b[38;2;239;68;68mCould not fetch remote stats\x1b[0m", "Remote Vault");
+                }
+                println!();
+            }
+            Ok(true)
+        }
+
+        _ => Ok(false),
+    }
+}
+
 fn open_controller(
     db_path: Option<&Path>,
     global: bool,
@@ -999,6 +1351,31 @@ fn main() -> Result<()> {
         .or(env_db.as_deref())
         .or_else(|| connection.map(|c| c.db_path.as_path()));
     let global = cli.global;
+
+    let cfg = LightMemConfig::try_load().unwrap_or_default();
+    let effective_remote_url = cli
+        .remote
+        .or_else(|| cfg.effective_remote_url());
+    let effective_api_key = cli
+        .api_key
+        .or_else(|| cfg.effective_api_key());
+
+    if let Some(ref remote_url) = effective_remote_url {
+        let client = lightmem::RemoteClient::new(remote_url, effective_api_key.clone());
+        if cli.command.is_none() {
+            let stats = client.stats()?;
+            if cli.json {
+                return CliView::render_stats(&stats, Path::new(remote_url), true);
+            }
+            CliView::render_intro(Path::new(remote_url), &stats);
+            return Ok(());
+        }
+        if let Some(ref cmd) = cli.command {
+            if handle_remote_command(&client, cmd, cli.json)? {
+                return Ok(());
+            }
+        }
+    }
 
     let Some(command) = cli.command else {
         if cli.json {
@@ -1372,11 +1749,10 @@ fn main() -> Result<()> {
                 if ids.is_empty() {
                     if json {
                         println!("[]");
-                        std::process::exit(0);
                     } else {
                         eprintln!("Memory not found: {}", terms.join(", "));
-                        std::process::exit(1);
                     }
+                    std::process::exit(1);
                 }
                 let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
                 if open {
@@ -1385,11 +1761,10 @@ fn main() -> Result<()> {
                 if all_paths.is_empty() {
                     if json {
                         println!("[]");
-                        std::process::exit(0);
                     } else {
                         eprintln!("No attachments found for: {}", terms.join(", "));
-                        std::process::exit(1);
                     }
+                    std::process::exit(1);
                 }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&all_paths)?);
@@ -1442,11 +1817,10 @@ fn main() -> Result<()> {
                 } else {
                     if json {
                         println!("null");
-                        std::process::exit(0);
                     } else {
                         eprintln!("Memory not found: {}", term);
-                        std::process::exit(1);
                     }
+                    std::process::exit(1);
                 }
             } else {
                 let mut records = Vec::new();
@@ -1455,12 +1829,12 @@ fn main() -> Result<()> {
                         records.push(record);
                     }
                 }
-                if json && records.is_empty() {
-                    println!("[]");
-                    std::process::exit(0);
-                }
                 if records.is_empty() {
-                    eprintln!("Memory not found: {}", terms.join(", "));
+                    if json {
+                        println!("[]");
+                    } else {
+                        eprintln!("Memory not found: {}", terms.join(", "));
+                    }
                     std::process::exit(1);
                 }
                 let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
@@ -1684,6 +2058,9 @@ fn main() -> Result<()> {
             reranker,
             reset_db,
             yes,
+            remote,
+            api_key,
+            clear_remote,
             json,
         } => {
             if reset_db {
@@ -1820,6 +2197,30 @@ fn main() -> Result<()> {
                         r
                     );
                 }
+            }
+
+            if let Some(r) = remote {
+                let trimmed = r.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                    cfg.remote_url = None;
+                } else {
+                    cfg.remote_url = Some(trimmed.trim_end_matches('/').to_string());
+                }
+                changed = true;
+            }
+            if let Some(k) = api_key {
+                let trimmed = k.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                    cfg.api_key = None;
+                } else {
+                    cfg.api_key = Some(trimmed.to_string());
+                }
+                changed = true;
+            }
+            if clear_remote {
+                cfg.remote_url = None;
+                cfg.api_key = None;
+                changed = true;
             }
 
             if changed {
@@ -2401,6 +2802,22 @@ fn main() -> Result<()> {
                 no_browser,
             };
             lightmem::serve_docs(options)?;
+        }
+
+        Commands::Serve {
+            host,
+            port,
+            api_key,
+            no_auth,
+        } => {
+            let lm = open_controller(effective_db, global, connection)?;
+            let options = lightmem::ServerOptions {
+                host,
+                port,
+                api_key,
+                no_auth,
+            };
+            lightmem::serve_api(Arc::new(lm), options)?;
         }
 
         Commands::Uninstall {

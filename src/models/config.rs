@@ -22,6 +22,10 @@ pub struct LightMemConfig {
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 fn default_reranker() -> String {
@@ -37,6 +41,8 @@ impl Default for LightMemConfig {
             ollama_api_key: None,
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
+            remote_url: None,
+            api_key: None,
         }
     }
 }
@@ -174,6 +180,34 @@ impl LightMemConfig {
                     .map(|k| k.trim().to_string())
                     .filter(|k| !k.is_empty())
             })
+    }
+
+    /// Resolves effective remote backend URL from environment variables (LIGHTMEM_REMOTE_URL, LIGHTMEM_URL) or config.
+    pub fn effective_remote_url(&self) -> Option<String> {
+        let raw = std::env::var("LIGHTMEM_REMOTE_URL")
+            .ok()
+            .or_else(|| std::env::var("LIGHTMEM_URL").ok())
+            .or_else(|| self.remote_url.clone())?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(trimmed.trim_end_matches('/').to_string())
+        }
+    }
+
+    /// Resolves effective remote backend API key from environment variables (LIGHTMEM_API_KEY, LIGHTMEM_KEY) or config.
+    pub fn effective_api_key(&self) -> Option<String> {
+        let raw = std::env::var("LIGHTMEM_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("LIGHTMEM_KEY").ok())
+            .or_else(|| self.api_key.clone())?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
     /// Stable embedding-space identity, including card preprocessing and engine version.

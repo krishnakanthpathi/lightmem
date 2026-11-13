@@ -152,10 +152,14 @@ lmem connect all                                   # Deploy to all supported age
 lmem connect --list                                # Inspect detected agent platforms on the system
 lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
 
-# 11. Vault Dashboard, Identity Topology & Embedded Docs
+# 11. Vault Dashboard, Identity Topology, Remote Backend Server & Embedded Docs
 lmem status                                        # Visual dashboard of all managed vaults, active connections, and storage
 lmem vaults                                        # Alias for lmem status (or lmem identity status)
 lmem status --json                                 # Machine-readable vault and connection topology
+lmem context                                       # Show active vault or remote connection status
+lmem serve --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server for multi-device network access
+lmem config --remote http://server:8080 --api-key "secret" # Configure client to talk to remote backend
+lmem config --clear-remote                         # Revert back to local embedded SQLite mode
 lmem docs                                         # Launch offline embedded docs HTTP server in foreground (aliases: doc, web, --port 8085)
 ```
 

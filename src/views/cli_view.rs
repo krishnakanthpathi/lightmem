@@ -1273,6 +1273,24 @@ impl CliView {
             Self::slate("Ollama Embed Model"),
             Self::slate(&cfg.embedding_model)
         );
+        if let Some(ref remote) = cfg.remote_url {
+            println!(
+                "  {} {:<20} {}",
+                Self::slate("├─"),
+                Self::slate("Remote Backend URL"),
+                Self::violet_bold(remote)
+            );
+            println!(
+                "  {} {:<20} {}",
+                Self::slate("├─"),
+                Self::slate("Remote API Key"),
+                if cfg.api_key.is_some() {
+                    Self::emerald_bold("Configured (Secret)")
+                } else {
+                    Self::slate("None")
+                }
+            );
+        }
         let active_db = effective_db
             .map(Path::to_path_buf)
             .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));

@@ -138,8 +138,7 @@ fn mcp_wire_validates_envelopes_and_preserves_notification_semantics() {
     // Final recall sees the notification side-effect remember.
     assert_eq!(responses[10]["id"], 10);
     assert_eq!(responses[10]["result"]["isError"], false);
-    assert!(responses[10]["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("notification side effect"));
+    let recall_text = responses[10]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(recall_text.contains("notification side effect"));
+    assert!(recall_text.contains("\"count\": 1"));
 }

@@ -1,3 +1,4 @@
+pub mod api_server;
 pub mod bundle;
 pub mod connect;
 pub mod docs_server;
@@ -8,9 +9,14 @@ pub mod importer;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod observer;
+pub mod remote_client;
 pub mod reranker;
 pub mod search;
 
+pub use api_server::{
+    serve_api, AnswerRequest, AttachmentPayload, ClearPayload, ForgetPayload, LinkRequest,
+    RecallRequest, RememberRequest, ServerOptions, UnlinkRequest,
+};
 pub use bundle::{
     BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService, BundleStats,
 };
@@ -29,6 +35,7 @@ pub use importer::{
     extract_imported_links, ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter,
 };
 pub use observer::{ObservedCandidate, ObserverService};
+pub use remote_client::{LinkResult, RemoteClient};
 pub use reranker::{
     AnswerResult, LlmReranker, OllamaReranker, OnnxQaReranker, PrecisionReranker, Reranker,
     Top1Reranker,

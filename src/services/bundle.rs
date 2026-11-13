@@ -73,7 +73,7 @@ struct AttachmentSwap {
 }
 
 impl AttachmentSwap {
-    fn publish(staging: tempfile::TempDir, destination: &Path) -> Result<Self> {
+    fn publish(staging: tempfile::TempDir, destination: &Path, merge: bool) -> Result<Self> {
         let mut swap = Self {
             staging: Some(staging),
             destination: destination.into(),
@@ -95,7 +95,7 @@ impl AttachmentSwap {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o700))?;
         }
-        if swap.had_previous {
+        if swap.had_previous && merge {
             copy_private_tree(&previous, &next)?;
         }
         for entry in std::fs::read_dir(stage.join("incoming"))? {
@@ -456,7 +456,7 @@ impl BundleService {
         // before any live filesystem publication (restore also validates itself).
         let temp_storage = Storage::open(&temp_db_path)?;
         let restored_count = temp_storage.count_memories(None, None, None)?;
-        let mut attachment_swap = AttachmentSwap::publish(temp_dir, &attachments_dir)?;
+        let mut attachment_swap = AttachmentSwap::publish(temp_dir, &attachments_dir, merge)?;
         let imported = if merge {
             storage
                 .merge_vault(&temp_storage, replace)

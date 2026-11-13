@@ -292,6 +292,41 @@ for entity in mem.entities:
 
 ---
 
+## 🌐 Remote Backend Server & Multi-Device Access (`lmem serve`)
+
+Run LightMem as a centralized, high-throughput memory backend on any device (home server, Mac mini, Linux VPS, Raspberry Pi, or local network) and connect from any client device:
+
+```bash
+# 1. Start the server on any machine
+lmem serve --host 0.0.0.0 --port 8080 --api-key "my-super-secret-key"
+
+# Auto-generates a secure random bearer token if --api-key is omitted
+lmem serve --port 8080
+
+# Or run without authentication for local trusted networks
+lmem serve --port 8080 --no-auth
+```
+
+### Connect Client Devices
+
+Any machine or agent with `lmem` installed can connect to the remote backend:
+
+```bash
+# Option A: Save in persistent configuration
+lmem config --remote http://my-server.local:8080 --api-key "my-super-secret-key"
+
+# Option B: Per-session or agent environment variables
+export LIGHTMEM_REMOTE_URL="http://my-server.local:8080"
+export LIGHTMEM_API_KEY="my-super-secret-key"
+
+# Option C: Direct one-off command flag
+lmem --remote http://my-server.local:8080 --api-key "my-super-secret-key" recall "project status"
+```
+
+When connected to a remote backend, standard CLI commands (`remember`, `recall`, `answer`, `list`, `inspect`, `forget`, `clear`, `link`, `related`, `graph`, `stats`, `context`) execute transparently over HTTP with identical formatting, tables, and JSON outputs.
+
+---
+
 ## 📖 Embedded Local Documentation Server (`lmem docs`)
 
 Serve complete technical documentation and the landing page 100% offline directly from the standalone binary without external web servers or background daemons:

@@ -49,6 +49,8 @@ fn hash_config() -> LightMemConfig {
         ollama_api_key: None,
         embedding_model: "nomic-embed-text".to_string(),
         reranker: "top1".to_string(),
+        remote_url: None,
+        api_key: None,
     }
 }
 
@@ -259,6 +261,8 @@ fn test_explicit_single_model_llm_extraction_on_attachment() {
         ollama_api_key: None,
         embedding_model: "nomic-embed-text".to_string(),
         reranker: "ollama:gemma4:31b-cloud".to_string(),
+        remote_url: None,
+        api_key: None,
     };
     let lm = LightMem::open_at(&db_path, cfg).unwrap();
 

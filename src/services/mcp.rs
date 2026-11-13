@@ -127,19 +127,16 @@ impl McpServer {
     }
 
     fn handle_request(&self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
-        let id = match req.id {
-            Some(id) => id,
-            None => {
-                // Notifications don't receive responses
-                return None;
-            }
-        };
+        let is_notification = req.id.is_none();
 
         // Validate jsonrpc version.
         if req.jsonrpc != "2.0" {
+            if is_notification {
+                return None;
+            }
             return Some(JsonRpcResponse {
                 jsonrpc: "2.0",
-                id,
+                id: req.id.unwrap_or(Value::Null),
                 result: None,
                 error: Some(JsonRpcError {
                     code: -32600,
@@ -153,9 +150,12 @@ impl McpServer {
         let method = match req.method {
             Some(Value::String(ref m)) => m.clone(),
             Some(_) => {
+                if is_notification {
+                    return None;
+                }
                 return Some(JsonRpcResponse {
                     jsonrpc: "2.0",
-                    id,
+                    id: req.id.unwrap_or(Value::Null),
                     result: None,
                     error: Some(JsonRpcError {
                         code: -32600,
@@ -165,9 +165,12 @@ impl McpServer {
                 });
             }
             None => {
+                if is_notification {
+                    return None;
+                }
                 return Some(JsonRpcResponse {
                     jsonrpc: "2.0",
-                    id,
+                    id: req.id.unwrap_or(Value::Null),
                     result: None,
                     error: Some(JsonRpcError {
                         code: -32600,
@@ -177,6 +180,19 @@ impl McpServer {
                 });
             }
         };
+
+        if is_notification {
+            // Notifications execute side effects without sending a response.
+            if method == "tools/call" {
+                let params = req.params.unwrap_or(Value::Null);
+                let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+                let _ = self.call_tool(tool_name, arguments);
+            }
+            return None;
+        }
+
+        let id = req.id.unwrap();
 
         // Validate id: must be String, Number, or Null per JSON-RPC 2.0.
         if !matches!(&id, Value::String(_) | Value::Number(_) | Value::Null) {

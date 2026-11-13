@@ -8,7 +8,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_SRC = REPO_ROOT / "python" / "src"
+if str(PYTHON_SRC) not in sys.path:
+    sys.path.insert(0, str(PYTHON_SRC))
+
+DEBUG_BIN = REPO_ROOT / "target" / "debug" / ("lmem.exe" if os.name == "nt" else "lmem")
+RELEASE_BIN = REPO_ROOT / "target" / "release" / ("lmem.exe" if os.name == "nt" else "lmem")
+if "LMEM_BINARY_PATH" not in os.environ:
+    if DEBUG_BIN.is_file():
+        os.environ["LMEM_BINARY_PATH"] = str(DEBUG_BIN)
+    elif RELEASE_BIN.is_file():
+        os.environ["LMEM_BINARY_PATH"] = str(RELEASE_BIN)
+
 from lmem import LightMem
 
 

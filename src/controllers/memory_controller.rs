@@ -358,17 +358,53 @@ impl LightMem {
         reranker_override: Option<&str>,
         category: Option<MemoryType>,
         title: Option<String>,
-        mut tags: Vec<String>,
+        tags: Vec<String>,
         confidence: Option<f32>,
         ttl: Option<chrono::Duration>,
         supersede: bool,
         provenance: Option<String>,
     ) -> Result<(MemoryRecord, Vec<MemoryConflict>, Option<String>)> {
         let mut attachment_inputs = Vec::with_capacity(files.len());
+        for path in files {
+            attachment_inputs.push(AttachmentInput::from_path(path)?);
+        }
+        self.remember_with_attachment_inputs(
+            content,
+            attachment_inputs,
+            extract_llm,
+            extract_entities,
+            reranker_override,
+            category,
+            title,
+            tags,
+            confidence,
+            ttl,
+            supersede,
+            provenance,
+        )
+    }
+
+    /// Stores a memory with pre-loaded attachment inputs (useful for remote backends and programmatic APIs).
+    #[allow(clippy::too_many_arguments)]
+    pub fn remember_with_attachment_inputs(
+        &self,
+        content: Option<&str>,
+        attachments: Vec<AttachmentInput>,
+        extract_llm: bool,
+        extract_entities: bool,
+        reranker_override: Option<&str>,
+        category: Option<MemoryType>,
+        title: Option<String>,
+        mut tags: Vec<String>,
+        confidence: Option<f32>,
+        ttl: Option<chrono::Duration>,
+        supersede: bool,
+        provenance: Option<String>,
+    ) -> Result<(MemoryRecord, Vec<MemoryConflict>, Option<String>)> {
+        let mut attachment_inputs = Vec::with_capacity(attachments.len());
         let mut seen_batch_sha = HashSet::new();
         let mut warnings = Vec::new();
-        for path in files {
-            let att = AttachmentInput::from_path(path)?;
+        for att in attachments {
             if !seen_batch_sha.insert(att.metadata.sha256.clone()) {
                 warnings.push(format!(
                     "Attachment '{}' duplicate in batch (sha256:{}) - skipping redundant blob.",
