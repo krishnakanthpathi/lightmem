@@ -53,7 +53,14 @@ function searchDocs() {
   const terms = query.split(/\s+/);
   const matches = getIndex().filter(item => terms.every(term => item.text.includes(term)));
   matches.sort((a, b) => {
-    const score = item => (normalize(item.title).includes(query) ? 2 : 0) + (item.command ? 1 : 0);
+    const score = item => {
+      const title = normalize(item.title).replace(/^lmem /, '');
+      const titleWords = title.split(/\s+/);
+      return (title === query ? 100 : 0)
+        + (terms.every(term => titleWords.includes(term)) ? 30 : 0)
+        + (title.startsWith(query) ? 10 : 0)
+        + (title.includes(query) ? 5 : 0) + (item.command ? 2 : 0);
+    };
     return score(b) - score(a);
   });
   results.replaceChildren();

@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="v0.7.9"
+VERSION="${LIGHTMEM_VERSION:-v0.8.0}"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 old_tty=""
@@ -202,8 +202,23 @@ RELEASE_URL="https://github.com/${REPO}/releases/download/${VERSION}/lmem-${TARG
 TMP_DIR="$(mktemp -d)"
 
 INSTALLED_BIN=0
+verify_release_archive() {
+    curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS" -o "$TMP_DIR/SHA256SUMS" || return 1
+    release_expected="$(awk -v file="lmem-${TARGET}.tar.gz" '$2 == file || $2 == "*" file { print $1 }' "$TMP_DIR/SHA256SUMS")"
+    [ "${#release_expected}" -eq 64 ] || return 1
+    case "$release_expected" in *[!a-fA-F0-9]*) return 1 ;; esac
+    if command -v sha256sum >/dev/null 2>&1; then
+        release_actual="$(sha256sum "$TMP_DIR/lmem.tar.gz" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        release_actual="$(shasum -a 256 "$TMP_DIR/lmem.tar.gz" | awk '{print $1}')"
+    else
+        printf 'A SHA-256 utility is required to verify the prebuilt release.\n' >&2
+        return 1
+    fi
+    [ "$release_actual" = "$release_expected" ]
+}
 if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
-    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})" 12467430; then
+    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})" 12467430 && verify_release_archive; then
         tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR"
         mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem"
         chmod +x "$INSTALL_DIR/lmem"
@@ -227,7 +242,7 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
-    cargo install --git "https://github.com/${REPO}.git" --branch main --locked --force
+    cargo install --git "https://github.com/${REPO}.git" --tag "$VERSION" --locked --force
     if [ -f "$HOME/.cargo/bin/lmem" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
         cp "$HOME/.cargo/bin/lmem" "$INSTALL_DIR/lmem"
     fi

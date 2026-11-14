@@ -2,6 +2,9 @@ name: Validate Rust and Python
 
 on:
   workflow_call:
+  pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,14 +16,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Check Rust formatting
         run: cargo fmt --check
       - name: Test Rust library, CLI, and MCP
+        env:
+          LIGHTMEM_QA_DISABLE: "1"
         run: cargo test --locked --lib --bins --tests
+      - name: Check Rust lints
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate browser scripts and documentation contracts
+        run: |
+          node --check static/workspace.js
+          node --check static/docs.js
+          node --check static/site.js
+          python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Test Python SDK against the native binary
         env:
           PYTHONPATH: python/src

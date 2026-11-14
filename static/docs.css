@@ -169,3 +169,9 @@ tr:last-child td { border-bottom: 0; }
   .flag-list { grid-template-columns: 1fr; }
   .install-tab { padding: 11px 10px; font-size: 11px; }
 }
+
+/* Readable defaults for the primary documentation path. */
+.doc-section > p, .doc-section > ol { font-size: 14px; line-height: 1.9; color: var(--muted); }
+.command-body p, .caveat p { font-size: 13px; }
+.copy, .expand-all { min-height: 36px; min-width: 44px; }
+@media (max-width: 820px) { .copy, .expand-all, .install-tab { min-height: 44px; } .side-nav a { padding-block: 11px; } }

@@ -71,6 +71,10 @@ impl LightMem {
     }
 
     fn embedder(&self) -> Result<&Arc<dyn EmbeddingProvider>> {
+        anyhow::ensure!(
+            !LightMemConfig::offline_requested() || self.config.backend != "ollama",
+            "Offline mode blocks Ollama embeddings. Use a cached ONNX model or hash backend."
+        );
         if let Some(emb) = self.embedder.get() {
             return Ok(emb);
         }
@@ -179,6 +183,23 @@ impl LightMem {
         &self.config
     }
 
+    pub(crate) fn reconfigured(&self, config: LightMemConfig) -> Result<Self> {
+        let mut reopened = Self::open_at(self.db_path(), config)?;
+        if let Some(context) = self.storage.source_context() {
+            reopened.storage =
+                Arc::new(Storage::open(self.db_path())?.with_context(context.clone()));
+        }
+        Ok(reopened)
+    }
+
+    pub(crate) fn reconfigured_with_context(
+        mut self,
+        context: crate::MemoryContext,
+    ) -> Result<Self> {
+        self.storage = Arc::new(Storage::open(self.db_path())?.with_context(context));
+        Ok(self)
+    }
+
     /// Embed disposable diagnostic text without saving a memory.
     pub fn test_embedding_provider(&self) -> Result<usize> {
         let vector = self
@@ -189,6 +210,31 @@ impl LightMem {
             "Embedding provider returned an invalid vector"
         );
         Ok(vector.len())
+    }
+
+    /// Restore an archived record without reinstating its previous expiration.
+    pub fn restore_memory(&self, term: &str) -> Result<MemoryRecord> {
+        let mut memory = self
+            .storage
+            .get_memory_for_restore(term)?
+            .context("Memory not found; list archived records with 'lmem list --status expired'")?;
+        if memory.status == MemoryStatus::Active {
+            return Ok(memory);
+        }
+        memory.status = MemoryStatus::Active;
+        memory.expired_at = None;
+        memory.updated_at = Utc::now();
+        let embedder = self.embedder()?;
+        self.storage
+            .insert_indexed_batch(
+                &[memory],
+                embedder.as_ref(),
+                &self.embedding_identity,
+                false,
+            )?
+            .into_iter()
+            .next()
+            .context("Restore did not return a memory")
     }
 
     /// Store a new memory into the database
@@ -1040,6 +1086,59 @@ impl LightMem {
         })
     }
 
+    /// Apply media/date filters before pagination, including accurate filtered totals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_filtered(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
+        anyhow::ensure!(
+            limit > 0 && limit <= i64::MAX as usize && offset <= i64::MAX as usize,
+            "Invalid pagination range"
+        );
+        if media.is_none() {
+            return self.list_paginated_with_date(category, status, as_of, on_date, limit, offset);
+        }
+        let media = media.unwrap().trim().to_lowercase();
+        anyhow::ensure!(
+            matches!(
+                media.as_str(),
+                "any" | "all" | "image" | "audio" | "video" | "document"
+            ),
+            "Invalid media filter"
+        );
+        let all = self.storage.list_memories(category, status, as_of, 0)?;
+        let filtered: Vec<_> = all
+            .into_iter()
+            .filter(|m| {
+                on_date.is_none_or(|d| {
+                    m.created_at.date_naive() == d || m.updated_at.date_naive() == d
+                }) && m
+                    .attachments
+                    .iter()
+                    .any(|a| matches!(media.as_str(), "any" | "all") || a.media_kind == media)
+            })
+            .collect();
+        let total = filtered.len();
+        let items: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
+        let has_more = offset.saturating_add(items.len()) < total;
+        Ok(PaginatedMemories {
+            items,
+            total,
+            limit,
+            offset,
+            page: offset / limit + 1,
+            total_pages: total.div_ceil(limit),
+            has_more,
+        })
+    }
+
     /// List memories by 1-indexed page number and page size
     pub fn list_page(
         &self,
@@ -1305,6 +1404,7 @@ impl LightMem {
         enrich: bool,
         replace: bool,
     ) -> Result<usize> {
+        anyhow::ensure!(!enrich, "Import enrichment is not supported yet. Remove --enrich; use observe --dry-run to review extracted candidates.");
         if !file_path.is_dir() {
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("lmbundle") {
@@ -1436,6 +1536,13 @@ impl LightMem {
     pub fn build_reranker(&self, reranker_override: Option<&str>) -> Result<Box<dyn Reranker>> {
         let active_reranker = reranker_override.unwrap_or(&self.config.reranker).trim();
         let lower = active_reranker.to_lowercase();
+        anyhow::ensure!(
+            !LightMemConfig::offline_requested()
+                || !(lower.starts_with("ollama")
+                    || lower.starts_with("openai")
+                    || lower.starts_with("llm")),
+            "Offline mode blocks LLM answers. Select a local answer engine."
+        );
 
         if lower == "top1" {
             return Ok(Box::new(Top1Reranker));

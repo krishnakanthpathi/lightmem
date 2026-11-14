@@ -13,11 +13,11 @@
   <meta name="twitter:card" content="summary_large_image" />
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-  <link rel="stylesheet" href="/theme.css" />
-  <link rel="stylesheet" href="/landing.css" />
+  <link rel="stylesheet" href="/theme.css?v=0.8.0" />
+  <link rel="stylesheet" href="/landing.css?v=0.8.0" />
   <script type="module" src="/site.js"></script>
   <script type="module" src="/hex-vault.js"></script>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"LightMem","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux, Windows","softwareVersion":"0.7.7","license":"https://opensource.org/license/mit","description":"Local persistent memory for AI agents, with a Rust CLI, Python SDK, and MCP server.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"LightMem","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux, Windows","softwareVersion":"0.8.0","license":"https://opensource.org/license/mit","description":"Local persistent memory for AI agents, with a Rust CLI, Python SDK, and MCP server.","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to content</a>
@@ -37,7 +37,7 @@
       <canvas class="hero-vault-canvas" id="heroVault" aria-hidden="true"></canvas>
       <div class="shell hero-grid">
         <div>
-          <a class="release-link" href="/docs#cli"><span class="badge badge-accent">v0.7.7</span> Local bonsai-2:2b default, pruned expired links &amp; macOS 15 builds <span aria-hidden="true">↗</span></a>
+          <a class="release-link" href="/docs#workspace"><span class="badge badge-accent">v0.8.0</span> Review build · local workspace &amp; safer configuration <span aria-hidden="true">↗</span></a>
           <h1 id="hero-title">New session.<br />Same <span>memory.</span></h1>
           <p class="hero-description">Your agent shouldn’t forget what you’ve already figured out. Give it persistent, searchable memory that lives right on your machine.</p>
           <div class="hero-actions">
@@ -74,7 +74,7 @@
     </section>
     <section class="landing-section" aria-labelledby="workflow-title">
       <div class="shell workflow">
-        <div><span class="eyebrow">From install to recall</span><h2 id="workflow-title">Small setup.<br />Lasting context.</h2><p>Start with the CLI, use the typed Python SDK, or connect your agent over MCP. It’s the same memory engine underneath.</p><ol class="workflow-steps"><li>Install the native engine with pip.</li><li>Save a fact, a decision, or a file.</li><li>Recall it from your next session.</li></ol></div>
+        <div><span class="eyebrow">From install to recall</span><h2 id="workflow-title">Small setup.<br />Lasting context.</h2><p>Start with the CLI, use the typed Python SDK, or open the local workspace with <code>lmem ui</code>. It’s the same memory engine underneath.</p><ol class="workflow-steps"><li>Install the native engine with pip.</li><li>Save a fact, a decision, or a file.</li><li>Recall it from your next session.</li></ol></div>
         <div class="code"><div class="code-head"><span>Your first memory</span><button class="copy" type="button">Copy</button></div><pre><code><span class="code-comment"># Install</span>
 <span class="prompt">$</span> pip install -U lmem
 
@@ -84,8 +84,8 @@
 <span class="code-comment"># Retrieve the relevant memory</span>
 <span class="prompt">$</span> lmem recall "database decision"
 
-<span class="code-comment"># Connect a supported MCP client</span>
-<span class="prompt">$</span> lmem connect --mcp</code></pre></div>
+<span class="code-comment"> # Open the local management workspace</span>
+<span class="prompt">$</span> lmem ui</code></pre></div>
       </div>
     </section>
     <section class="landing-section docs-section" id="documentation" aria-labelledby="docs-title">

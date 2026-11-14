@@ -71,11 +71,12 @@ class IdentityTests(unittest.TestCase):
         self.assertIn("lmem --connection custom-link --scope user remember", skill)
 
     def test_download_failure_does_not_fetch_an_incompatible_old_release(self):
-        with patch("lmem.binary.Path.home", return_value=self.root), patch("lmem.binary.urllib.request.urlretrieve", side_effect=OSError("unavailable")) as download:
+        with patch.dict(os.environ), patch("lmem.binary.Path.home", return_value=self.root), patch("lmem.binary.urllib.request.urlretrieve", side_effect=OSError("unavailable")) as download:
+            os.environ.pop("LIGHTMEM_OFFLINE", None)
             with self.assertRaises(RuntimeError):
                 ensure_binary_downloaded()
             self.assertEqual(download.call_count, 1)
-            self.assertIn("v0.7.9", download.call_args.args[0])
+            self.assertIn("v0.8.0", download.call_args.args[0])
 
     def test_invalid_identity_and_ambiguous_options(self):
         with self.assertRaises(RuntimeError):

@@ -232,6 +232,18 @@ fn test_cli_remote_binary_e2e() {
     assert_eq!(ctx["mode"], "remote");
     assert_eq!(ctx["status"], "online");
     assert_eq!(ctx["api_key_configured"], true);
+
+    // 6. Test unauthorized error formatting without API key
+    let output = std::process::Command::new(exe)
+        .args(["--remote", &base_url])
+        .output()
+        .expect("Failed to execute lmem");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Authentication failed (401 Unauthorized)"));
+    assert!(stderr.contains("Set API key:"));
+    assert!(stderr.contains("lmem remote"));
+    assert!(stderr.contains("lmem local"));
 }
 
 #[test]

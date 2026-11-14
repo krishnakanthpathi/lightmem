@@ -74,6 +74,23 @@ impl Storage {
         &self.path
     }
 
+    pub fn source_context(&self) -> Option<&crate::models::MemoryContext> {
+        self.context.as_ref()
+    }
+
+    pub fn revision(&self) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Storage lock unavailable"))?;
+        conn.query_row(
+            "SELECT revision FROM storage_revision WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     fn migrate(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
 
@@ -704,6 +721,32 @@ impl Storage {
             rec.entities = load_entities_for_id(&conn, &rec.id)?;
         }
         Ok(opt)
+    }
+
+    /// Recovery must include archived titles and reject ambiguous matches.
+    pub fn get_memory_for_restore(&self, term: &str) -> Result<Option<MemoryRecord>> {
+        let id = {
+            let conn = self.conn.lock().unwrap();
+            let clean = term.trim();
+            if clean.is_empty() {
+                return Ok(None);
+            }
+            if let Some(id) = resolve_id(&conn, clean)? {
+                Some(id)
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM memories WHERE LOWER(title)=LOWER(?1) ORDER BY id LIMIT 2",
+                )?;
+                let ids = stmt
+                    .query_map([clean], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                anyhow::ensure!(ids.len() <= 1, "Multiple memories have this title. Restore using an exact memory ID from 'lmem list --status expired'.");
+                ids.into_iter().next()
+            }
+        };
+        id.map(|id| self.get_memory(&id))
+            .transpose()
+            .map(Option::flatten)
     }
 
     pub fn find_by_entity(&self, name: &str, val: Option<&str>) -> Result<Vec<MemoryRecord>> {

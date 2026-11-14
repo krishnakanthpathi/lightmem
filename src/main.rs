@@ -128,7 +128,7 @@ enum Commands {
         #[arg(short = 'p', long)]
         provenance: Option<String>,
 
-        /// Disable automatic LLM entity extraction (on by default)
+        /// Skip entity extraction even when explicitly enabled in configuration
         #[arg(long = "no-entities", visible_alias = "no-extract-entities")]
         no_entities: bool,
 
@@ -289,6 +289,13 @@ enum Commands {
         hard: bool,
 
         /// Output result as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restore an archived memory by ID, prefix, or exact title (clears its old TTL)
+    Restore {
+        term: String,
         #[arg(long)]
         json: bool,
     },
@@ -720,6 +727,36 @@ enum Commands {
         no_browser: bool,
     },
 
+    /// Open the authenticated local memory and configuration workspace
+    Ui {
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Switch to local mode (clears saved remote URL and API key)
+    #[command(visible_alias = "disconnect")]
+    Local {
+        /// Output status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Connect to a remote LightMem server or switch to remote mode
+    Remote {
+        /// Remote LightMem backend server URL (e.g. http://localhost:8080)
+        url: Option<String>,
+
+        /// Secret API key for remote server authentication
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Launch a persistent HTTP backend server for remote multi-device memory access
     #[command(visible_aliases = ["server"])]
     Serve {
@@ -936,18 +973,19 @@ fn handle_remote_command(
         Commands::Remember {
             content,
             files,
-            extract: _,
-            reranker: _,
+            extract,
+            reranker,
             category,
             title,
             tags,
-            confidence: _,
+            confidence,
             ttl,
-            supersede: _,
+            supersede,
             provenance,
             no_entities,
             json: cmd_json,
         } => {
+            anyhow::ensure!(!extract && reranker.is_none(), "Remote remember does not support --extract or --reranker. Configure extraction on the server or omit these options.");
             let mut attachment_payloads = Vec::new();
             for fpath in files {
                 let data = std::fs::read(fpath).with_context(|| {
@@ -972,9 +1010,11 @@ fn handle_remote_command(
                 tags: tags
                     .as_ref()
                     .map(|t| t.split(',').map(|s| s.trim().to_string()).collect()),
-                source: provenance.clone().or_else(|| Some("cli".to_string())),
+                source: provenance.clone(),
                 title: title.clone(),
-                ttl: ttl.map(|d| format!("{}s", d.num_seconds())),
+                ttl: ttl.map(|d| format!("{}ms", d.num_milliseconds())),
+                confidence: Some(*confidence),
+                supersede: *supersede,
                 no_entities: Some(*no_entities),
                 attachments: if attachment_payloads.is_empty() {
                     None
@@ -982,18 +1022,19 @@ fn handle_remote_command(
                     Some(attachment_payloads)
                 },
             };
-            let memory = client.remember(&req)?;
+            let response = client.remember_detailed(&req)?;
             if *cmd_json || json {
-                println!("{}", serde_json::to_string_pretty(&memory)?);
+                println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                CliView::render_remembered(&memory, Path::new(&client.base_url), false)?;
+                CliView::render_remembered(&response.memory, Path::new(&client.base_url), false)?;
+                for warning in response.warnings { eprintln!("Warning: {}", warning); }
             }
             Ok(true)
         }
 
         Commands::Recall {
             query,
-            image: _,
+            image,
             category,
             media,
             as_of,
@@ -1002,11 +1043,18 @@ fn handle_remote_command(
             min_similarity,
             precision,
             multi_hop,
-            save_to: _,
-            path: _,
-            open: _,
+            save_to,
+            path,
+            open,
             json: cmd_json,
         } => {
+            anyhow::ensure!(image.is_none() && save_to.is_none() && !path && !open, "Remote recall does not support --image, --save-to, --path, or --open. Use the workspace to download attachments.");
+            if *precision {
+                anyhow::ensure!(media.is_none() && !multi_hop && min_similarity.is_none(), "Precision recall returns an answer; media, multi-hop, and similarity filters are not supported. Use recall without --precision for filtered results.");
+                let answer = client.answer(&lightmem::AnswerRequest { question: query.clone(), category: *category, as_of: *as_of, date: *date, limit: *limit, ..Default::default() })?;
+                CliView::render_answer(&answer, *cmd_json || json)?;
+                return Ok(true);
+            }
             let req = lightmem::RecallRequest {
                 query: query.clone(),
                 category: *category,
@@ -1060,10 +1108,11 @@ fn handle_remote_command(
             limit,
             offset,
             page,
-            save_to: _,
-            path: _,
+            save_to,
+            path,
             json: cmd_json,
         } => {
+            anyhow::ensure!(save_to.is_none() && !path, "Remote list does not support --save-to or --path. Use the workspace to download attachments.");
             let paginated = client.list(
                 *limit,
                 *offset,
@@ -1084,30 +1133,27 @@ fn handle_remote_command(
 
         Commands::Inspect {
             terms,
-            save_to: _,
-            path: _,
-            open: _,
+            save_to,
+            path,
+            open,
             json: cmd_json,
         } => {
-            let mut found_any = false;
+            anyhow::ensure!(save_to.is_none() && !path && !open, "Remote inspect does not support --save-to, --path, or --open. Use the workspace to download attachments.");
+            let as_json = *cmd_json || json;
+            let mut inspected = Vec::new();
             for term in terms {
                 if let Some(record) = client.get(term)? {
-                    found_any = true;
-                    CliView::render_inspect(
-                        &record,
-                        &[],
-                        Path::new(&client.base_url),
-                        *cmd_json || json,
-                    )?;
+                    let links = client.links(&record.id)?;
+                    if as_json { inspected.push(serde_json::json!({"memory":record,"links":links})); }
+                    else { CliView::render_inspect(&record, &links, Path::new(&client.base_url), false)?; }
                 }
             }
-            if !found_any {
-                if *cmd_json || json {
-                    println!("null");
-                } else {
-                    eprintln!("Memory not found: {}", terms.join(", "));
-                }
+            if as_json {
+                let value = if terms.len() > 1 { serde_json::json!(inspected) }
+                    else { inspected.into_iter().next().unwrap_or(serde_json::Value::Null) };
+                println!("{}", serde_json::to_string_pretty(&value)?);
             }
+
             Ok(true)
         }
 
@@ -1252,7 +1298,12 @@ fn handle_remote_command(
             Ok(true)
         }
 
-        _ => Ok(false),
+        Commands::Config { .. } | Commands::Setup { .. } | Commands::Docs { .. }
+        | Commands::Bundle { action: BundleCommand::Info { .. }, .. }
+        | Commands::Serve { .. } | Commands::Ui { .. } | Commands::Version { .. } | Commands::Completions { .. }
+        | Commands::Connect { mcp: false, .. } | Commands::Uninstall { .. }
+        | Commands::Local { .. } | Commands::Remote { .. } => Ok(false),
+        _ => anyhow::bail!("This command is not supported in remote mode. No local vault was opened. Use --db PATH to explicitly select a local vault, or switch to local mode with 'lmem local' (or 'lmem config --clear-remote')."),
     }
 }
 
@@ -1286,6 +1337,97 @@ fn remove_db_files(db_path: &Path) {
     if att_dir.is_dir() {
         let _ = std::fs::remove_dir_all(&att_dir);
     }
+}
+
+fn handle_remote_network_error(remote_url: &str, err: &anyhow::Error, json: bool) -> ! {
+    let err_str = format!("{err:#}");
+    let is_auth = err_str.contains("401")
+        || err_str.contains("Unauthorized")
+        || err_str.contains("Authentication failed");
+
+    if json {
+        let payload = if is_auth {
+            serde_json::json!({
+                "status": "error",
+                "error": "unauthorized",
+                "code": 401,
+                "remote_url": remote_url,
+                "message": "Invalid or missing API key for remote server",
+                "hint": format!("Run 'lmem remote {remote_url} --api-key <KEY>' or 'lmem remote' to configure an API key.")
+            })
+        } else {
+            serde_json::json!({
+                "status": "error",
+                "error": "connection_failed",
+                "remote_url": remote_url,
+                "message": err_str,
+                "hint": "Run 'lmem local' to switch back to local vault."
+            })
+        };
+        eprintln!("{payload}");
+        std::process::exit(1);
+    }
+
+    if is_auth {
+        eprintln!(
+            "\n{} {}",
+            "⚠️".yellow(),
+            format!("Authentication failed (401 Unauthorized) at {remote_url}").red().bold()
+        );
+        eprintln!(
+            "  {} {:<12} The remote server requires a valid API key.",
+            "◈".dimmed(),
+            "Reason:".white().bold()
+        );
+        eprintln!();
+        eprintln!("  {} {}", "💡".dimmed(), "How to fix:".white().bold());
+        eprintln!(
+            "    {} {:<14} {}",
+            "•".dimmed(),
+            "Set API key:",
+            format!("lmem remote {remote_url} --api-key \"<YOUR_API_KEY>\"").cyan()
+        );
+        eprintln!(
+            "    {} {:<14} {}",
+            "•".dimmed(),
+            "Interactive:",
+            "lmem remote".cyan()
+        );
+        eprintln!(
+            "    {} {:<14} {}",
+            "•".dimmed(),
+            "Disconnect:",
+            "lmem local  (switch back to local vault)".yellow()
+        );
+        eprintln!();
+    } else {
+        eprintln!(
+            "\n{} {}",
+            "⚠️".yellow(),
+            format!("Cannot connect to remote server at {remote_url}").yellow().bold()
+        );
+        eprintln!(
+            "  {} {:<12} Remote server is offline or unreachable.",
+            "◈".dimmed(),
+            "Reason:".white().bold()
+        );
+        eprintln!();
+        eprintln!("  {} {}", "💡".dimmed(), "How to fix:".white().bold());
+        eprintln!(
+            "    {} {:<14} {}",
+            "•".dimmed(),
+            "Disconnect:",
+            "lmem local  (switch back to local vault)".yellow()
+        );
+        eprintln!(
+            "    {} {:<14} {}",
+            "•".dimmed(),
+            "Start daemon:",
+            "lmem serve -d --port <PORT>".cyan()
+        );
+        eprintln!();
+    }
+    std::process::exit(1);
 }
 
 fn parse_reranker_setting(raw: &str) -> Result<String> {
@@ -1495,6 +1637,150 @@ fn main() -> Result<()> {
             *json || cli.json,
         );
     }
+    if let Some(Commands::Local { json }) = &cli.command {
+        let mut cfg = LightMemConfig::load();
+        let was_remote = cfg.remote_url.is_some() || cfg.api_key.is_some();
+        cfg.remote_url = None;
+        cfg.api_key = None;
+        cfg.save()?;
+
+        let default_vault = LightMemConfig::resolve_db_path(cli.global);
+        if *json || cli.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok",
+                    "mode": "local",
+                    "vault": default_vault.display().to_string(),
+                    "previous_remote_cleared": was_remote,
+                })
+            );
+        } else {
+            println!(
+                "{} {}",
+                "✓".green().bold(),
+                "Switched to local mode.".white().bold()
+            );
+            println!(
+                "  {} {:<10} {}",
+                "◫".dimmed(),
+                "Vault".dimmed(),
+                CliView::format_path(&default_vault).bold()
+            );
+            if std::env::var("LIGHTMEM_REMOTE_URL").is_ok() || std::env::var("LIGHTMEM_URL").is_ok() {
+                println!(
+                    "  {} Note: Environment variable LIGHTMEM_REMOTE_URL/LIGHTMEM_URL is active.",
+                    "⚠️".yellow()
+                );
+                println!("    Unset the environment variable or use --db to target local vaults explicitly.");
+            }
+        }
+        return Ok(());
+    }
+    if let Some(Commands::Remote { url, api_key, json }) = &cli.command {
+        let mut cfg = LightMemConfig::load();
+        let (target_url, new_api_key) = match url {
+            Some(u) => {
+                let clean = terminal::normalize_http_url(u)?;
+                (clean, api_key.clone().or_else(|| cfg.api_key.clone()))
+            }
+            None => {
+                if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+                    let (u, k) = terminal::prompt_remote(cfg.remote_url.as_deref(), cfg.api_key.as_deref())?;
+                    (u, api_key.clone().or(k))
+                } else {
+                    let default_u = cfg.remote_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+                    let clean = terminal::normalize_http_url(&default_u)?;
+                    (clean, api_key.clone().or_else(|| cfg.api_key.clone()))
+                }
+            }
+        };
+
+        cfg.remote_url = Some(target_url.clone());
+        if let Some(ref k) = new_api_key {
+            if k.eq_ignore_ascii_case("none") || k.trim().is_empty() {
+                cfg.api_key = None;
+            } else {
+                cfg.api_key = Some(k.clone());
+            }
+        }
+        cfg.save()?;
+
+        let client = lightmem::RemoteClient::new(&target_url, cfg.effective_api_key()).with_timeout(std::time::Duration::from_millis(1200));
+        let probe_res = client.stats();
+        let is_connected = probe_res.is_ok();
+
+        if *json || cli.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok",
+                    "mode": "remote",
+                    "remote_url": target_url,
+                    "has_api_key": cfg.api_key.is_some(),
+                    "connected": is_connected,
+                })
+            );
+        } else {
+            println!(
+                "{} {}",
+                "✓".green().bold(),
+                "Switched to remote mode.".white().bold()
+            );
+            println!(
+                "  {} {:<10} {}",
+                "◫".dimmed(),
+                "Remote".dimmed(),
+                target_url.bold()
+            );
+            if let Ok(stats) = probe_res {
+                println!(
+                    "  {} {:<10} {}",
+                    "◈".dimmed(),
+                    "Status".dimmed(),
+                    format!("connected ({} active memories)", stats.active_memories).green()
+                );
+            } else if let Err(ref e) = probe_res {
+                let err_str = e.to_string();
+                if err_str.contains("401") || err_str.contains("Unauthorized") {
+                    println!(
+                        "  {} {:<10} {}",
+                        "◈".dimmed(),
+                        "Status".dimmed(),
+                        "authentication failed (401 Unauthorized)".red().bold()
+                    );
+                    println!(
+                        "  {} Warning: The remote server requires a valid API key.",
+                        "⚠️".yellow()
+                    );
+                    println!(
+                        "    Update it with: lmem remote {} --api-key \"<YOUR_KEY>\"",
+                        target_url
+                    );
+                } else {
+                    println!(
+                        "  {} {:<10} {}",
+                        "◈".dimmed(),
+                        "Status".dimmed(),
+                        "configured (server not responding yet)".yellow()
+                    );
+                    println!(
+                        "  {} Note: Start server with 'lmem serve --daemon', or switch back with 'lmem local'.",
+                        "ℹ".dimmed()
+                    );
+                }
+            }
+            if cfg.api_key.is_some() {
+                println!(
+                    "  {} {:<10} {}",
+                    "✦".dimmed(),
+                    "Auth".dimmed(),
+                    "API key configured"
+                );
+            }
+        }
+        return Ok(());
+    }
     let env_db = std::env::var("LIGHTMEM_DB")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -1545,11 +1831,16 @@ fn main() -> Result<()> {
         .or_else(|| connection.map(|c| c.db_path.as_path()));
     let global = cli.global;
 
+    // Version and help remain usable if configuration is malformed; other commands report it.
     let cfg = if matches!(cli.command, Some(Commands::Version { .. })) {
         LightMemConfig::default()
     } else {
         LightMemConfig::try_load()?
     };
+    anyhow::ensure!(
+        cli.remote.is_none() || (cli.db.is_none() && env_db.is_none() && !cli.global),
+        "--remote cannot be combined with --db, LIGHTMEM_DB, or --global"
+    );
     let effective_remote_url = if cli.remote.is_some() {
         cli.remote
     } else if cli.db.is_some() || env_db.is_some() || cli.global {
@@ -1560,9 +1851,34 @@ fn main() -> Result<()> {
     let effective_api_key = cli.api_key.or_else(|| cfg.effective_api_key());
 
     if let Some(ref remote_url) = effective_remote_url {
+        let local_admin = matches!(
+            cli.command,
+            Some(
+                Commands::Config { .. }
+                    | Commands::Setup { .. }
+                    | Commands::Docs { .. }
+                    | Commands::Ui { .. }
+                    | Commands::Serve { .. }
+                    | Commands::Version { .. }
+                    | Commands::Completions { .. }
+                    | Commands::Connect { mcp: false, .. }
+                    | Commands::Uninstall { .. }
+                    | Commands::Local { .. }
+                    | Commands::Remote { .. }
+                    | Commands::Bundle {
+                        action: BundleCommand::Info { .. },
+                        ..
+                    }
+            )
+        );
+        anyhow::ensure!(!LightMemConfig::offline_requested() || local_admin, "Offline mode blocks remote vault operations. Select a local database or clear remote routing with 'lmem local' (or 'lmem config --clear-remote').");
+        anyhow::ensure!(connection.is_none() || local_admin, "Remote mode does not support local connections or scopes. Clear remote mode with 'lmem local' (or 'lmem config --clear-remote') before selecting a connection.");
         let client = lightmem::RemoteClient::new(remote_url, effective_api_key.clone());
         if cli.command.is_none() {
-            let stats = client.stats()?;
+            let stats = match client.stats() {
+                Ok(s) => s,
+                Err(ref e) => handle_remote_network_error(remote_url, e, cli.json),
+            };
             if cli.json {
                 return CliView::render_stats(&stats, Path::new(remote_url), true);
             }
@@ -1570,8 +1886,20 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if let Some(ref cmd) = cli.command {
-            if handle_remote_command(&client, cmd, cli.json)? {
-                return Ok(());
+            match handle_remote_command(&client, cmd, cli.json) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => {
+                    let err_str = format!("{e:#}");
+                    let is_network_or_auth = err_str.contains("401")
+                        || err_str.contains("Unauthorized")
+                        || err_str.contains("Authentication failed")
+                        || err_str.contains("Failed to reach remote server");
+                    if is_network_or_auth && !err_str.contains("not supported in remote mode") {
+                        handle_remote_network_error(remote_url, &e, cli.json);
+                    }
+                    return Err(e);
+                }
             }
         }
     }
@@ -1592,15 +1920,17 @@ fn main() -> Result<()> {
         Commands::Identity { .. }
         | Commands::Status { .. }
         | Commands::Doctor { .. }
-        | Commands::CompletionConnections => unreachable!(),
-        Commands::Context { .. } => {
+        | Commands::CompletionConnections
+        | Commands::Local { .. }
+        | Commands::Remote { .. } => unreachable!(),
+        Commands::Context { json } => {
             let value = match connection {
                 Some(connection) => serde_json::to_value(connection)?,
                 None => {
                     serde_json::json!({"connection_id": null, "db_path": effective_db.map(Path::to_path_buf).unwrap_or_else(|| LightMemConfig::resolve_db_path(global))})
                 }
             };
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_context(&value, json || cli.json)?;
         }
         Commands::Remember {
             content,
@@ -1680,6 +2010,9 @@ fn main() -> Result<()> {
             open,
             json,
         } => {
+            if precision {
+                anyhow::ensure!(image.is_none() && save_to.is_none() && !path && !open && media.is_none() && !multi_hop && min_similarity.is_none(), "Precision recall returns an answer; image, media, attachment, multi-hop and similarity options are not supported together. Use recall without --precision for filtered results.");
+            }
             let lm = open_controller(effective_db, global, connection)?;
             let cat = category;
             let as_of_dt = as_of;
@@ -1692,8 +2025,7 @@ fn main() -> Result<()> {
                     !query.trim().is_empty(),
                     "Search query cannot be blank with --precision"
                 );
-                let result =
-                    lm.answer_with_options(&query, cat, as_of_dt, date, limit, Some("onnx"))?;
+                let result = lm.answer_with_options(&query, cat, as_of_dt, date, limit, None)?;
                 CliView::render_answer(&result, json)?;
             } else {
                 let filter_attachments = media.is_some() || path || save_to.is_some() || open;
@@ -1832,44 +2164,22 @@ fn main() -> Result<()> {
             let as_of_dt = as_of;
             let filter_attachments = media.is_some() || path || save_to.is_some();
 
+            let effective_offset = if let Some(p) = page {
+                anyhow::ensure!(p > 0 && limit > 0, "Page and limit must be positive");
+                (p - 1).checked_mul(limit).context("Pagination overflow")?
+            } else {
+                offset
+            };
             let paginated = if filter_attachments {
-                let effective_offset = if let Some(p) = page {
-                    anyhow::ensure!(p > 0 && limit > 0, "Page and limit must be positive");
-                    (p - 1).saturating_mul(limit)
-                } else {
-                    offset
-                };
-                let mut all_page =
-                    lm.list_paginated_with_date(cat, st, as_of_dt, date, 100_000, 0)?;
-                let k = media.as_deref().unwrap_or("any").trim().to_lowercase();
-                all_page.items.retain(|m| {
-                    !m.attachments.is_empty()
-                        && (k == "any"
-                            || k == "all"
-                            || m.attachments.iter().any(|a| {
-                                a.media_kind.eq_ignore_ascii_case(&k)
-                                    || a.mime_type.to_lowercase().contains(&k)
-                            }))
-                });
-                let total = all_page.items.len();
-                let items: Vec<_> = all_page
-                    .items
-                    .into_iter()
-                    .skip(effective_offset)
-                    .take(limit)
-                    .collect();
-                let cur_page = effective_offset.checked_div(limit).unwrap_or(0) + 1;
-                let total_pages = if limit > 0 { total.div_ceil(limit) } else { 1 };
-                let has_more = effective_offset.saturating_add(items.len()) < total;
-                lightmem::models::memory::PaginatedMemories {
-                    items,
-                    total,
+                lm.list_filtered(
+                    cat,
+                    st,
+                    as_of_dt,
+                    date,
+                    Some(media.as_deref().unwrap_or("any")),
                     limit,
-                    offset: effective_offset,
-                    page: cur_page,
-                    total_pages,
-                    has_more,
-                }
+                    effective_offset,
+                )?
             } else if let Some(p) = page {
                 lm.list_page_with_date(cat, st, as_of_dt, date, p, limit)?
             } else {
@@ -2129,6 +2439,16 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Restore { term, json } => {
+            let lm = open_controller(effective_db, global, connection)?;
+            let memory = lm.restore_memory(&term)?;
+            if !json {
+                println!("Restored memory in {}", lm.db_path().display());
+            }
+            let links = lm.get_links(&memory.id)?;
+            CliView::render_inspect(&memory, &links, lm.db_path(), json)?;
+        }
+
         Commands::Clear { soft, json } => {
             let hard = !soft;
             let lm = open_controller(effective_db, global, connection)?;
@@ -2178,6 +2498,7 @@ fn main() -> Result<()> {
             merge,
             json,
         } => {
+            anyhow::ensure!(!enrich, "Import enrichment is not supported yet. Remove --enrich; use observe --dry-run to review extracted candidates.");
             let lm = open_controller(effective_db, global, connection)?;
             let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("lmbundle") {
@@ -2924,6 +3245,11 @@ fn main() -> Result<()> {
             )?;
         }
 
+        Commands::Ui { port, no_browser } => {
+            let controller = open_controller(effective_db, global, connection)?;
+            lightmem::services::workspace::serve_workspace(Arc::new(controller), port, no_browser)?;
+        }
+
         Commands::Uninstall {
             purge_data,
             yes,
@@ -3087,11 +3413,26 @@ fn handle_serve(
                     "\x1b[38;2;234;179;8m(Starting...)\x1b[0m"
                 }
             );
-            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Process PID:   {}", pid);
-            println!(
-                "  \x1b[38;2;113;113;122m▸\x1b[0m Address:       http://{}:{}",
-                host_str, port_num
-            );
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Process PID:       {}", pid);
+            if host_str == "0.0.0.0" {
+                println!(
+                    "  \x1b[38;2;113;113;122m▸\x1b[0m Listening:         0.0.0.0:{} (all interfaces)",
+                    port_num
+                );
+                println!("  \x1b[38;2;113;113;122m▸\x1b[0m Network Endpoints:");
+                let endpoints = lightmem::services::api_server::discover_host_endpoints();
+                for ep in &endpoints {
+                    println!(
+                        "    \x1b[38;2;113;113;122m•\x1b[0m \x1b[1m{:<12}\x1b[0m http://{}:{} ({})",
+                        ep.label, ep.ip, port_num, ep.if_name
+                    );
+                }
+            } else {
+                println!(
+                    "  \x1b[38;2;113;113;122m▸\x1b[0m Address:           http://{}:{}",
+                    host_str, port_num
+                );
+            }
             if let Some(s) = started {
                 println!("  \x1b[38;2;113;113;122m▸\x1b[0m Started:       {}", s);
             }
@@ -3118,6 +3459,10 @@ fn handle_serve(
     }
 
     if daemon {
+        anyhow::ensure!(
+            no_auth || api_key.as_ref().is_none_or(|k| !k.trim().is_empty()),
+            "API key cannot be blank. Omit it to generate one, or explicitly use --no-auth."
+        );
         if pid_file.exists() {
             let content = std::fs::read_to_string(&pid_file).unwrap_or_default();
             let pid = serde_json::from_str::<ServerDaemonInfo>(&content)
@@ -3138,12 +3483,17 @@ fn handle_serve(
         } else {
             Some(api_key.unwrap_or_else(|| {
                 let u = uuid::Uuid::new_v4().to_string().replace('-', "");
-                format!("lm_{}", &u[..16])
+                format!("lmem_{}", u)
             }))
         };
 
         let config_dir = LightMemConfig::config_dir();
         std::fs::create_dir_all(&config_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         let log_path = config_dir.join("server.log");
         let log_file = std::fs::OpenOptions::new()
             .create(true)
@@ -3151,6 +3501,11 @@ fn handle_serve(
             .open(&log_path)
             .with_context(|| format!("Failed to open log file {}", log_path.display()))?;
         let err_file = log_file.try_clone()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            log_file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
 
         let exe = std::env::current_exe()?;
         let mut cmd = std::process::Command::new(exe);
@@ -3174,6 +3529,16 @@ fn handle_serve(
         }
         if let Some(conn) = cli_connection {
             cmd.arg("--connection").arg(conn);
+        }
+        if let Some(resolved) = connection {
+            cmd.arg("--scope").arg(match resolved.context.scope {
+                lightmem::MemoryScope::User => "user",
+                lightmem::MemoryScope::Project => "project",
+                lightmem::MemoryScope::Agent => "agent",
+            });
+            if let Some(session) = &resolved.context.session_id {
+                cmd.arg("--session").arg(session);
+            }
         }
 
         cmd.stdin(std::process::Stdio::null())
@@ -3212,6 +3577,46 @@ fn handle_serve(
                         .into()
                 })
                 .unwrap_or_default();
+            if err_msg.contains("Address already in use")
+                || err_msg.contains("os error 98")
+                || err_msg.contains("os error 48")
+                || err_msg.contains("os error 10048")
+            {
+                let alt_port = if port == 8080 { 8089 } else { port + 1 };
+                eprintln!(
+                    "\n{} {}",
+                    "⚠️".yellow(),
+                    format!("Cannot start daemon on {}:{}", host, port).yellow().bold()
+                );
+                eprintln!(
+                    "  {} {:<12} Port {} is already in use by another process.",
+                    "◈".dimmed(),
+                    "Reason:".white().bold(),
+                    port
+                );
+                eprintln!();
+                eprintln!("  {} {}", "💡".dimmed(), "How to fix:".white().bold());
+                eprintln!(
+                    "    {} {:<18} {}",
+                    "•".dimmed(),
+                    "Use another port:",
+                    format!("lmem serve -d --port {}", alt_port).cyan()
+                );
+                eprintln!(
+                    "    {} {:<18} {}",
+                    "•".dimmed(),
+                    "Check active daemon:",
+                    "lmem serve --status".yellow()
+                );
+                eprintln!(
+                    "    {} {:<18} {}",
+                    "•".dimmed(),
+                    "Stop running daemon:",
+                    "lmem serve --stop".yellow()
+                );
+                eprintln!();
+                std::process::exit(1);
+            }
             anyhow::bail!(
                 "LightMem server daemon failed to start (process exited immediately).\nLogs:\n{}",
                 err_msg
@@ -3233,28 +3638,50 @@ fn handle_serve(
             "  \x1b[38;2;34;197;94m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
         );
         println!(
-            "  \x1b[1;38;2;34;197;94m▸\x1b[0m PID:           {}",
+            "  \x1b[1;38;2;34;197;94m▸\x1b[0m PID:               {}",
             child_pid
         );
-        println!(
-            "  \x1b[38;2;113;113;122m▸\x1b[0m Listening:     http://{}:{}",
-            host, port
-        );
-        if let Some(ref k) = key {
+        if host == "0.0.0.0" {
             println!(
-                "  \x1b[38;2;113;113;122m▸\x1b[0m API Key:       \x1b[1;38;2;234;179;8m{}\x1b[0m  (Keep this secret!)",
-                k
-            );
-            println!(
-                "  \x1b[38;2;113;113;122m▸\x1b[0m Client Setup:  lmem config --remote http://127.0.0.1:{} --api-key \"{}\"",
-                port, k
-            );
-        } else {
-            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Authentication: None (--no-auth)");
-            println!(
-                "  \x1b[38;2;113;113;122m▸\x1b[0m Client Setup:  lmem config --remote http://127.0.0.1:{}",
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Listening:         0.0.0.0:{} (all interfaces)",
                 port
             );
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Network Endpoints:");
+            let endpoints = lightmem::services::api_server::discover_host_endpoints();
+            for ep in &endpoints {
+                println!(
+                    "    \x1b[38;2;113;113;122m•\x1b[0m \x1b[1m{:<12}\x1b[0m http://{}:{} ({})",
+                    ep.label, ep.ip, port, ep.if_name
+                );
+            }
+        } else {
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Listening:         http://{}:{}",
+                host, port
+            );
+        }
+        if let Some(ref k) = key {
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m API Key:           \x1b[1;38;2;234;179;8m{}\x1b[0m  (Keep this secret!)",
+                k
+            );
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Quick Connect (Examples):");
+            if host == "0.0.0.0" {
+                let endpoints = lightmem::services::api_server::discover_host_endpoints();
+                for ep in &endpoints {
+                    println!(
+                        "    \x1b[38;2;113;113;122m•\x1b[0m {:<12} lmem remote http://{}:{} --api-key \"{}\"",
+                        ep.label, ep.ip, port, k
+                    );
+                }
+            } else {
+                println!(
+                    "    \x1b[38;2;113;113;122m•\x1b[0m {:<12} lmem remote http://{}:{} --api-key \"{}\"",
+                    "Remote", host, port, k
+                );
+            }
+        } else {
+            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Authentication:    None (--no-auth)");
         }
         println!(
             "  \x1b[38;2;113;113;122m▸\x1b[0m Health Probe:  http://127.0.0.1:{}/v1/health",
@@ -3273,12 +3700,61 @@ fn handle_serve(
     // Foreground mode
     let lm = open_controller(effective_db, global, connection)?;
     let options = lightmem::ServerOptions {
-        host,
+        host: host.clone(),
         port,
         api_key,
         no_auth,
     };
-    lightmem::serve_api(Arc::new(lm), options)?;
+    if let Err(e) = lightmem::serve_api(Arc::new(lm), options) {
+        let err_str = format!("{e:#}");
+        if err_str.contains("Address already in use")
+            || err_str.contains("os error 98")
+            || err_str.contains("os error 48")
+            || err_str.contains("os error 10048")
+        {
+            let alt_port = if port == 8080 { 8089 } else { port + 1 };
+            eprintln!(
+                "\n{} {}",
+                "⚠️".yellow(),
+                format!("Cannot start server on {}:{}", host, port).yellow().bold()
+            );
+            eprintln!(
+                "  {} {:<12} Port {} is already in use by another process.",
+                "◈".dimmed(),
+                "Reason:".white().bold(),
+                port
+            );
+            eprintln!();
+            eprintln!("  {} {}", "💡".dimmed(), "How to fix:".white().bold());
+            eprintln!(
+                "    {} {:<18} {}",
+                "•".dimmed(),
+                "Use another port:",
+                format!("lmem serve --port {}", alt_port).cyan()
+            );
+            eprintln!(
+                "    {} {:<18} {}",
+                "•".dimmed(),
+                "Run as daemon:",
+                format!("lmem serve -d --port {}", alt_port).cyan()
+            );
+            eprintln!(
+                "    {} {:<18} {}",
+                "•".dimmed(),
+                "Check active daemon:",
+                "lmem serve --status".yellow()
+            );
+            eprintln!(
+                "    {} {:<18} {}",
+                "•".dimmed(),
+                "Stop running daemon:",
+                "lmem serve --stop".yellow()
+            );
+            eprintln!();
+            std::process::exit(1);
+        }
+        return Err(e);
+    }
     Ok(())
 }
 

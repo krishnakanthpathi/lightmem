@@ -86,6 +86,31 @@ impl OnnxEmbeddingProvider {
         };
 
         let cache_dir = crate::config::LightMemConfig::config_dir().join("models");
+        if crate::config::LightMemConfig::offline_requested() {
+            let info = TextEmbedding::get_model_info(&selected_model)
+                .map_err(|e| anyhow::anyhow!("Unknown model: {}", e))?;
+            let root = std::env::var_os("HF_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| cache_dir.clone())
+                .join(format!("models--{}", info.model_code.replace('/', "--")));
+            let revision = std::fs::read_to_string(root.join("refs/main")).context("Offline model cache is missing. Download this model before enabling LIGHTMEM_OFFLINE.")?;
+            let snapshot = root.join("snapshots").join(revision.trim());
+            for file in std::iter::once(info.model_file.as_str())
+                .chain(info.additional_files.iter().map(String::as_str))
+                .chain([
+                    "tokenizer.json",
+                    "config.json",
+                    "special_tokens_map.json",
+                    "tokenizer_config.json",
+                ])
+            {
+                anyhow::ensure!(
+                    snapshot.join(file).is_file(),
+                    "Offline model asset missing: {}. Download the model first.",
+                    file
+                );
+            }
+        }
         let _ = std::fs::create_dir_all(&cache_dir);
         let options = TextInitOptions::new(selected_model)
             .with_cache_dir(cache_dir)

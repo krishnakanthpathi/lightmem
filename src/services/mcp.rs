@@ -485,6 +485,10 @@ impl McpServer {
                         "preset": {
                             "type": "string",
                             "description": "Apply setup preset: 'local', 'ollama-cloud', or 'ollama-local'"
+                        },
+                        "entity_extraction": {
+                            "type": "string", "enum": ["off", "llm"],
+                            "description": "Opt in to sending new memory text to the configured LLM; off by default"
                         }
                     }
                 }
@@ -786,7 +790,8 @@ impl McpServer {
             }
 
             "config" => {
-                let mut cfg = LightMemConfig::try_load().unwrap_or_default();
+                let mut cfg = LightMemConfig::try_load()?;
+                let previous_identity = cfg.embedding_identity()?;
                 let mut updated = false;
 
                 if let Some(backend) = args.get("backend").and_then(|v| v.as_str()) {
@@ -809,8 +814,17 @@ impl McpServer {
                     cfg.apply_preset(preset)?;
                     updated = true;
                 }
+                if let Some(mode) = args.get("entity_extraction").and_then(|v| v.as_str()) {
+                    anyhow::ensure!(
+                        matches!(mode, "off" | "llm"),
+                        "Entity extraction must be off or llm"
+                    );
+                    cfg.entity_extraction = mode.to_string();
+                    updated = true;
+                }
 
                 if updated {
+                    anyhow::ensure!(cfg.embedding_identity()? == previous_identity || lm.stats()?.total_memories == 0, "Changing embeddings for a populated vault requires migration. Use lmem config --yes or the local workspace to preview and migrate.");
                     cfg.save()?;
                 }
 
@@ -820,6 +834,7 @@ impl McpServer {
                     "onnx_model": cfg.onnx_model,
                     "reranker": cfg.reranker,
                     "ollama_url": cfg.ollama_url,
+                    "entity_extraction": cfg.entity_extraction,
                     "active_db": lm.db_path().display().to_string()
                 }))
             }

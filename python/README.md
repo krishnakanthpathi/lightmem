@@ -9,6 +9,12 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 
 ---
 
+## 0.8.0 configuration and compatibility
+
+LLM entity extraction is off by default. Enable it explicitly through `lmem config --entity-extraction llm`, or use the local management workspace with `lmem ui`. Configuration changes can require per-vault reindexing. Remote commands reject unsupported operations and attachment flags instead of silently falling back to local data. API keys in `config --json` are redacted.
+
+Native executable auto-downloads verify the release’s `SHA256SUMS` before safe extraction. Linux wheels use a generic `linux_x86_64` tag and an Ubuntu 22.04 build baseline; compatibility with older Linux distributions is not promised. The SDK remains a typed subprocess bridge; latency includes a native CLI launch for each method.
+
 ## ⚡ Quickstart
 
 ### Installation
@@ -35,12 +41,15 @@ memory = lm.remember(
 print("Stored memory:", memory.id)
 
 # 2. Store Multimodal Attachments (images, audio, 4K video, PDFs in isolated 0600 SQLite BLOB vault)
-diagram = lm.remember(
-    "API Gateway routes to [[PostgreSQL Primary Config]]",
-    files=["./ingress-architecture.png"],
-    tags=["architecture", "gateway"],
-    extract=False,  # True to invoke configured LLM for visual/document summary extraction
-)
+from pathlib import Path
+from tempfile import TemporaryDirectory
+with TemporaryDirectory() as examples:
+    notes = Path(examples) / "architecture-notes.txt"
+    notes.write_text("API gateway connects to PostgreSQL", encoding="utf-8")
+    diagram = lm.remember(
+        "API Gateway routes to [[PostgreSQL Primary Config]]",
+        files=[notes], tags=["architecture", "gateway"], extract=False,
+    )
 
 # 3. Hybrid Search (FTS5 BM25 + Vector Cosine RRF + Graph Multi-Hop & Media Filter)
 results = lm.recall("postgres port", limit=5, multi_hop=True)
@@ -48,7 +57,7 @@ for r in results:
     print(f"[{r.score:.2f}] {r.memory.title}: {r.memory.content}")
 
 # Materialize verified attachment file paths directly on disk
-image_paths = lm.recall("gateway", media="image", limit=1, path=True)
+attachment_paths = lm.recall("gateway", media="document", limit=1, path=True)
 inspected_paths = lm.inspect(diagram.id, path=True)
 
 # 4. Neural Extractive QA (exact fact extraction via ONNX SQuAD-2.0 or Ollama)
@@ -80,7 +89,7 @@ print(f"Active memories: {stats.active_memories} | Vectors: {stats.vector_count}
 # Packages checkpointed SQLite DB, all attached videos/photos/docs & vector embeddings into a .zip
 lm.bundle_export("my-vault.zip")
 info = lm.bundle_info("my-vault.zip")
-print(f"Backed up {info['record_count']} memories & {info['attachment_count']} media files")
+print(f"Backed up {info['stats']['total_memories']} memories & {info['stats']['total_attachments']} media files")
 lm.bundle_import("my-vault.zip", mode="replace")  # or mode="merge"
 
 # 9. Deploy Skill to AI Agents (Antigravity, Codex, Hermes, Cursor, Claude)

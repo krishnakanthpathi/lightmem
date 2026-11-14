@@ -1,15 +1,17 @@
 # ❖ LightMem (`lmem`)
 
-**Ultra-fast, local AI agent persistent memory engine and native Model Context Protocol (MCP) server, written in Rust with SQLite WAL, ONNX Runtime (`fastembed` + SQuAD-2.0 Extractive QA), and swappable Ollama models.**
+**Local-first persistent memory for AI agents: a Rust CLI, Python SDK, MCP server, and authenticated local workspace, backed by SQLite and configurable local or remote models.**
+
+**0.8.0 review build:** changes are prepared locally and await verification before release. Start with the [CLI review guide](docs/cli-review-0.8.0.md); [optional browser/remote checks](docs/review-0.8.0.md) are also available.
 
 [![GitHub Release](https://img.shields.io/github/v/release/krishnakanthpathi/lightmem?color=crimson&logo=github)](https://github.com/krishnakanthpathi/lightmem/releases)
 [![PyPI version](https://img.shields.io/pypi/v/lmem.svg?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/lmem/)
 [![Crates.io](https://img.shields.io/crates/v/lightmem.svg?color=orange&logo=rust)](https://crates.io/crates/lightmem)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/krishnakanthpathi/lightmem)
-[![Privacy](https://img.shields.io/badge/privacy-100%25%20local-success.svg)](https://github.com/krishnakanthpathi/lightmem)
+[![Local first](https://img.shields.io/badge/storage-local%20first-success.svg)](https://github.com/krishnakanthpathi/lightmem)
 
-LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and a **zero-overhead Model Context Protocol (MCP) server** for AI agent IDEs.
+LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector search** (`fastembed`), **local ONNX Extractive QA (`minilm-squad2` / `tinyroberta-squad2`) & swappable Ollama rerankers** (`ollama:<model>`), **immutable SHA-256-verified multimodal BLOB attachments** (images, audio, video, documents), **Obsidian-grade `[[wikilinks]]` & multi-hop knowledge graph traversal**, **nearest-neighbor vector + overlap conflict merging**, **temporal point-in-time (`--as-of`) & single-day (`--date`) queries**, **14-category auto-inference**, and a **native Model Context Protocol (MCP) server** for AI agent IDEs.
 
 ---
 
@@ -18,6 +20,7 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - [Why LightMem?](#-why-lightmem)
 - [Performance & Comparison](#-performance--comparison)
 - [Quick Install](#-quick-install-macos-linux--windows)
+- [Local management workspace](#local-management-workspace-080)
 - [Python SDK Quickstart](#-python-sdk-quickstart)
 - [Identity-Aware Connections](#identity-aware-connections-v040)
 - [Single-File DB & Media Transfer Bundles](#single-file-db--media-transfer-bundles-v050)
@@ -37,35 +40,28 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 
 ## ⚡ Why LightMem?
 
-- **Sub-10ms Startup & Sub-Millisecond Retrieval**: Pure compiled Rust binary with direct SQLite C-bindings and memory-mapped indices.
-- **Zero Background Daemons**: 0% idle CPU and 0% idle RAM. Activates only when invoked by shell, Python SDK, or MCP JSON-RPC.
-- **100% Private & Offline**: No telemetry, no external database dependencies, and no cloud sync required.
+- **Native CLI and lazy models**: SQL-only commands avoid loading embedding or answer models. Measure startup, recall, and QA separately on your target machine.
+- **Choose the runtime**: Individual CLI/SDK commands run on demand. MCP, HTTP, and UI servers remain alive while used and can retain loaded models.
+- **Local-first storage**: No required memory cloud. Cached ONNX inference runs locally. Ollama and LLM extraction can use remote endpoints; entity extraction is off by default. The local workspace has no analytics; the deployed website uses Vercel analytics.
 - **Neural Extractive QA**: Extracts pinpoint answers (under 20 tokens) directly from stored memories instead of flooding LLM context windows.
 - **Multimodal BLOB Vault**: Secure `0600` file storage for images, diagrams, audio, and 4K video with SHA-256 integrity checks and instant path materialization (`--path`).
 - **Graph Multi-Hop Traversal**: Connect memories with Obsidian-style `[[wikilinks]]` or explicit directional edges and navigate relationship trees.
-- **Smart Conflict Merging**: Nearest-neighbor cosine similarity and token overlap scanner that finds and synthesizes conflicting facts into updated records.
+- **Review potential overlaps**: Vector similarity and word overlap identify candidate pairs. Local merging generally keeps the newer content; Ollama can synthesize a merge. Similarity alone does not prove a contradiction.
 - **Portable DB & Media Transfer Bundles**: Export and import complete vaults—including SQLite tables, full vector embeddings, and all physical video, photo, audio, and PDF files—into a single compressed `.zip` bundle with zero re-indexing overhead.
 
 ---
 
-## 📊 Performance & Comparison
+## 📊 Performance and measurement
 
-| Feature / Metric | **LightMem (`lmem`)** | **Traditional Cloud / Daemon Memory** | **Standard Vector Databases** |
-| :--- | :--- | :--- | :--- |
-| **Runtime Language** | **Compiled Rust** | Python / Node.js | Python / Go / Java |
-| **Idle Memory (RAM)** | **0 MB** (no persistent daemon) | 250 MB – 1.2 GB | 500 MB – 2 GB |
-| **CLI Startup Latency** | **~8 ms** | 450 ms – 1.8 s | N/A (requires daemon) |
-| **Exact Fact Extraction** | **Local ONNX QA (`minilm-squad2`)** | LLM Re-prompting | None (returns raw chunks) |
-| **Multimodal Storage** | **Built-in SHA-256 BLOB Vault** | Separate S3 / MinIO | Separate Object Store |
-| **Knowledge Graph** | **`[[wikilinks]]` + Multi-hop BFS** | Often None or Extra Graph DB | Vector-only |
-| **Protocol Support** | **Native MCP stdio + Python SDK + CLI** | Custom REST API | Custom REST / gRPC |
-| **Privacy / Cloud Sync** | **100% Local (Air-gapped ready)** | Cloud-bound / External Server | Self-hosted or Cloud |
+Latency depends on the corpus, model, hardware, cold/warm state, and network. SQL lookups, hybrid recall, and model-based answers are different operations; there is no universal sub-millisecond guarantee. The Python SDK starts a subprocess for each call. An exited CLI uses no idle process memory, while a running MCP/UI/HTTP server remains resident.
+
+Run `cargo bench --bench bench_harness` for a host-specific report. It labels in-process timing, CLI measurements, nonempty-result rates, and integrity checks separately. Nonempty results do not establish retrieval accuracy. Publish the hardware, dataset size, model, runtime mode, and p50/p95 alongside any presentation numbers.
 
 ---
 
 ## ◈ Quick Install (macOS, Linux & Windows)
 
-### Python (Precompiled Native Wheel — Instant sub-10ms startup)
+### Python (wheel with native executable)
 ```bash
 pip install -U lmem
 ```
@@ -96,6 +92,20 @@ cargo install --path . --root ~/.local --force
 
 ---
 
+## Local management workspace (0.8.0)
+
+```bash
+lmem ui                              # Open the authenticated loopback workspace
+lmem --db ./demo.db ui                # Explicit local vault
+lmem --connection codex --scope project ui --no-browser
+```
+
+Use the private startup URL to open the workspace. It binds only to `127.0.0.1`; its temporary token grants access to this server. The token is removed from the address bar after loading and retained in this tab’s session. Ctrl+C stops the server.
+
+The workspace provides a visible vault/scope context, memory search and sourced answers, attachment downloads, add/archive/restore, named connections, model preparation, configuration preview and reindex approval, and bundle export/restore preview. Settings are shared under the configuration root; indexes are per vault. Remote CLI routing does not change this workspace’s local target. See the [review guide](docs/review-0.8.0.md) for a disposable demo.
+
+---
+
 ## 🐍 Python SDK Quickstart
 
 Install the official Python package with precompiled native wheels:
@@ -123,12 +133,15 @@ memory = lm.remember(
 print(f"Stored memory ID: {memory.id}")
 
 # 2. Store Multimodal Attachments (images, audio, video, PDFs in 0600 BLOB vault)
-diagram = lm.remember(
-    "API Gateway routes to [[PostgreSQL Primary Config]]",
-    files=["./architecture-diagram.png"],
-    tags=["architecture", "gateway"],
-    extract=False,  # Set True to extract visual summary via configured LLM
-)
+from pathlib import Path
+from tempfile import TemporaryDirectory
+with TemporaryDirectory() as examples:
+    notes = Path(examples) / "architecture-notes.txt"
+    notes.write_text("API gateway connects to PostgreSQL", encoding="utf-8")
+    diagram = lm.remember(
+        "API Gateway routes to [[PostgreSQL Primary Config]]",
+        files=[notes], tags=["architecture", "gateway"], extract=False,
+    )
 
 # 3. Hybrid Recall (FTS5 BM25 + Vector Cosine RRF + Graph Multi-Hop)
 results = lm.recall("postgres port", limit=5, multi_hop=True)
@@ -136,7 +149,7 @@ for r in results:
     print(f"[{r.score:.2f}] {r.memory.title}: {r.memory.content}")
 
 # Materialize verified attachment file paths directly on disk
-image_paths = lm.recall("gateway", media="image", limit=1, path=True)
+attachment_paths = lm.recall("gateway", media="document", limit=1, path=True)
 
 # 4. Neural Extractive QA (extracts exact fact span via local ONNX SQuAD-2.0 or Ollama)
 answer = lm.answer("what port does postgresql use?")
@@ -164,7 +177,7 @@ print(f"Vault: {stats.active_memories} memories, {stats.vector_count} indexed ve
 # Packages checkpointed SQLite DB, all attached videos/photos/docs & vector embeddings into a .zip
 lm.bundle_export("my-vault.zip")
 info = lm.bundle_info("my-vault.zip")
-print(f"Backed up {info['record_count']} memories & {info['attachment_count']} attachments")
+print(f"Backed up {info['stats']['total_memories']} memories & {info['stats']['total_attachments']} attachments")
 lm.bundle_import("my-vault.zip", mode="replace")  # or mode="merge"
 ```
 
@@ -252,13 +265,15 @@ Bundles use the standard `.zip` (or `.lmbundle`) format containing:
 
 ## Knowledge Graph Entities (v0.5.2)
 
-LightMem automatically extracts and indexes structured knowledge graph entities (`name` → `value`) from ingested memories and dialogue turns. Entities are stored directly in SQLite (`entities` table), cross-referenced against canonical memories, deduplicated, and used for sub-millisecond exact attribute retrieval:
+When explicitly enabled with `lmem config --entity-extraction llm`, LightMem extracts structured knowledge graph entities (`name` → `value`) from ingested memories and dialogue turns. Entities are stored directly in SQLite (`entities` table), cross-referenced against canonical memories, deduplicated, and can answer exact attribute questions without running the QA model:
 
 ```bash
-# Store a memory with automatic entity extraction (e.g. extracts 'pincode: 500081', 'city: Hyderabad')
+# Opt in: remembered text is sent to the configured LLM endpoint
+lmem config --entity-extraction llm
+# Store a memory and extract attributes such as pincode and city
 lmem remember "I live at Flat 402, Sunshine Apts, Hyderabad with pincode 500081"
 
-# Exact-match entity answer via zero-overhead entity_index (sub-millisecond latency)
+# Exact-match entity answer via entity_index
 lmem answer "what is my pincode?"
 # -> "500081" (reranker_used: entity_index)
 
@@ -300,7 +315,7 @@ Run LightMem as a centralized, high-throughput memory backend on any device (hom
 # 1. Start the server (foreground)
 lmem serve --host 0.0.0.0 --port 8080 --api-key "my-super-secret-key"
 
-# 2. Run in background as a daemon
+# 2. Run in background as a daemon (foreground/background preserve scope and session)
 lmem serve -d --host 0.0.0.0 --port 8080 --api-key "my-super-secret-key"
 
 # 3. Check daemon status & health
@@ -332,7 +347,11 @@ export LIGHTMEM_API_KEY="my-super-secret-key"
 lmem --remote http://my-server.local:8080 --api-key "my-super-secret-key" recall "project status"
 ```
 
-When connected to a remote backend, standard CLI commands (`remember`, `recall`, `answer`, `list`, `inspect`, `forget`, `clear`, `link`, `related`, `graph`, `stats`, `context`) execute transparently over HTTP with identical formatting, tables, and JSON outputs.
+Remote commands support `remember`, `recall`, `answer`, `list`, `inspect`, `forget`, `clear`, `link`, `unlink`, `related`, `graph`, `stats`, and `context`. Confidence, subsecond TTL, filters, Unicode titles, and inspection links are preserved. CLI `recall --precision` returns an answer using the server’s configured engine.
+
+Unsupported vault commands (including import/export, conflicts, reindex, observe, and MCP launch) fail instead of operating locally. Local connection/scope selectors cannot be combined with remote commands. Visual recall, CLI attachment materialization/open flags, and attachment LLM extraction are rejected remotely; authenticated attachment bytes are available at `/v1/attachment`. `bundle info` is deliberately local file inspection. Explicit `--db`, `LIGHTMEM_DB`, or `--global` selects local storage over a saved remote endpoint.
+
+Blank API keys are rejected; only `--no-auth` disables authentication. The health endpoint reports liveness/version without exposing the vault path. HTTP clear requires an explicit JSON object: `{"soft":true}` archives, and `{"soft":false}` permanently deletes. Configuration output redacts both API keys. Management endpoints require a loopback-bound server. Built-in HTTP does not encrypt traffic; use a trusted network or appropriate TLS infrastructure for remote operation.
 
 ---
 
@@ -360,7 +379,7 @@ lmem docs --no-browser
 
 ## 🔌 Model Context Protocol (MCP) Server
 
-LightMem features a native, zero-dependency **Model Context Protocol (MCP)** stdio server (JSON-RPC 2.0). It operates on-demand without background daemons and consumes 0% idle CPU.
+LightMem provides a native **Model Context Protocol (MCP)** stdio server (JSON-RPC 2.0). The process remains alive while the client is connected and may retain loaded models. Agents explicitly invoke its tools to store or retrieve memories.
 
 ### 1. One-Click Auto-Configuration
 Configure MCP automatically across Claude Desktop, Cursor, and Antigravity:
@@ -407,7 +426,7 @@ Add the following snippet to your editor's MCP configuration file (e.g., `claude
 # Display Crimson Cloud HUD & live vault telemetry
 lmem
 
-# Store a memory (category is auto-inferred across 14 types if -t is omitted; entities auto-extracted)
+# Store a memory (category is auto-inferred across 14 types if -t is omitted; LLM entities extracted only when enabled)
 lmem remember "PostgreSQL 16 runs on port 5432" --title "Postgres Port" --tags "db,postgres"
 
 # Store with explicit category, confidence, or skip entity extraction
@@ -459,10 +478,10 @@ lmem recall "postgres port" --as-of 2026-09-21         # Active state on or befo
 
 ### 4. Neural Extractive QA & Entity Index (`lmem answer`)
 ```bash
-# Instant sub-millisecond exact entity match (reranker: entity_index)
+# Exact entity match that bypasses the answer model (reranker: entity_index)
 lmem answer "what is my pincode"
 
-# Local ONNX extractive QA (minilm-squad2 by default, sub-600ms latency, zero API costs)
+# Local ONNX extractive QA (minilm-squad2 by default, local inference; latency depends on the host and model)
 lmem answer "what is my pan card no"
 lmem answer "what is my father name" -r tinyroberta-squad2
 
@@ -470,7 +489,7 @@ lmem answer "what is my father name" -r tinyroberta-squad2
 lmem answer "who is kk" -r ollama:gemma4:31b-cloud
 lmem answer "summarize sprint goals" -r ollama:qwen2.5:3b
 
-# Instant zero-overhead rank-1 vector answer
+# Return the highest-ranked retrieved memory
 lmem answer "what port does postgres use?" -r top1
 ```
 
@@ -572,24 +591,32 @@ See [terminal command guide](docs/terminal-commands.md) for setup and override d
 
 LightMem supports three swappable reranker backends for `lmem answer`, `lmem recall --precision`, and `lmem conflicts`:
 
-| Reranker | Command to Set Default | Per-Query Flag (`-r`) | Peak RAM | Typical Latency |
-| :--- | :--- | :--- | :--- | :--- |
-| **`minilm-squad2`** *(default)* | `lmem config --reranker minilm-squad2` | `-r minilm-squad2` | ~358 MB | ~600 ms |
-| **`tinyroberta-squad2`** | `lmem config --reranker tinyroberta-squad2` | `-r tinyroberta-squad2` | ~669 MB | ~1.2 s |
-| **`ollama:<model>`** *(local or cloud)* | `lmem config --reranker ollama:qwen2.5:3b` | `-r ollama:gemma4:31b-cloud` | ~207 MB (`lmem`) | ~1–11 s |
-| **`top1`** *(0ms vector rank-1)* | `lmem config --reranker top1` | `-r top1` | ~205 MB | ~280 ms |
+| Answer engine | Set default | Behavior |
+| :--- | :--- | :--- |
+| `minilm-squad2` (default) | `lmem config --reranker minilm-squad2` | Local extractive QA over retrieved memories |
+| `tinyroberta-squad2` | `lmem config --reranker tinyroberta-squad2` | Alternative local extractive QA model |
+| `ollama:<model>` | `lmem config --reranker ollama:qwen2.5:3b` | Uses the configured local or remote endpoint |
+| `top1` | `lmem config --reranker top1` | Returns the best retrieved memory without an additional answer model |
+
+Use `answer -r MODE` for a per-query override. Latency and RAM depend on model initialization, corpus, host, and runtime mode; benchmark your actual setup rather than comparing mixed cold/warm estimates.
 
 ```bash
 # 1. Interactive Setup Wizard (prompted automatically during install)
-lmem setup                       # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
-lmem setup --preset ollama-local # One-shot preset configuration
+lmem setup                       # Terminal choices and a preview before saving
+lmem setup --preset demo --dry-run # No-download demo preview
+lmem setup --preset demo --yes     # Save reviewed hash/top1 settings
+lmem setup --preset ollama-local --entity-extraction off --yes
 
 # 2. Inspect active configuration and presets
 lmem config                      # Formatted tree of settings
 lmem config --json               # Machine-readable JSON output
+lmem config --preset local --dry-run # Preview shared settings and selected-vault migration
+lmem config --test               # Test saved embeddings without saving a memory
+lmem context                    # Show selected vault and connection/scope
 
-# 3. Preset: 100% Offline Local Mode (ONNX bge-small + minilm-squad2 QA)
+# 3. Local model preset (ONNX search + QA; entity extraction off)
 lmem config --preset local
+lmem config --clear-remote       # Also select local CLI routing if a remote server was configured
 lmem config --download all       # Pre-cache ONNX models locally for offline operation
 
 # 4. Preset: Local Embeddings + Ollama Cloud Model Reranker
@@ -600,6 +627,8 @@ lmem config --preset ollama-local
 
 # 6. Custom Ollama Host or Model
 lmem config --url http://localhost:11434 --reranker ollama:qwen2.5:3b
+lmem config --entity-extraction off # Configure separately from search and answers
+# Set OLLAMA_API_KEY in your environment for credentials, or save a key with --ollama-api-key.
 
 # 7. Dynamic Per-Query Override (without changing persistent config)
 lmem answer "what is my api token" -r minilm-squad2
@@ -618,13 +647,15 @@ Instead of brittle hardcoded slot regexes, `lmem conflicts` scans active memorie
    - In an interactive terminal, `lmem conflicts` prompts on each pair:
      `Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit`
    - Passing `--yes` (`-y`, alias `--resolve`) merges all pairs automatically.
-4. **Reranker-Guided Merging**: When merging, the active reranker (`OnnxQaReranker`, `OllamaReranker`, or `Top1Reranker`) synthesizes the merged record: prioritizing the `NEWER` memory's updated facts while preserving non-conflicting clauses from `OLDER`, unioning tags case-insensitively, keeping max confidence, re-embedding the survivor, and expiring the `OLDER` record.
+4. **Review the merge behavior**: Top‑1/default merging generally keeps the newer record’s complete content; local ONNX has a narrow richer-subset exception. Ollama is prompted to preserve non-conflicting older details, but the result still needs review. Merging unions tags/attachments, refreshes the survivor’s vector, and expires the older record. Similarity is a candidate signal, not proof of a contradiction.
 
 ---
 
 ## ◷ Temporal Filtering (`--as-of` vs `--date`)
 
-- **`--as-of <YYYY-MM-DD|RFC3339>`**: Cumulative point-in-time snapshot — returns memories created on or before that timestamp that were still active at that moment.
+- **`--as-of <YYYY-MM-DD|RFC3339>`**: Historical visibility filter — returns memories created on or before that timestamp that were still active at that moment.
+This filters record visibility; it is not a complete history of prior content revisions.
+
 - **`--date <YYYY-MM-DD>`**: Single-day filter — returns memories created or updated on that exact UTC calendar day (supported in `lmem recall`, `lmem list`, and `lmem answer`).
 
 ---
@@ -667,4 +698,4 @@ cargo clippy --locked --all-targets -- -D warnings
 
 ## 📄 License
 
-LightMem is released under the [MIT License](LICENSE).
+LightMem is released under the [MIT License](LICENSE). Local file permissions and a `password` category do not provide encryption at rest; protect vaults and backup bundles accordingly.

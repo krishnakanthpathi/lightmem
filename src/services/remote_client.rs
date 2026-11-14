@@ -13,12 +13,37 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+fn query_encode(value: &str) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            let _ = write!(encoded, "%{:02X}", byte);
+        }
+    }
+    encoded
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkResult {
     pub source_id: String,
     pub target_id: String,
     pub relation: String,
     pub weight: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RememberResponse {
+    #[serde(flatten)]
+    pub memory: MemoryRecord,
+    #[serde(default)]
+    pub superseded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub conflicts: Vec<crate::MemoryConflict>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,12 +139,16 @@ impl RemoteClient {
     }
 
     pub fn remember(&self, req: &RememberRequest) -> Result<MemoryRecord> {
+        Ok(self.remember_detailed(req)?.memory)
+    }
+
+    pub fn remember_detailed(&self, req: &RememberRequest) -> Result<RememberResponse> {
         let url = format!("{}/v1/remember", self.base_url);
         let resp = self
             .apply_auth(ureq::post(&url))
             .send_json(req)
             .map_err(|e| self.map_ureq_error(e))?;
-        let record: MemoryRecord = resp
+        let record: RememberResponse = resp
             .into_json()
             .context("Failed to parse MemoryRecord response as JSON")?;
         Ok(record)
@@ -175,13 +204,13 @@ impl RemoteClient {
             url.push_str(&format!("&status={}", stat.as_str()));
         }
         if let Some(ref m) = media {
-            url.push_str(&format!("&media={}", m));
+            url.push_str(&format!("&media={}", query_encode(m)));
         }
         if let Some(d) = date {
             url.push_str(&format!("&date={}", d));
         }
         if let Some(a) = as_of {
-            url.push_str(&format!("&as_of={}", a.to_rfc3339()));
+            url.push_str(&format!("&as_of={}", query_encode(&a.to_rfc3339())));
         }
 
         let resp = self
@@ -195,7 +224,7 @@ impl RemoteClient {
     }
 
     pub fn get(&self, term: &str) -> Result<Option<MemoryRecord>> {
-        let url = format!("{}/v1/get?term={}", self.base_url, term);
+        let url = format!("{}/v1/get?term={}", self.base_url, query_encode(term));
         let res = self.apply_auth(ureq::get(&url)).call();
         match res {
             Ok(resp) => {
@@ -228,6 +257,18 @@ impl RemoteClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         Ok(success)
+    }
+
+    pub fn links(&self, id: &str) -> Result<Vec<crate::models::MemoryLink>> {
+        self.apply_auth(ureq::get(&format!(
+            "{}/v1/links?id={}",
+            self.base_url,
+            query_encode(id)
+        )))
+        .call()
+        .map_err(|e| self.map_ureq_error(e))?
+        .into_json()
+        .context("Invalid links response")
     }
 
     pub fn clear(&self, soft: bool) -> Result<usize> {
@@ -290,7 +331,12 @@ impl RemoteClient {
     }
 
     pub fn related(&self, id: &str, hops: usize) -> Result<Vec<RelatedMemory>> {
-        let url = format!("{}/v1/related?id={}&hops={}", self.base_url, id, hops);
+        let url = format!(
+            "{}/v1/related?id={}&hops={}",
+            self.base_url,
+            query_encode(id),
+            hops
+        );
         let resp = self
             .apply_auth(ureq::get(&url))
             .call()
@@ -305,7 +351,7 @@ impl RemoteClient {
         let mut url = format!("{}/v1/graph", self.base_url);
         let mut params = Vec::new();
         if let Some(f) = focus {
-            params.push(format!("focus={}", f));
+            params.push(format!("focus={}", query_encode(f)));
         }
         if let Some(h) = hops {
             params.push(format!("hops={}", h));

@@ -1,7 +1,9 @@
 [package]
 name = "lightmem"
-version = "0.7.9"
+version = "0.8.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/krishnakanthpathi/lightmem"
 description = "Ultra-fast, pure-Rust agent memory engine and CLI (lmem)"
 
 [lib]

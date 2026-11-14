@@ -12,6 +12,7 @@ pub mod observer;
 pub mod remote_client;
 pub mod reranker;
 pub mod search;
+pub mod workspace;
 
 pub use api_server::{
     serve_api, AnswerRequest, AttachmentPayload, ClearPayload, ForgetPayload, LinkRequest,

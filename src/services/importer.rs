@@ -543,6 +543,10 @@ impl JsonMemoryImporter {
     }
 
     pub fn parse_with_enrichment(&self, raw: &str, enrich: bool) -> Result<Vec<ImportCandidate>> {
+        anyhow::ensure!(
+            !enrich,
+            "Import enrichment is not supported yet; remove --enrich"
+        );
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(format) = value.get("format").and_then(|v| v.as_str()) {
                 let is_backup_envelope = format == "lightmem-backup-v1"

@@ -81,6 +81,60 @@ fn http_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn normalize_http_url(url: &str) -> Result<String> {
+    let raw = url.trim();
+    let with_scheme = if !raw.starts_with("http://") && !raw.starts_with("https://") {
+        format!("http://{raw}")
+    } else {
+        raw.to_string()
+    };
+    http_url(&with_scheme)?;
+    Ok(with_scheme.trim_end_matches('/').to_string())
+}
+
+pub fn prompt_remote(
+    current_url: Option<&str>,
+    current_key: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    require_terminal()?;
+    let default_url = current_url.unwrap_or("http://localhost:8080");
+    let input = match line(&format!("Remote URL [{default_url}]: ")) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("\nOperation cancelled. No settings changed.");
+            std::process::exit(130);
+        }
+    };
+    let target = if input.is_empty() {
+        default_url.to_string()
+    } else {
+        input
+    };
+    let clean_url = normalize_http_url(&target)?;
+
+    let key_prompt = if current_key.is_some() {
+        "API Key (press Enter to keep, or paste new key): "
+    } else {
+        "API Key (optional, press Enter to skip): "
+    };
+    let key_input = match line(key_prompt) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!("\nOperation cancelled. No settings changed.");
+            std::process::exit(130);
+        }
+    };
+    let final_key = if key_input.is_empty() {
+        current_key.map(String::from)
+    } else if key_input.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(key_input)
+    };
+
+    Ok((clean_url, final_key))
+}
+
 pub fn ensure_unchanged(previous: &LightMemConfig) -> Result<()> {
     ensure!(
         serde_json::to_value(LightMemConfig::try_load()?)? == serde_json::to_value(previous)?,

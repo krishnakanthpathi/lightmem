@@ -319,3 +319,29 @@ fn bash_completes_new_connections_and_setup_presets_at_runtime() {
     assert!(!f.config().exists());
     assert!(!f.db().exists());
 }
+
+#[test]
+fn local_and_remote_commands_workflow() {
+    let f = Fixture::new();
+    f.demo();
+
+    // Configure remote with lmem remote
+    let out = f.json(&["remote", "http://127.0.0.1:8080", "--api-key", "test-key", "--json"]);
+    assert_eq!(out["mode"], "remote");
+    assert_eq!(out["remote_url"], "http://127.0.0.1:8080");
+    assert_eq!(out["has_api_key"], true);
+
+    // Verify config reflects remote
+    let cfg = f.json(&["config", "--json"]);
+    assert_eq!(cfg["remote_url"], "http://127.0.0.1:8080");
+
+    // Revert to local using lmem local
+    let out = f.json(&["local", "--json"]);
+    assert_eq!(out["mode"], "local");
+    assert_eq!(out["previous_remote_cleared"], true);
+
+    // Verify config is back to local
+    let cfg = f.json(&["config", "--json"]);
+    assert!(cfg["remote_url"].is_null());
+}
+

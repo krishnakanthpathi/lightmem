@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "krishnakanthpathi/lightmem"
-$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.7.9" }
+$ReleaseTag = if ($env:LIGHTMEM_VERSION) { $env:LIGHTMEM_VERSION } else { "v0.8.0" }
 $InstallDir = Join-Path $HOME ".local\bin"
 $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
 $Target = "$Arch-pc-windows-msvc"
@@ -29,6 +29,13 @@ $Downloaded = $false
 try {
     Write-Host "  ◈ Downloading prebuilt binary from $ArchiveUrl ..." -ForegroundColor Cyan
     Invoke-WebRequest -Uri $ArchiveUrl -OutFile $TmpZip -UseBasicParsing
+    $ChecksumContent = Invoke-RestMethod -Uri "https://github.com/$Repo/releases/download/$ReleaseTag/SHA256SUMS"
+    $ChecksumPattern = '^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape("lmem-$Target.zip") + '$'
+    $ChecksumLines = @($ChecksumContent -split '\r?\n' | Where-Object { $_ -match $ChecksumPattern })
+    if ($ChecksumLines.Count -ne 1) { throw "Missing or ambiguous release checksum" }
+    $ExpectedDigest = [regex]::Match($ChecksumLines[0], $ChecksumPattern).Groups[1].Value
+    $ActualDigest = (Get-FileHash -Path $TmpZip -Algorithm SHA256).Hash
+    if ($ActualDigest -ne $ExpectedDigest) { throw "Release archive SHA-256 mismatch" }
     Expand-Archive -Path $TmpZip -DestinationPath $InstallDir -Force
     Remove-Item $TmpZip -Force -ErrorAction SilentlyContinue
     $Downloaded = $true

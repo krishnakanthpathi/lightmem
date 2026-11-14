@@ -9,6 +9,7 @@ The landing page and documentation ship as static HTML, with no build step, pack
 - `landing.css`: landing page composition.
 - `docs.css`: documentation layout and responsive navigation.
 - `docs.js`: local search, installer tabs, command disclosures, and section navigation. Search builds a text index on first use and never hides the document. Scroll tracking uses IntersectionObserver.
+- `workspace.html`, `workspace.css`, `workspace.js`: the authenticated local management workspace, embedded into `lmem ui`. Preview this through the native server, not a static file server; it needs the real workspace API. No analytics or external assets are loaded by this interface.
 
 All documentation and command anchor IDs are in the HTML. Native links, mobile navigation, and command disclosures work without JavaScript. All installation alternatives remain visible if JavaScript is unavailable.
 
@@ -27,3 +28,5 @@ Open `http://localhost:4173/` or `http://localhost:4173/docs.html`. Local links 
 Keep the displayed source version aligned with `Cargo.toml` and `python/pyproject.toml`. CLI examples should match `src/main.rs`; integration and scope behavior is described in the root README. Preserve existing section and command IDs when editing to keep incoming links working.
 
 Check both pages at phone and desktop widths. Exercise search, keyboard result navigation, installer tabs, code copying, command expansion, and mobile navigation. Verify that long code and tables scroll within their containers instead of widening the page.
+
+The 0.8.0 manual verification procedure is in `docs/review-0.8.0.md`. Use its disposable configuration/database for workspace tests. The build is staged for review; do not publish it until the user approves the release.

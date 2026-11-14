@@ -39,7 +39,7 @@ lmem --version
 Always execute `lmem` via shell commands. Never simulate memory storage or rely solely on ephemeral conversation history for long-term facts, preferences, or architectural decisions.
 
 ```bash
-# 1. Store a memory (auto-infers category if -t is omitted; auto-deduplicates exact matches; extracts knowledge graph entities)
+# 1. Store a memory (auto-infers category if -t is omitted; auto-deduplicates exact matches; extracts entities only when explicitly enabled)
 lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" \
   -t fact \
   --title "PostgreSQL Primary Config" \
@@ -93,7 +93,7 @@ lmem graph --json                                  # Export graph nodes and edge
 lmem inspect <MEMORY_ID>                           # Inspect record, wikilinks, attachments, and extracted entities
 
 # 4. Extractive QA & Entity Answering (exact span from candidates or entity index)
-lmem answer "what is my pincode"                   # Instant sub-millisecond exact answer via entity_index
+lmem answer "what is my pincode"                   # Exact entity answer without invoking the QA model
 lmem answer "what port does postgresql use"
 lmem answer "what is my pan card no" --json
 lmem answer "who is kk" -r ollama:qwen2.5:3b
@@ -123,17 +123,18 @@ lmem bundle export -o ./vault_backup.zip        # Single-file compressed DB tran
 lmem bundle info ./vault_backup.zip            # Inspect bundle manifest, counts, and attached video/photo summary
 lmem bundle import ./vault_backup.zip          # Restore entire vault + extract all videos/photos into destination attachments/
 lmem bundle import ./vault_backup.zip --merge  # Merge memories and media into existing vault without wiping
-lmem export ./memory_bundle                    # Export human-readable OKF v2 Markdown tree
-lmem export ./backup.json --json               # Full lossless JSON backup envelope
+lmem export -o ./memory_bundle                    # Export human-readable OKF v2 Markdown tree
+lmem export --json -o ./backup.json               # Full lossless JSON backup envelope
 lmem import ./backup.json --enrich             # Transactional import with heuristic enrichment
 
 # 9. Engine, Reranker & Setup Wizard
 lmem setup                                         # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
 lmem setup --preset ollama-local                   # Configure Local Ollama LLM backend
-lmem setup --preset local                          # Configure 100% offline local ONNX mode (bge-small + minilm-squad2)
+lmem setup --preset local                          # Configure local ONNX models; choose vault routing separately (bge-small + minilm-squad2)
 lmem config                                        # View active settings & available setup presets
 lmem config --json                                 # Machine-readable JSON configuration
-lmem config --preset local                         # Preset 1: 100% offline (bge-small ONNX + minilm-squad2 QA)
+lmem config --entity-extraction off                # Keep entity extraction disabled
+lmem config --preset local                         # Preset 1: local ONNX models; entity extraction off
 lmem config --preset ollama-cloud                  # Preset 2: Local ONNX embeddings + Ollama gemma4:31b-cloud reranker
 lmem config --preset ollama-local                  # Preset 3: Local ONNX embeddings + Ollama localhost LLM reranker
 lmem config --download all                         # Pre-cache ONNX embedding + QA models for offline use
@@ -161,7 +162,9 @@ lmem serve --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server in
 lmem serve -d --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server as background daemon
 lmem serve --status                                    # Check background daemon health and status
 lmem serve --stop                                      # Stop background daemon server cleanly
-lmem config --remote http://server:8080 --api-key "secret" # Configure client to talk to remote backend
+lmem remote http://server:8080 --api-key "secret" # Connect client to remote backend (or interactive `lmem remote`)
+lmem local                                          # Revert back to local embedded SQLite mode (alias: disconnect)
+lmem config --remote http://server:8080 --api-key "secret" # Configure client via config command
 lmem config --clear-remote                         # Revert back to local embedded SQLite mode
 lmem docs                                         # Launch offline embedded docs HTTP server in foreground (aliases: doc, web, --port 8085)
 ```
@@ -227,7 +230,7 @@ LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ index
    - Breadth-first graph search up to $N$ hops (`lmem related <id> --hops 2`).
    - Cycle-safe with hop-distance attenuation scoring ($1.0 / \text{hop}$).
    - `lmem recall "<query>" --multi-hop` expands semantic recall hits with 1-hop connected neighbors.
-4. **Interactive Force-Directed Visualizer & Topology (`lmem graph`)**:
+4. **Knowledge Graph & Topology (`lmem graph`)**:
    - Terminal network tree or JSON export.
    - CLI flags: `lmem graph` (terminal Unicode tree), `lmem graph --focus <id> --hops 2` (neighborhood subgraph), `lmem graph --json` (export nodes and edges array).
 5. **Graph Similarity Search & Counting Connected Memories**:

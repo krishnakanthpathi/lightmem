@@ -8,6 +8,9 @@ import subprocess
 import urllib.request
 import tarfile
 import zipfile
+import hashlib
+import stat
+import tempfile
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -143,17 +146,80 @@ def get_binary_path() -> str:
         if downloaded and _is_native_binary(downloaded):
             return downloaded
     except Exception as e:
-        pass
+        download_error = str(e)
+    else:
+        download_error = "Downloaded file was not a compatible native executable"
 
     raise FileNotFoundError(
         "Could not find the 'lmem' native binary on this system. "
         "Install it via:\n"
         "  curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh\n"
-        "Or set the LMEM_BINARY_PATH environment variable."
+        "Or set the LMEM_BINARY_PATH environment variable. "
+        f"Automatic download: {download_error}"
     )
 
 
-def ensure_binary_downloaded(version: str = "v0.7.9") -> str:
+def _extract_checked(archive: Path, destination: Path) -> None:
+    """Extract regular files/directories only, without following archive links."""
+    root = destination.resolve()
+    seen = set()
+
+    def target(name: str) -> Path:
+        normalized = name.replace("\\", "/")
+        parts = normalized.split("/")
+        if normalized.startswith("/") or ".." in parts or any(":" in part for part in parts):
+            raise ValueError("Unsafe release archive path")
+        path = (root / normalized).resolve()
+        path.relative_to(root)
+        if path in seen:
+            raise ValueError("Duplicate release archive path")
+        seen.add(path)
+        return path
+
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as source:
+            for member in source.infolist():
+                mode = member.external_attr >> 16
+                if stat.S_ISLNK(mode) or (stat.S_IFMT(mode) and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode))):
+                    raise ValueError("Release archive links/devices are forbidden")
+                path = target(member.filename)
+                if member.is_dir():
+                    path.mkdir(parents=True, exist_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with source.open(member) as src, path.open("xb") as dst:
+                        shutil.copyfileobj(src, dst)
+    else:
+        with tarfile.open(archive, "r:gz") as source:
+            for member in source:
+                if not (member.isfile() or member.isdir()):
+                    raise ValueError("Release archive links/devices are forbidden")
+                path = target(member.name)
+                if member.isdir():
+                    path.mkdir(parents=True, exist_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with source.extractfile(member) as src, path.open("xb") as dst:
+                        shutil.copyfileobj(src, dst)
+
+
+def _verify_release_digest(archive: Path, checksums: Path) -> None:
+    expected = []
+    for line in checksums.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].lstrip("*") == archive.name:
+            expected.append(fields[0].lower())
+    if len(expected) != 1 or len(expected[0]) != 64:
+        raise ValueError("Release checksum is missing or ambiguous")
+    digest = hashlib.sha256()
+    with archive.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    if digest.hexdigest() != expected[0]:
+        raise ValueError("Release archive SHA-256 mismatch")
+
+
+def ensure_binary_downloaded(version: str = "v0.8.0") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -188,25 +254,33 @@ def ensure_binary_downloaded(version: str = "v0.7.9") -> str:
     if _is_native_binary(dest_exe):
         return str(dest_exe)
 
-    url = f"https://github.com/krishnakanthpathi/lightmem/releases/download/{version}/{archive_name}"
-    tmp_archive = dest_dir / archive_name
+    if "LIGHTMEM_OFFLINE" in os.environ:
+        raise RuntimeError("Offline mode blocks executable downloads. Install the native binary first or set LMEM_BINARY_PATH.")
 
+    url = f"https://github.com/krishnakanthpathi/lightmem/releases/download/{version}/{archive_name}"
     sys.stderr.write(f"Downloading LightMem native engine ({version}) from GitHub...\n")
     try:
-        urllib.request.urlretrieve(url, tmp_archive)
-        if archive_name.endswith(".zip"):
-            with zipfile.ZipFile(tmp_archive, "r") as z:
-                z.extractall(dest_dir)
-        else:
-            with tarfile.open(tmp_archive, "r:gz") as t:
-                t.extractall(dest_dir)
-
-        tmp_archive.unlink(missing_ok=True)
-        dest_exe.chmod(0o755)
+        with tempfile.TemporaryDirectory(dir=dest_dir, prefix=".download-") as temporary:
+            staging = Path(temporary)
+            archive = staging / archive_name
+            checksums = staging / "SHA256SUMS"
+            urllib.request.urlretrieve(url, archive)
+            urllib.request.urlretrieve(url.rsplit("/", 1)[0] + "/SHA256SUMS", checksums)
+            _verify_release_digest(archive, checksums)
+            extracted = staging / "extracted"
+            extracted.mkdir()
+            _extract_checked(archive, extracted)
+            executable = extracted / exe_name
+            executable.chmod(0o755)
+            if not _is_native_binary(executable):
+                raise ValueError("Downloaded executable has an invalid format or architecture")
+            for library in extracted.iterdir():
+                if library.is_file() and library.name != exe_name:
+                    os.replace(library, dest_dir / library.name)
+            os.replace(executable, dest_exe)
         sys.stderr.write("LightMem native engine successfully installed.\n")
         return str(dest_exe)
     except Exception as e:
-        tmp_archive.unlink(missing_ok=True)
         raise RuntimeError(f"Failed to auto-download lmem binary from {url}: {e}")
 
 

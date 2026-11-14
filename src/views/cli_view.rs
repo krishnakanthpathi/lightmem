@@ -228,20 +228,75 @@ impl CliView {
 
     /// Render the full interactive intro screen when `lmem` is invoked with no subcommand.
     pub fn render_intro(db_path: &Path, stats: &StorageStats) {
-        let cfg = LightMemConfig::load();
+        println!("{}", Self::banner_string(Some(db_path), Some(stats)));
+        println!();
         println!(
-            "LightMem v{} · {} active memories",
-            env!("CARGO_PKG_VERSION"),
-            stats.active_memories
+            "  {} {}",
+            Self::crimson_bold("╭─"),
+            Self::white_bold("QUICK COMMANDS")
         );
-        println!("Vault: {}", db_path.display());
-        println!("Search: {}", cfg.active_embedding_summary());
-        println!(
-            "Answers: {} · Entity extraction: {}",
-            cfg.active_reranker_summary(),
-            cfg.entity_extraction
-        );
-        println!("\nSave:  lmem remember \"a fact\"\nFind:  lmem recall \"a question\"\nSetup: lmem setup\nCheck: lmem doctor\nHelp:  lmem --help");
+        let cmds = [
+            (
+                "│",
+                "lmem remember \"<fact>\" -t decision",
+                "Store a categorized memory (auto-links [[...]])",
+            ),
+            (
+                "│",
+                "lmem recall \"<query>\" --limit 5",
+                "Hybrid BM25 + vector search",
+            ),
+            (
+                "│",
+                "lmem answer \"<question>\"",
+                "Extractive QA via ONNX or Ollama",
+            ),
+            (
+                "│",
+                "lmem remote [url]",
+                "Connect to remote backend server",
+            ),
+            (
+                "│",
+                "lmem local",
+                "Switch back to local vault (disconnect)",
+            ),
+            ("│", "lmem graph", "Terminal network tree & connection map"),
+            (
+                "│",
+                "lmem related \"<id>\" --hops 2",
+                "Multi-hop knowledge graph traversal",
+            ),
+            (
+                "│",
+                "lmem list --page 1 --limit 20",
+                "Paginated chronological index",
+            ),
+            (
+                "│",
+                "lmem doctor",
+                "Inspect system readiness & diagnostics",
+            ),
+            (
+                "│",
+                "lmem connect <agent>",
+                "Deploy skill to Antigravity, Codex, Hermes, etc.",
+            ),
+            (
+                "╰─",
+                "lmem help  |  lmem stats",
+                "Inspect vault telemetry & all commands",
+            ),
+        ];
+        for (branch, cmd, desc) in cmds {
+            println!(
+                "  {:<2} {:<36} {}",
+                Self::crimson_bold(branch),
+                cmd.truecolor(248, 250, 252),
+                Self::slate(desc)
+            );
+        }
+        println!();
     }
 
     pub fn format_path(p: &Path) -> String {
@@ -295,6 +350,7 @@ impl CliView {
                     serde_json::Value::Bool(superseded),
                 );
                 if let Some(w) = warning {
+                    map.insert("warnings".to_string(), serde_json::json!([w]));
                     map.insert(
                         "warning".to_string(),
                         serde_json::Value::String(w.to_string()),
@@ -1112,6 +1168,35 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_context(value: &serde_json::Value, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(value)?);
+            return Ok(());
+        }
+        println!("{}", Self::white_bold("LightMem local context"));
+        for (key, label) in [
+            ("db_path", "Vault"),
+            ("connection_id", "Connection"),
+            ("scope", "Scope"),
+            ("user_id", "User"),
+            ("agent_id", "Agent"),
+            ("harness_id", "Tool"),
+            ("project_id", "Project"),
+            ("session_id", "Session"),
+        ] {
+            if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
+                println!("  {:<14} {}", label, text);
+            }
+        }
+        if value
+            .get("connection_id")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            println!("  Connection     none (explicit/default local vault)");
+        }
+        Ok(())
+    }
+
     pub fn render_configuration_plan(
         cfg: &LightMemConfig,
         plan: &serde_json::Value,
@@ -1205,6 +1290,26 @@ impl CliView {
             let mut val = cfg.redacted_json()?;
             if let Some(obj) = val.as_object_mut() {
                 obj.insert(
+                    "config_scope".into(),
+                    serde_json::json!("shared across vaults in this configuration root"),
+                );
+                obj.insert(
+                    "offline".into(),
+                    serde_json::json!(LightMemConfig::offline_requested()),
+                );
+                obj.insert(
+                    "effective_remote_url".into(),
+                    serde_json::json!(cfg.effective_remote_url()),
+                );
+                obj.insert(
+                    "entity_extraction_destination".into(),
+                    serde_json::json!(if cfg.entity_extraction == "llm" {
+                        Some(cfg.effective_ollama_url())
+                    } else {
+                        None
+                    }),
+                );
+                obj.insert(
                     "embedding_identity".into(),
                     serde_json::Value::String(cfg.embedding_identity().unwrap_or_default()),
                 );
@@ -1229,7 +1334,8 @@ impl CliView {
                 obj.insert(
                     "presets".into(),
                     serde_json::json!({
-                        "local": "100% offline (bge-small ONNX embeddings + minilm-squad2 QA reranker)",
+                        "demo": "Deterministic hash search + top memory answer; no downloads; entity extraction off.",
+                        "local": "Local ONNX embeddings + QA; entity extraction off. Vault routing is selected separately.",
                         "ollama-cloud": "Local ONNX embeddings + Ollama gemma4:31b-cloud reranker (via localhost:11434)",
                         "ollama-local": "Local ONNX embeddings + Ollama localhost LLM reranker (prefers bonsai-2:2b)"
                     }),
@@ -1260,6 +1366,45 @@ impl CliView {
             Self::crimson_bold("❖"),
             Self::white_bold("LightMem Configuration")
         );
+        println!("  Settings are shared across vaults in this configuration root.");
+        println!(
+            "  Entity extraction: {}",
+            if cfg.entity_extraction == "llm" {
+                format!(
+                    "LLM — sends remembered text to {}",
+                    cfg.effective_ollama_url()
+                )
+            } else {
+                "off".into()
+            }
+        );
+        println!(
+            "  Offline policy: {}",
+            if LightMemConfig::offline_requested() {
+                "enabled (LIGHTMEM_OFFLINE)"
+            } else {
+                "not enforced; use LIGHTMEM_OFFLINE=1 for cached local operation"
+            }
+        );
+        println!(
+            "  LLM API key: {}",
+            if cfg.effective_ollama_api_key().is_some() {
+                "configured (secret)"
+            } else {
+                "none"
+            }
+        );
+        if let Some(endpoint) = cfg.effective_remote_url() {
+            println!(
+                "  Remote routing: {} (explicit --db/--global selects local)",
+                endpoint
+            );
+            if std::env::var_os("LIGHTMEM_REMOTE_URL").is_some()
+                || std::env::var_os("LIGHTMEM_URL").is_some()
+            {
+                println!("  Remote URL comes from the environment; --clear-remote only clears saved values.");
+            }
+        }
         println!(
             "  {} {:<20} {}",
             Self::slate("├─"),
@@ -1341,7 +1486,7 @@ impl CliView {
         println!(
             "  {} {:<20} {} {}",
             Self::slate("├─"),
-            Self::slate("Active Vault DB"),
+            Self::slate("Local Vault DB"),
             Self::slate(&Self::format_path(&active_db)),
             Self::slate(db_mode)
         );
@@ -1362,7 +1507,7 @@ impl CliView {
             "    {}  {:<35} {}",
             Self::emerald_bold("1. local       "),
             Self::slate("lmem config --preset local"),
-            Self::slate("100% offline (bge-small ONNX + minilm-squad2 QA reranker)")
+            Self::slate("Local ONNX search + answers; download models first")
         );
         println!(
             "    {}  {:<35} {}",
@@ -1376,6 +1521,12 @@ impl CliView {
             Self::slate("lmem config --preset ollama-local"),
             Self::slate("ONNX embeddings + Ollama localhost LLM reranker (prefers bonsai-2:2b)")
         );
+        println!("    demo   lmem setup --preset demo --dry-run  (no-download demo)");
+        println!();
+        println!("  Preview:  lmem config --preset local --dry-run");
+        println!("  Test:     lmem config --test");
+        println!("  Entities: lmem config --entity-extraction off");
+        println!("  Scope:    lmem context  |  lmem status");
         Ok(())
     }
 

@@ -2,10 +2,24 @@
 
 ## Unreleased — simpler terminal commands
 
+- Add first-class `lmem local` (alias: `disconnect`) and `lmem remote` commands with interactive URL/key prompting, actionable offline hints, and updated Welcome Screen / Banner quick commands featuring `remote`, `local`, and `help`.
 - Add numbered `config --edit` prompts, shared configuration previews, hidden credential input, and explicit embedding/answer-model flag aliases.
 - Default guided local setup to ONNX search/answers with entity extraction off; offer model preparation separately and reuse CLI setup from installers.
 - Add read-only `doctor` diagnostics and live connection-name completion for Bash, Zsh, and Fish.
 - Keep script/JSON use noninteractive and preserve migration approval; shorten the welcome output to useful commands and the active vault.
+
+## 0.8.0 — pending user verification
+
+- Add terminal configuration previews (`config/setup --dry-run`), saved-embedding diagnostics (`config --test`), a no-download `demo` preset, explicit LLM key/entity controls, and readable local context. Setup reviews shared settings before saving; noninteractive setup requires explicit choices and confirmation. Guard `config --reset-db` with `--yes` and reject conflicting options before deletion.
+- Add CLI `restore` for archived records, preserving IDs and attachments while clearing old expiry; reject ambiguous recovery titles. Configuration-only changes no longer create a local vault.
+- Add `lmem ui`, an authenticated loopback workspace for memory search and sourced answers, text/file ingestion, archive/recovery, explicit vault/scope selection, named connections, configuration previews, model/reindex jobs, and bundle backup/restore review.
+- Reject malformed/incomplete clear requests and blank API keys; redact both secrets in configuration output. Bound HTTP headers/concurrency, authenticate before body allocation, enforce browser origin/loopback-host rules, and omit private vault paths from public health responses.
+- Reject unsupported remote commands/options instead of falling back locally. Preserve confidence, subsecond TTL, Unicode/reserved-character titles, temporal filters, media pagination, inspection links, and daemon scope/session. Align precision recall with the configured answer engine.
+- Default LLM entity extraction to off, expose an explicit configuration setting, and enforce offline restrictions. Reject unavailable import enrichment instead of ignoring it; include both QA models in `config --download all`.
+- Guard workspace writes against stale vault context and configuration changed by another process. Preview restore destinations and reject stale restore previews.
+- Refresh documentation, Windows/server/workspace setup, runnable first-memory examples, accessible reading/control styles, command search, release metadata, and measured-performance wording.
+- Generate release archive SHA-256 manifests, verify executable downloads, and validate Python archive extraction. Remove the unverified manylinux wheel claim, pin the Linux wheel build runner, and add PR/main validation.
+- Add regression coverage for safety boundaries, remote correctness, configuration jobs, restore/recovery, scoped attribution, stale tabs, download integrity, and documentation contracts. Live models and native release platforms require separate verification before publication.
 
 ## 0.7.9
 

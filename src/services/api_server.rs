@@ -20,6 +20,7 @@ pub struct AttachmentPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RememberRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -33,6 +34,10 @@ pub struct RememberRequest {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    #[serde(default)]
+    pub supersede: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_entities: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,8 +152,8 @@ pub struct UnlinkRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ClearPayload {
-    #[serde(default)]
     pub soft: bool,
 }
 
@@ -171,36 +176,28 @@ impl Default for ServerOptions {
     }
 }
 
-fn url_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
+fn url_decode(s: &str) -> Result<String> {
+    let mut result = Vec::with_capacity(s.len());
     let mut bytes = s.bytes();
     while let Some(b) = bytes.next() {
         if b == b'%' {
-            let h1 = bytes.next();
-            let h2 = bytes.next();
-            if let (Some(h1), Some(h2)) = (h1, h2) {
-                if let Ok(hex_str) = std::str::from_utf8(&[h1, h2]) {
-                    if let Ok(decoded_byte) = u8::from_str_radix(hex_str, 16) {
-                        result.push(decoded_byte as char);
-                        continue;
-                    }
-                }
-                result.push('%');
-                result.push(h1 as char);
-                result.push(h2 as char);
-            } else {
-                result.push('%');
-            }
+            let h1 = bytes.next().context("Incomplete percent escape")?;
+            let h2 = bytes.next().context("Incomplete percent escape")?;
+            let hex = [h1, h2];
+            result.push(
+                u8::from_str_radix(std::str::from_utf8(&hex)?, 16)
+                    .context("Invalid percent escape")?,
+            );
         } else if b == b'+' {
-            result.push(' ');
+            result.push(b' ');
         } else {
-            result.push(b as char);
+            result.push(b);
         }
     }
-    result
+    String::from_utf8(result).context("Query parameter is not valid UTF-8")
 }
 
-fn parse_query_params(query: &str) -> HashMap<String, String> {
+fn parse_query_params(query: &str) -> Result<HashMap<String, String>> {
     let mut params = HashMap::new();
     for pair in query.split('&') {
         if pair.is_empty() {
@@ -210,25 +207,68 @@ fn parse_query_params(query: &str) -> HashMap<String, String> {
             Some((k, v)) => (k, v),
             None => (pair, ""),
         };
-        params.insert(url_decode(k), url_decode(v));
+        let key = url_decode(k)?;
+        anyhow::ensure!(
+            !params.contains_key(&key),
+            "Duplicate query parameter: {}",
+            key
+        );
+        params.insert(key, url_decode(v)?);
     }
-    params
+    Ok(params)
 }
 
-struct HttpRequest {
-    method: String,
-    path: String,
-    query: HashMap<String, String>,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
+fn query_value<T: std::str::FromStr>(
+    query: &HashMap<String, String>,
+    key: &str,
+) -> Result<Option<T>> {
+    query
+        .get(key)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid '{}' filter", key))
+        })
+        .transpose()
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
+fn authorized(headers: &HashMap<String, String>, expected_key: Option<&str>) -> bool {
+    let Some(expected) = expected_key else {
+        return true;
+    };
+    headers
+        .get("authorization")
+        .map(|h| {
+            let token = h.trim();
+            let token = if token.to_ascii_lowercase().starts_with("bearer ") {
+                token[7..].trim()
+            } else {
+                token
+            };
+            token == expected
+        })
+        .or_else(|| headers.get("x-api-key").map(|k| k.trim() == expected))
+        .unwrap_or(false)
+}
+
+pub(crate) struct HttpRequest {
+    pub method: String,
+    pub path: String,
+    pub query: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+fn read_request(stream: &mut TcpStream, key: Option<&str>) -> Result<Option<HttpRequest>> {
     let mut reader = BufReader::new(stream);
     let mut req_line = String::new();
-    if reader.read_line(&mut req_line)? == 0 {
+    if reader.by_ref().take(8193).read_line(&mut req_line)? == 0 {
         return Ok(None);
     }
+    anyhow::ensure!(
+        req_line.len() <= 8192 && req_line.ends_with('\n'),
+        "Request line too large"
+    );
     let req_line = req_line.trim_end();
     if req_line.is_empty() {
         return Ok(None);
@@ -242,21 +282,35 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
         None => (full_path.as_str(), None),
     };
     let path = path_str.to_string();
-    let query = query_str.map(parse_query_params).unwrap_or_default();
+    let query = query_str
+        .map(parse_query_params)
+        .transpose()?
+        .unwrap_or_default();
 
     let mut headers = HashMap::new();
     let mut content_length: usize = 0;
+    let mut header_bytes = 0usize;
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
+        let n = reader.by_ref().take(8193).read_line(&mut line)?;
+        header_bytes += n;
+        anyhow::ensure!(
+            line.len() <= 8192 && header_bytes <= 65536,
+            "Request headers too large"
+        );
         if n == 0 || line == "\r\n" || line == "\n" {
             break;
         }
         if let Some((k, v)) = line.split_once(':') {
             let key = k.trim().to_lowercase();
             let val = v.trim().to_string();
+            anyhow::ensure!(!headers.contains_key(&key), "Duplicate request header");
+            anyhow::ensure!(
+                key != "transfer-encoding",
+                "Transfer-Encoding is not supported"
+            );
             if key == "content-length" {
-                content_length = val.parse().unwrap_or(0);
+                content_length = val.parse().context("Invalid Content-Length")?;
             }
             headers.insert(key, val);
         }
@@ -266,8 +320,10 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
         anyhow::bail!("Payload Too Large: content length exceeds 64MB");
     }
 
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
+    // Authenticate before allocating or reading potentially large request bodies.
+    let should_read = authorized(&headers, key);
+    let mut body = vec![0u8; if should_read { content_length } else { 0 }];
+    if !body.is_empty() {
         reader.read_exact(&mut body)?;
     }
 
@@ -280,7 +336,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
     }))
 }
 
-fn send_response(
+pub(crate) fn send_response(
     mut stream: TcpStream,
     status_code: u16,
     status_text: &str,
@@ -291,9 +347,10 @@ fn send_response(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n\
-         Access-Control-Allow-Headers: Authorization, Content-Type, X-API-Key\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Cache-Control: no-store\r\n\
+         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n\
+         Referrer-Policy: no-referrer\r\n\
          Connection: close\r\n\r\n",
         status_code,
         status_text,
@@ -306,7 +363,12 @@ fn send_response(
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-fn send_json<T: Serialize>(stream: TcpStream, status_code: u16, status_text: &str, data: &T) {
+pub(crate) fn send_json<T: Serialize>(
+    stream: TcpStream,
+    status_code: u16,
+    status_text: &str,
+    data: &T,
+) {
     match serde_json::to_vec(data) {
         Ok(bytes) => send_response(
             stream,
@@ -329,20 +391,20 @@ fn send_json<T: Serialize>(stream: TcpStream, status_code: u16, status_text: &st
     }
 }
 
-fn send_error(stream: TcpStream, status_code: u16, status_text: &str, message: &str) {
+pub(crate) fn send_error(stream: TcpStream, status_code: u16, status_text: &str, message: &str) {
     let err = serde_json::json!({ "error": message });
     send_json(stream, status_code, status_text, &err);
 }
 
 fn handle_connection(
     mut stream: TcpStream,
-    controller: &Arc<LightMem>,
+    state: &Arc<super::workspace::WorkspaceState>,
     effective_api_key: Option<&str>,
 ) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
 
-    let req = match read_request(&mut stream) {
+    let req = match read_request(&mut stream, effective_api_key) {
         Ok(Some(req)) => req,
         Ok(None) => return,
         Err(e) => {
@@ -350,6 +412,39 @@ fn handle_connection(
             return;
         }
     };
+
+    if let Some(origin) = req.headers.get("origin") {
+        let expected = req
+            .headers
+            .get("host")
+            .map(|host| format!("http://{}", host));
+        if expected.as_deref() != Some(origin.as_str()) {
+            send_error(
+                stream,
+                403,
+                "Forbidden",
+                "Cross-origin requests are not allowed",
+            );
+            return;
+        }
+    }
+    if let Ok(address) = stream.local_addr() {
+        if address.ip().is_loopback() {
+            let allowed = [
+                format!("127.0.0.1:{}", address.port()),
+                format!("localhost:{}", address.port()),
+                format!("[::1]:{}", address.port()),
+            ];
+            if req
+                .headers
+                .get("host")
+                .is_some_and(|host| !allowed.contains(host))
+            {
+                send_error(stream, 403, "Forbidden", "Invalid Host for loopback server");
+                return;
+            }
+        }
+    }
 
     if req.method == "OPTIONS" {
         send_response(stream, 204, "No Content", "text/plain", b"");
@@ -359,33 +454,67 @@ fn handle_connection(
     // Health check endpoint is accessible without authentication
     let is_health = req.method == "GET" && (req.path == "/v1/health" || req.path == "/health");
 
-    if let Some(expected_key) = effective_api_key {
-        let auth_header = req.headers.get("authorization").map(String::as_str);
-        let x_api_key = req.headers.get("x-api-key").map(String::as_str);
-
-        let is_authorized = if let Some(h) = auth_header {
-            let token = h.trim();
-            let token = if token.to_lowercase().starts_with("bearer ") {
-                token[7..].trim()
-            } else {
-                token
-            };
-            token == expected_key
-        } else if let Some(k) = x_api_key {
-            k.trim() == expected_key
-        } else {
-            false
-        };
-
-        if !is_authorized && !is_health {
-            send_error(
-                stream,
-                401,
-                "Unauthorized",
-                "Unauthorized: invalid or missing API key",
-            );
+    if req.method == "GET" {
+        if let Some((bytes, content_type)) = super::workspace::asset(&req.path) {
+            send_response(stream, 200, "OK", content_type, bytes);
             return;
         }
+    }
+
+    if !authorized(&req.headers, effective_api_key) && !is_health {
+        send_error(
+            stream,
+            401,
+            "Unauthorized",
+            "Unauthorized: invalid or missing API key",
+        );
+        return;
+    }
+
+    let _mutation = if req.method != "GET" {
+        match state.mutation.lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                send_error(
+                    stream,
+                    500,
+                    "Internal Server Error",
+                    "Workspace operation lock unavailable",
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if req.method != "GET" && state.busy.load(std::sync::atomic::Ordering::SeqCst) {
+        send_error(
+            stream,
+            409,
+            "Conflict",
+            "A model or restore operation is running; retry when it finishes",
+        );
+        return;
+    }
+    let controller = match state.controller() {
+        Ok(controller) => controller,
+        Err(e) => {
+            send_error(stream, 500, "Internal Server Error", &e.to_string());
+            return;
+        }
+    };
+
+    if let Some(expected) = req.headers.get("x-lightmem-vault") {
+        if url_decode(expected).ok().as_deref()
+            != Some(controller.db_path().to_string_lossy().as_ref())
+        {
+            send_error(stream, 409, "Conflict", "The selected vault changed in another tab. Refresh the workspace before continuing.");
+            return;
+        }
+    }
+    if req.path.starts_with("/v1/workspace/") {
+        super::workspace::handle(stream, &req, state);
+        return;
     }
 
     match (req.method.as_str(), req.path.as_str()) {
@@ -393,7 +522,6 @@ fn handle_connection(
             let res = serde_json::json!({
                 "status": "ok",
                 "version": env!("CARGO_PKG_VERSION"),
-                "vault": controller.db_path().display().to_string(),
             });
             send_json(stream, 200, "OK", &res);
         }
@@ -402,6 +530,37 @@ fn handle_connection(
             Ok(stats) => send_json(stream, 200, "OK", &stats),
             Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
         },
+
+        ("GET", "/v1/links") => {
+            let result = req
+                .query
+                .get("id")
+                .context("Missing memory id")
+                .and_then(|id| controller.get(id)?.context("Memory not found"))
+                .and_then(|m| controller.get_links(&m.id));
+            match result {
+                Ok(links) => send_json(stream, 200, "OK", &links),
+                Err(e) => send_error(stream, 400, "Bad Request", &e.to_string()),
+            }
+        }
+
+        ("GET", "/v1/attachment") => {
+            let result = (|| -> Result<_> {
+                let memory = req.query.get("memory").context("Missing memory id")?;
+                let id = req.query.get("id").context("Missing attachment id")?;
+                controller
+                    .get_attachments_data(memory)?
+                    .into_iter()
+                    .find(|(m, _)| &m.id == id)
+                    .context("Attachment not found")
+            })();
+            match result {
+                Ok((_, data)) => {
+                    send_response(stream, 200, "OK", "application/octet-stream", &data)
+                }
+                Err(e) => send_error(stream, 404, "Not Found", &e.to_string()),
+            }
+        }
 
         ("POST", "/v1/remember") | ("POST", "/remember") => {
             let payload: RememberRequest = match serde_json::from_slice(&req.body) {
@@ -458,7 +617,7 @@ fn handle_connection(
                 }
             };
 
-            let extract_entities = !payload.no_entities.unwrap_or(true);
+            let extract_entities = !payload.no_entities.unwrap_or(false);
 
             match controller.remember_with_attachment_inputs(
                 payload.content.as_deref(),
@@ -469,13 +628,22 @@ fn handle_connection(
                 payload.category,
                 payload.title,
                 payload.tags.unwrap_or_default(),
-                None,
+                payload.confidence,
                 duration,
-                false,
+                payload.supersede,
                 payload.source,
             ) {
-                Ok((memory, _, _)) => send_json(stream, 200, "OK", &memory),
-                Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+                Ok((memory, conflicts, warning)) => {
+                    let mut value = serde_json::to_value(memory).unwrap_or_default();
+                    value["conflicts"] = serde_json::json!(conflicts);
+                    value["superseded"] = serde_json::json!(payload.supersede);
+                    if let Some(warning) = warning {
+                        value["warning"] = serde_json::json!(warning);
+                        value["warnings"] = serde_json::json!([warning]);
+                    }
+                    send_json(stream, 200, "OK", &value);
+                }
+                Err(e) => send_error(stream, 400, "Bad Request", &e.to_string()),
             }
         }
 
@@ -493,6 +661,10 @@ fn handle_connection(
             } else {
                 payload.limit
             };
+            if payload.precision || req_limit > 1000 {
+                send_error(stream, 400, "Bad Request", "Recall returns ranked memories. Use /v1/answer for precision answers; limit must not exceed 1000.");
+                return;
+            }
             let fetch_limit = if payload.media.is_some() {
                 req_limit.max(100)
             } else {
@@ -557,45 +729,46 @@ fn handle_connection(
         }
 
         ("GET", "/v1/list") | ("GET", "/list") => {
-            let limit = req
-                .query
-                .get("limit")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(20);
-            let offset = req
-                .query
-                .get("offset")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            let page: Option<usize> = req.query.get("page").and_then(|v| v.parse().ok());
-            let offset = page
-                .map(|p| (p.saturating_sub(1)) * limit)
-                .unwrap_or(offset);
-
-            let category = req
-                .query
-                .get("category")
-                .or_else(|| req.query.get("type"))
-                .and_then(|v| v.parse().ok());
-            let status = req
-                .query
-                .get("status")
-                .and_then(|v| v.parse().ok())
-                .or(Some(MemoryStatus::Active));
-            let date = req
-                .query
-                .get("date")
-                .and_then(|v| NaiveDate::parse_from_str(v, "%Y-%m-%d").ok());
-            let as_of = req
-                .query
-                .get("as_of")
-                .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-                .map(|dt| dt.with_timezone(&Utc));
-
-            match controller.list_paginated_with_date(category, status, as_of, date, limit, offset)
-            {
-                Ok(paginated) => send_json(stream, 200, "OK", &paginated),
-                Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+            let result = (|| -> Result<_> {
+                let limit = query_value::<usize>(&req.query, "limit")?.unwrap_or(20);
+                let mut offset = query_value::<usize>(&req.query, "offset")?.unwrap_or(0);
+                anyhow::ensure!(
+                    (1..=1000).contains(&limit),
+                    "Limit must be between 1 and 1000"
+                );
+                if let Some(page) = query_value::<usize>(&req.query, "page")? {
+                    anyhow::ensure!(page > 0, "Page must be positive");
+                    offset = (page - 1)
+                        .checked_mul(limit)
+                        .context("Pagination overflow")?;
+                }
+                anyhow::ensure!(offset <= i64::MAX as usize, "Pagination offset too large");
+                let category =
+                    query_value(&req.query, "category")?.or(query_value(&req.query, "type")?);
+                let status = if req.query.get("status").is_some_and(|s| s == "all") {
+                    None
+                } else {
+                    Some(query_value(&req.query, "status")?.unwrap_or(MemoryStatus::Active))
+                };
+                let date = query_value::<NaiveDate>(&req.query, "date")?;
+                let as_of = query_value::<DateTime<Utc>>(&req.query, "as_of")?;
+                anyhow::ensure!(
+                    date.is_none() || as_of.is_none(),
+                    "Choose date or as_of, not both"
+                );
+                controller.list_filtered(
+                    category,
+                    status,
+                    as_of,
+                    date,
+                    req.query.get("media").map(String::as_str),
+                    limit,
+                    offset,
+                )
+            })();
+            match result {
+                Ok(page) => send_json(stream, 200, "OK", &page),
+                Err(e) => send_error(stream, 400, "Bad Request", &e.to_string()),
             }
         }
 
@@ -627,7 +800,13 @@ fn handle_connection(
         | ("DELETE", "/forget")
         | ("POST", "/forget") => {
             let payload: ForgetPayload = if !req.body.is_empty() {
-                serde_json::from_slice(&req.body).unwrap_or_default()
+                match serde_json::from_slice(&req.body) {
+                    Ok(payload) => payload,
+                    Err(_) => {
+                        send_error(stream, 400, "Bad Request", "Invalid forget request");
+                        return;
+                    }
+                }
             } else {
                 ForgetPayload {
                     id: req.query.get("id").cloned(),
@@ -750,10 +929,26 @@ fn handle_connection(
         }
 
         ("POST", "/v1/clear") | ("POST", "/clear") => {
-            let payload: ClearPayload = if !req.body.is_empty() {
-                serde_json::from_slice(&req.body).unwrap_or_default()
-            } else {
-                ClearPayload::default()
+            if !req
+                .body
+                .iter()
+                .find(|b| !b.is_ascii_whitespace())
+                .is_some_and(|b| *b == b'{')
+            {
+                send_error(
+                    stream,
+                    400,
+                    "Bad Request",
+                    "Clear requires an explicit JSON object",
+                );
+                return;
+            }
+            let payload: ClearPayload = match serde_json::from_slice(&req.body) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    send_error(stream, 400, "Bad Request", "Supply an explicit {\"soft\":true} to archive or {\"soft\":false} to permanently clear this vault");
+                    return;
+                }
             };
 
             match controller.clear_all(!payload.soft) {
@@ -776,6 +971,90 @@ fn handle_connection(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct NetworkEndpoint {
+    pub label: &'static str,
+    pub ip: std::net::Ipv4Addr,
+    pub if_name: String,
+}
+
+#[cfg(unix)]
+pub fn discover_host_endpoints() -> Vec<NetworkEndpoint> {
+    let mut endpoints = Vec::new();
+    let mut seen_ips = std::collections::HashSet::new();
+
+    unsafe {
+        let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut ifap) != 0 || ifap.is_null() {
+            return endpoints;
+        }
+        let mut curr = ifap;
+        while !curr.is_null() {
+            let ifa = *curr;
+            if !ifa.ifa_addr.is_null() && (*ifa.ifa_addr).sa_family as i32 == libc::AF_INET {
+                let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                let ip_u32 = u32::from_be(sin.sin_addr.s_addr);
+                let ip = std::net::Ipv4Addr::from(ip_u32);
+                let name = if !ifa.ifa_name.is_null() {
+                    std::ffi::CStr::from_ptr(ifa.ifa_name)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                };
+
+                let lower_name = name.to_lowercase();
+                if !lower_name.starts_with("docker")
+                    && !lower_name.starts_with("br-")
+                    && !lower_name.starts_with("veth")
+                {
+                    if seen_ips.insert(ip) {
+                        let octets = ip.octets();
+                        let is_tailscale = (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                            || lower_name.contains("tailscale");
+
+                        let label = if ip.is_loopback() {
+                            "Localhost"
+                        } else if is_tailscale {
+                            "Tailscale"
+                        } else if ip.is_private() {
+                            "Local LAN"
+                        } else {
+                            "Public / WAN"
+                        };
+
+                        endpoints.push(NetworkEndpoint {
+                            label,
+                            ip,
+                            if_name: name,
+                        });
+                    }
+                }
+            }
+            curr = ifa.ifa_next;
+        }
+        libc::freeifaddrs(ifap);
+    }
+
+    endpoints.sort_by_key(|e| match e.label {
+        "Localhost" => 0,
+        "Tailscale" => 1,
+        "Local LAN" => 2,
+        _ => 3,
+    });
+
+    endpoints
+}
+
+#[cfg(not(unix))]
+pub fn discover_host_endpoints() -> Vec<NetworkEndpoint> {
+    vec![NetworkEndpoint {
+        label: "Localhost",
+        ip: std::net::Ipv4Addr::new(127, 0, 0, 1),
+        if_name: "lo".to_string(),
+    }]
+}
+
 pub fn serve_api(controller: Arc<LightMem>, options: ServerOptions) -> Result<()> {
     let bind_addr = format!("{}:{}", options.host, options.port);
     let listener = TcpListener::bind(&bind_addr)
@@ -785,11 +1064,11 @@ pub fn serve_api(controller: Arc<LightMem>, options: ServerOptions) -> Result<()
         None
     } else if let Some(k) = options.api_key {
         let trimmed = k.trim().to_string();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "API key cannot be blank. Omit it to generate one, or explicitly use --no-auth."
+        );
+        Some(trimmed)
     } else {
         Some(format!("lmem_{}", uuid::Uuid::new_v4().simple()))
     };
@@ -797,31 +1076,52 @@ pub fn serve_api(controller: Arc<LightMem>, options: ServerOptions) -> Result<()
     println!();
     println!("  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mPersistent Backend Server\x1b[0m");
     println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    if options.host == "0.0.0.0" {
+        println!(
+            "  \x1b[1;38;2;16;185;129m▸ Listening:\x1b[0m         \x1b[38;2;96;165;250m0.0.0.0:{}\x1b[0m \x1b[38;2;113;113;122m(all network interfaces)\x1b[0m",
+            options.port
+        );
+        println!("  \x1b[1;38;2;16;185;129m▸ Network Endpoints:\x1b[0m");
+        let endpoints = discover_host_endpoints();
+        for ep in &endpoints {
+            println!(
+                "    \x1b[38;2;113;113;122m•\x1b[0m \x1b[1m{:<12}\x1b[0m \x1b[38;2;96;165;250mhttp://{}:{}\x1b[0m \x1b[38;2;113;113;122m({})\x1b[0m",
+                ep.label, ep.ip, options.port, ep.if_name
+            );
+        }
+    } else {
+        println!(
+            "  \x1b[1;38;2;16;185;129m▸ Listening:\x1b[0m         \x1b[38;2;96;165;250mhttp://{}:{}\x1b[0m",
+            options.host, options.port
+        );
+    }
     println!(
-        "  \x1b[1;38;2;16;185;129m▸ Listening:\x1b[0m     \x1b[38;2;96;165;250mhttp://{}:{}\x1b[0m",
-        options.host, options.port
-    );
-    println!(
-        "  \x1b[1;38;2;16;185;129m▸ Vault DB:\x1b[0m      \x1b[38;2;148;163;184m{}\x1b[0m",
+        "  \x1b[1;38;2;16;185;129m▸ Vault DB:\x1b[0m          \x1b[38;2;148;163;184m{}\x1b[0m",
         controller.db_path().display()
     );
     if let Some(ref key) = effective_key {
         println!(
-            "  \x1b[1;38;2;16;185;129m▸ API Key:\x1b[0m       \x1b[1;38;2;234;179;8m{}\x1b[0m  \x1b[38;2;113;113;122m(Keep this secret!)\x1b[0m",
+            "  \x1b[1;38;2;16;185;129m▸ API Key:\x1b[0m           \x1b[1;38;2;234;179;8m{}\x1b[0m  \x1b[38;2;113;113;122m(Keep this secret!)\x1b[0m",
             key
         );
-        let client_host = if options.host == "0.0.0.0" {
-            "127.0.0.1"
+        println!("  \x1b[1;38;2;16;185;129m▸ Client Setup (Examples):\x1b[0m");
+        if options.host == "0.0.0.0" {
+            let endpoints = discover_host_endpoints();
+            for ep in &endpoints {
+                println!(
+                    "    \x1b[38;2;113;113;122m•\x1b[0m {:<12} \x1b[38;2;248;250;252mlmem remote http://{}:{} --api-key \"{}\"\x1b[0m",
+                    ep.label, ep.ip, options.port, key
+                );
+            }
         } else {
-            &options.host
-        };
-        println!(
-            "  \x1b[1;38;2;16;185;129m▸ Client Setup:\x1b[0m  \x1b[38;2;248;250;252mlmem config --remote http://{}:{} --api-key \"{}\"\x1b[0m",
-            client_host, options.port, key
-        );
+            println!(
+                "    \x1b[38;2;113;113;122m•\x1b[0m {:<12} \x1b[38;2;248;250;252mlmem remote http://{}:{} --api-key \"{}\"\x1b[0m",
+                "Remote", options.host, options.port, key
+            );
+        }
     } else {
         println!(
-            "  \x1b[1;38;2;239;68;68m▸ Auth:\x1b[0m          \x1b[38;2;239;68;68mDisabled (--no-auth). Open to any network client.\x1b[0m"
+            "  \x1b[1;38;2;239;68;68m▸ Auth:\x1b[0m              \x1b[38;2;239;68;68mDisabled (--no-auth). Open to any network client.\x1b[0m"
         );
     }
     let probe_host = if options.host == "0.0.0.0" {
@@ -830,7 +1130,7 @@ pub fn serve_api(controller: Arc<LightMem>, options: ServerOptions) -> Result<()
         &options.host
     };
     println!(
-        "  \x1b[1;38;2;16;185;129m▸ Health Probe:\x1b[0m  \x1b[38;2;96;165;250mhttp://{}:{}/v1/health\x1b[0m",
+        "  \x1b[1;38;2;16;185;129m▸ Health Probe:\x1b[0m      \x1b[38;2;96;165;250mhttp://{}:{}/v1/health\x1b[0m",
         probe_host, options.port
     );
     println!("  \x1b[38;2;148;163;184mServing across devices. Press Ctrl+C to stop.\x1b[0m\n");
@@ -844,12 +1144,39 @@ pub fn serve_loop(
     effective_key: Option<String>,
 ) -> Result<()> {
     let key_arc = effective_key.map(Arc::new);
+    let state = Arc::new(super::workspace::WorkspaceState::new(controller));
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    struct RequestGuard(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for RequestGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let ctrl = Arc::clone(&controller);
+                if active
+                    .try_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |n| (n < 32).then_some(n + 1),
+                    )
+                    .is_err()
+                {
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                    send_error(
+                        stream,
+                        503,
+                        "Service Unavailable",
+                        "Server is busy; retry shortly",
+                    );
+                    continue;
+                }
+                let guard = RequestGuard(Arc::clone(&active));
+                let ctrl = Arc::clone(&state);
                 let key = key_arc.clone();
                 std::thread::spawn(move || {
+                    let _guard = guard;
                     handle_connection(stream, &ctrl, key.as_deref().map(|s| s.as_str()));
                 });
             }

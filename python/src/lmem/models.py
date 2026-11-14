@@ -85,6 +85,7 @@ class Memory:
     saved_attachments: List[str] = field(default_factory=list)
     entities: List[EntityRecord] = field(default_factory=list)
     context: Optional[Dict[str, Any]] = None
+    warnings: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Memory:
@@ -108,6 +109,7 @@ class Memory:
             attachments=[AttachmentMetadata.from_dict(a) for a in raw_atts],
             saved_attachments=[str(p) for p in saved_atts],
             entities=[EntityRecord.from_dict(e) for e in raw_entities],
+            warnings=[str(w) for w in (data.get("warnings") or mem_data.get("warnings") or ([data["warning"]] if data.get("warning") else []))],
         )
 
 

@@ -105,6 +105,10 @@ fn resolve_qa_preset(spec: &str) -> Option<QaModelPreset> {
 }
 
 fn download_file_atomic(url: &str, dest: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !LightMemConfig::offline_requested(),
+        "Offline mode: model asset is missing. Download models before enabling LIGHTMEM_OFFLINE."
+    );
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create directory {}", parent.display()))?;

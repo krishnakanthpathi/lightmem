@@ -12,8 +12,11 @@ def main() -> None:
         sys.stderr.write(f"Error: {e}\n")
         sys.exit(1)
 
-    result = subprocess.call([binary] + sys.argv[1:])
-    sys.exit(result)
+    try:
+        result = subprocess.call([binary] + sys.argv[1:])
+        sys.exit(result)
+    except KeyboardInterrupt:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

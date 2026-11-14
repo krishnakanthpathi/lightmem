@@ -1027,6 +1027,10 @@ impl ObserverService {
         reranker_spec: Option<&str>,
         config: &LightMemConfig,
     ) -> Result<String> {
+        anyhow::ensure!(
+            !LightMemConfig::offline_requested(),
+            "Offline mode blocks LLM attachment extraction"
+        );
         let raw_spec = reranker_spec.unwrap_or(&config.reranker);
         let model_spec = raw_spec
             .strip_prefix("ollama:")
