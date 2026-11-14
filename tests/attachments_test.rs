@@ -51,6 +51,7 @@ fn hash_config() -> LightMemConfig {
         reranker: "top1".to_string(),
         remote_url: None,
         api_key: None,
+        entity_extraction: "off".to_string(),
     }
 }
 
@@ -263,6 +264,7 @@ fn test_explicit_single_model_llm_extraction_on_attachment() {
         reranker: "ollama:gemma4:31b-cloud".to_string(),
         remote_url: None,
         api_key: None,
+        entity_extraction: "off".to_string(),
     };
     let lm = LightMem::open_at(&db_path, cfg).unwrap();
 

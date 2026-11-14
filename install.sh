@@ -234,253 +234,54 @@ if [ "$INSTALLED_BIN" -eq 0 ]; then
     printf "  \033[1;32m◈\033[0m Built and installed lmem binary... \033[1;32m100%%\033[0m\n"
 fi
 
-# 3. Interactive ONNX Embedding & QA Model Selection & Pre-warming (~/.lightmem/models)
-download_onnx_model() {
-    model_alias="$1"
-    expected_kb="$2"
-    label="Downloading ONNX model (${model_alias})"
-    base_kb=0
-    if [ -d "$HOME/.lightmem/models" ]; then
-        base_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
-        [ -z "$base_kb" ] && base_kb=0
-    fi
-    printf "  \033[1;31m▸\033[0m %s... \033[1;31m1%%\033[0m" "$label"
-    "$INSTALL_DIR/lmem" config --download "$model_alias" >/dev/null 2>&1 &
-    onnx_pid=$!
-    tick=1
-    while kill -0 "$onnx_pid" 2>/dev/null; do
-        if [ -d "$HOME/.lightmem/models" ]; then
-            cur_kb="$(du -sk "$HOME/.lightmem/models" 2>/dev/null | awk '{print $1}')"
-            if [ -n "$cur_kb" ]; then
-                delta_kb=$(( cur_kb - base_kb ))
-                if [ "$delta_kb" -lt 0 ]; then delta_kb=0; fi
-                pct=$(( delta_kb * 100 / expected_kb ))
-                if [ "$pct" -le "$tick" ] && [ "$tick" -lt 5 ]; then
-                    tick=$(( tick + 1 ))
-                    pct="$tick"
-                fi
-                if [ "$pct" -lt 1 ]; then pct=1; fi
-                if [ "$pct" -gt 99 ]; then pct=99; fi
-                printf "\r  \033[1;31m▸\033[0m %s... \033[1;31m%d%%\033[0m   " "$label" "$pct"
-            fi
-        fi
-        sleep 0.15
-    done
-    wait "$onnx_pid" || true
-    printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$label"
-}
-
-select_model_interactive() {
-    sel=1
-    printf "\n  \033[1;31m❖\033[0m \033[1;37mSelect ONNX Embedding Model(s) to Download\033[0m \033[38;2;148;163;184m(Use ↑/↓ arrows or 1-5, then Enter):\033[0m\n" >/dev/tty
-    render_menu() {
-        idx=1
-        for item in \
-            "bge-small  ─ Xenova/bge-small-en-v1.5       (384-dim · ~130 MB · Default)" \
-            "minilm     ─ Xenova/all-MiniLM-L6-v2        (384-dim ·  ~90 MB · Ultra-Fast)" \
-            "nomic      ─ nomic-ai/nomic-embed-text-v1.5 (768-dim · ~520 MB · High-Capacity)" \
-            "all        ─ Download all 3 models (switch offline anytime via lmem config)" \
-            "none       ─ Skip downloading local models (lean binary install · setup later)"
-        do
-            name="${item%% *}"
-            rest="${item#* }"
-            if [ "$idx" -eq "$sel" ]; then
-                printf "\r\033[2K    \033[1;31m▸ [%d]\033[0m \033[1;37m%s\033[0m \033[38;2;248;250;252m%s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
-            else
-                printf "\r\033[2K      \033[38;2;148;163;184m[%d] %s %s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
-            fi
-            idx=$(( idx + 1 ))
-        done
-    }
-
-    if stty -g </dev/tty >/dev/null 2>&1; then
-        old_tty="$(stty -g </dev/tty)"
-        render_menu
-        while :; do
-            stty -icanon -echo min 1 time 0 </dev/tty 2>/dev/null || break
-            key="$(dd bs=1 count=1 </dev/tty 2>/dev/null)"
-            stty "$old_tty" </dev/tty 2>/dev/null || true
-            case "$key" in
-                ""|"$(printf '\r')"|"$(printf '\n')")
-                    break
-                    ;;
-                1|2|3|4|5)
-                    sel="$key"
-                    printf "\033[5A" >/dev/tty
-                    render_menu
-                    break
-                    ;;
-                "$(printf '\033')")
-                    stty -icanon -echo min 0 time 1 </dev/tty 2>/dev/null || true
-                    seq="$(dd bs=2 count=1 </dev/tty 2>/dev/null)"
-                    stty "$old_tty" </dev/tty 2>/dev/null || true
-                    case "$seq" in
-                        "[A"|"OA")
-                            sel=$(( sel - 1 ))
-                            [ "$sel" -lt 1 ] && sel=5
-                            ;;
-                        "[B"|"OB")
-                            sel=$(( sel + 1 ))
-                            [ "$sel" -gt 5 ] && sel=1
-                            ;;
-                    esac
-                    printf "\033[5A" >/dev/tty
-                    render_menu
-                    ;;
-            esac
-        done
-        stty "$old_tty" </dev/tty 2>/dev/null || true
-        printf "\n" >/dev/tty
-        MODEL_CHOICE="$sel"
-    else
-        render_menu
-        printf "  \033[1;31m▸\033[0m Enter choice \033[38;2;148;163;184m[1-5, default=1]\033[0m: " >/dev/tty
-        read -r MODEL_CHOICE </dev/tty || MODEL_CHOICE="1"
-        printf "\n" >/dev/tty
-    fi
-}
-
+# 3. Use the same short setup prompts as the CLI. Explicit environment
+# choices remain available to automated installers; otherwise do not change config.
 MODEL_CHOICE="${LIGHTMEM_MODEL:-}"
-if [ "$SKIP_MODELS" != "1" ] && [ -z "$MODEL_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    select_model_interactive || MODEL_CHOICE="1"
-fi
-
-if [ "$SKIP_MODELS" = "1" ] || [ "$MODEL_CHOICE" = "5" ] || [ "$MODEL_CHOICE" = "none" ] || [ "$MODEL_CHOICE" = "skip" ]; then
-    printf "  \033[38;2;113;113;122m↷ Skipped downloading local models (run 'lmem config --download <model>' anytime to cache)\033[0m\n"
-else
-    case "$MODEL_CHOICE" in
-        2|minilm)
-            download_onnx_model "minilm" 90000
-            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model minilm --yes >/dev/null 2>&1 || true
-            ;;
-        3|nomic)
-            download_onnx_model "nomic" 520000
-            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model nomic --yes >/dev/null 2>&1 || true
-            ;;
-        4|all)
-            download_onnx_model "bge-small" 130000
-            download_onnx_model "minilm" 90000
-            download_onnx_model "nomic" 520000
-            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
-            ;;
-        *)
-            download_onnx_model "bge-small" 130000
-            "$INSTALL_DIR/lmem" config --backend onnx --onnx-model bge-small --yes >/dev/null 2>&1 || true
-            ;;
-    esac
-
-    # 4. Pre-warm ONNX Extractive QA Model (minilm-squad2)
-    download_onnx_model "minilm-squad2" 128000
-fi
-
-# 5. Interactive LLM Engine Setup (Default for Ingestion & QA)
-select_llm_interactive() {
-    sel=1
-    printf "\n  \033[1;31m❖\033[0m \033[1;37mConfigure LLM Engine for Memory Ingestion & QA\033[0m \033[38;2;148;163;184m(Use ↑/↓ arrows or 1-4, then Enter):\033[0m\n" >/dev/tty
-    render_llm_menu() {
-        idx=1
-        for item in \
-            "ollama-local ─ Local Ollama (http://localhost:11434 · Auto-detects models · Recommended)" \
-            "ollama-cloud ─ Ollama Cloud (https://ollama.com · gemma4:31b-cloud)" \
-            "custom       ─ Custom OpenAI-compatible / Remote LLM endpoint (URL + Model)" \
-            "offline      ─ 100% Offline (Local ONNX QA + deterministic NLP · No LLM)"
-        do
-            name="${item%% *}"
-            rest="${item#* }"
-            if [ "$idx" -eq "$sel" ]; then
-                printf "\r\033[2K    \033[1;31m▸ [%d]\033[0m \033[1;37m%s\033[0m \033[38;2;248;250;252m%s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
-            else
-                printf "\r\033[2K      \033[38;2;148;163;184m[%d] %s %s\033[0m\n" "$idx" "$name" "$rest" >/dev/tty
-            fi
-            idx=$(( idx + 1 ))
-        done
-    }
-
-    if stty -g </dev/tty >/dev/null 2>&1; then
-        old_tty="$(stty -g </dev/tty)"
-        render_llm_menu
-        while :; do
-            stty -icanon -echo min 1 time 0 </dev/tty 2>/dev/null || break
-            key="$(dd bs=1 count=1 </dev/tty 2>/dev/null)"
-            stty "$old_tty" </dev/tty 2>/dev/null || true
-            case "$key" in
-                ""|"$(printf '\r')"|"$(printf '\n')")
-                    break
-                    ;;
-                1|2|3|4)
-                    sel="$key"
-                    printf "\033[4A" >/dev/tty
-                    render_llm_menu
-                    break
-                    ;;
-                "$(printf '\033')")
-                    stty -icanon -echo min 0 time 1 </dev/tty 2>/dev/null || true
-                    seq="$(dd bs=2 count=1 </dev/tty 2>/dev/null)"
-                    stty "$old_tty" </dev/tty 2>/dev/null || true
-                    case "$seq" in
-                        "[A"|"OA")
-                            sel=$(( sel - 1 ))
-                            [ "$sel" -lt 1 ] && sel=4
-                            ;;
-                        "[B"|"OB")
-                            sel=$(( sel + 1 ))
-                            [ "$sel" -gt 4 ] && sel=1
-                            ;;
-                    esac
-                    printf "\033[4A" >/dev/tty
-                    render_llm_menu
-                    ;;
-            esac
-        done
-        stty "$old_tty" </dev/tty 2>/dev/null || true
-        printf "\n" >/dev/tty
-        LLM_CHOICE="$sel"
-    else
-        render_llm_menu
-        printf "  \033[1;31m▸\033[0m Enter choice \033[38;2;148;163;184m[1-4, default=1]\033[0m: " >/dev/tty
-        read -r LLM_CHOICE </dev/tty || LLM_CHOICE="1"
-        printf "\n" >/dev/tty
-    fi
-}
-
 LLM_CHOICE="${LIGHTMEM_LLM:-}"
-if [ -z "$LLM_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    select_llm_interactive || LLM_CHOICE="1"
+if [ -n "$LLM_CHOICE" ]; then
+    case "$LLM_CHOICE" in
+        1|ollama|ollama-local) setup_preset="ollama-local" ;;
+        2|cloud|ollama-cloud) setup_preset="ollama-cloud" ;;
+        4|offline|local) setup_preset="local" ;;
+        demo|hash) setup_preset="demo" ;;
+        3|custom)
+            printf "Custom model setup: run lmem setup and choose LLM answers.\n"
+            setup_preset=""
+            ;;
+        *) printf "Unknown LIGHTMEM_LLM choice; run lmem setup.\n" >&2; exit 1 ;;
+    esac
+    if [ -n "$setup_preset" ]; then
+        "$INSTALL_DIR/lmem" setup --preset "$setup_preset" --entity-extraction off --yes
+    fi
+elif [ "$SKIP_MODELS" != "1" ] && [ -z "$MODEL_CHOICE" ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    if "$INSTALL_DIR/lmem" setup </dev/tty >/dev/tty 2>/dev/tty; then
+        :
+    else
+        printf "Setup was not completed. Run lmem setup when ready.\n"
+    fi
+else
+    printf "Configure when ready: lmem setup (default: local search and answers).\n"
 fi
-[ -z "$LLM_CHOICE" ] && LLM_CHOICE="1"
 
-case "$LLM_CHOICE" in
-    2|cloud|ollama-cloud)
-        printf "  \033[1;31m▸\033[0m Enter Ollama Cloud model \033[38;2;148;163;184m[default=gemma4:31b-cloud]\033[0m: " >/dev/tty
-        read -r CLOUD_MODEL </dev/tty || CLOUD_MODEL=""
-        [ -z "$CLOUD_MODEL" ] && CLOUD_MODEL="gemma4:31b-cloud"
-        "$INSTALL_DIR/lmem" config --preset ollama-cloud --reranker "ollama:$CLOUD_MODEL" --yes >/dev/null 2>&1 || true
-        printf "  \033[1;32m◈\033[0m Configured Ollama Cloud (%s)... \033[1;32m100%%\033[0m\n" "$CLOUD_MODEL"
-        ;;
-    3|custom)
-        printf "  \033[1;31m▸\033[0m Enter LLM endpoint URL \033[38;2;148;163;184m[default=http://localhost:11434]\033[0m: " >/dev/tty
-        read -r CUSTOM_URL </dev/tty || CUSTOM_URL=""
-        [ -z "$CUSTOM_URL" ] && CUSTOM_URL="http://localhost:11434"
-        printf "  \033[1;31m▸\033[0m Enter Model name \033[38;2;148;163;184m[e.g. qwen2.5:3b, llama3.2:3b]\033[0m: " >/dev/tty
-        read -r CUSTOM_MODEL </dev/tty || CUSTOM_MODEL=""
-        [ -z "$CUSTOM_MODEL" ] && CUSTOM_MODEL="qwen2.5:3b"
-        "$INSTALL_DIR/lmem" config --url "$CUSTOM_URL" --reranker "ollama:$CUSTOM_MODEL" --yes >/dev/null 2>&1 || true
-        printf "  \033[1;32m◈\033[0m Configured custom endpoint (%s · %s)... \033[1;32m100%%\033[0m\n" "$CUSTOM_URL" "$CUSTOM_MODEL"
-        ;;
-    4|offline|local)
-        "$INSTALL_DIR/lmem" config --preset local --yes >/dev/null 2>&1 || true
-        printf "  \033[1;32m◈\033[0m Configured 100%% offline local ONNX mode... \033[1;32m100%%\033[0m\n"
-        ;;
-    *)
-        # 1. Local Ollama (Default & Recommended)
-        "$INSTALL_DIR/lmem" config --preset ollama-local --yes >/dev/null 2>&1 || true
-        if curl -s -m 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
-            printf "  \033[1;32m◈\033[0m Configured Local Ollama (active & connected at http://localhost:11434)... \033[1;32m100%%\033[0m\n"
-        else
-            printf "  \033[1;33m▸\033[0m Configured Local Ollama (http://localhost:11434 · start with 'ollama serve')... \033[1;32m100%%\033[0m\n"
-        fi
-        ;;
-esac
+# Download only models explicitly requested by an installer environment option.
+if [ "$SKIP_MODELS" = "1" ]; then
+    printf "Local model downloads skipped. Prepare later: lmem config --download all\n"
+elif [ -n "$MODEL_CHOICE" ]; then
+    case "$MODEL_CHOICE" in
+        1|bge-small) embedding_choice="bge-small" ;;
+        2|minilm) embedding_choice="minilm" ;;
+        3|nomic) embedding_choice="nomic" ;;
+        4|all) embedding_choice="bge-small" ;;
+        *) printf "Unknown LIGHTMEM_MODEL choice.\n" >&2; exit 1 ;;
+    esac
+    "$INSTALL_DIR/lmem" config --backend onnx --onnx-model "$embedding_choice" --yes
+    if [ "$MODEL_CHOICE" = "4" ] || [ "$MODEL_CHOICE" = "all" ]; then
+        "$INSTALL_DIR/lmem" config --download all
+    else
+        "$INSTALL_DIR/lmem" config --download "$embedding_choice"
+        "$INSTALL_DIR/lmem" config --download minilm-squad2
+    fi
+fi
 
 # 6. Install Shell Completions with Interactive Tab + Arrow-Key Menu Navigation
 COMP_DIR="$HOME/.lightmem/completions"

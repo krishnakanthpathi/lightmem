@@ -141,7 +141,7 @@ fn test_config_cli_presets_and_json_output() {
 
     let binary = env!("CARGO_BIN_EXE_lmem");
 
-    // 1. Initial config view displays presets
+    // 1. Initial configuration explains the selected shared configuration root
     let output_init = std::process::Command::new(binary)
         .env("LIGHTMEM_CONFIG_DIR", &config_dir)
         .args(["config"])
@@ -149,10 +149,8 @@ fn test_config_cli_presets_and_json_output() {
         .unwrap();
     assert!(output_init.status.success());
     let stdout_init = String::from_utf8_lossy(&output_init.stdout);
-    assert!(stdout_init.contains("Available Setup Presets"));
-    assert!(stdout_init.contains("1. local"));
-    assert!(stdout_init.contains("2. ollama-cloud"));
-    assert!(stdout_init.contains("3. ollama-local"));
+    assert!(stdout_init.contains(config_dir.to_str().unwrap()));
+    assert!(stdout_init.contains("minilm-squad2"));
 
     // 2. Apply --preset ollama-cloud
     let output_cloud = std::process::Command::new(binary)

@@ -71,6 +71,7 @@ fn test_remember_with_entities_warning_when_llm_offline() {
     };
     // Force invalid Ollama URL to simulate unreachable offline LLM
     config.ollama_url = "http://127.0.0.1:65534".to_string();
+    config.entity_extraction = "llm".to_string();
     let lm = LightMem::open_at(&db_path, config).unwrap();
 
     // With extract_entities = true (default), when LLM is offline, it should save and emit a warning

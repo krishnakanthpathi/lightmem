@@ -17,6 +17,7 @@ fn test_hash_config() -> LightMemConfig {
         reranker: "top1".to_string(),
         remote_url: None,
         api_key: None,
+        entity_extraction: "off".to_string(),
     }
 }
 

@@ -42,5 +42,6 @@ ndarray = { version = "0.17.2", default-features = false }
 zip = { version = "9.1", default-features = false, features = ["deflate-flate2"] }
 tempfile = "3.10"
 libc = "0.2"
+rpassword = "7"
 
 [dev-dependencies]

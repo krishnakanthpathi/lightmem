@@ -22,6 +22,9 @@ pub struct LightMemConfig {
     pub embedding_model: String,
     #[serde(default = "default_reranker")]
     pub reranker: String,
+    /// Explicit opt-in for sending remembered text to the configured LLM.
+    #[serde(default = "default_entity_extraction")]
+    pub entity_extraction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +33,10 @@ pub struct LightMemConfig {
 
 fn default_reranker() -> String {
     "minilm-squad2".to_string()
+}
+
+fn default_entity_extraction() -> String {
+    "off".to_string()
 }
 
 impl Default for LightMemConfig {
@@ -41,6 +48,7 @@ impl Default for LightMemConfig {
             ollama_api_key: None,
             embedding_model: "nomic-embed-text".to_string(),
             reranker: default_reranker(),
+            entity_extraction: default_entity_extraction(),
             remote_url: None,
             api_key: None,
         }
@@ -48,6 +56,9 @@ impl Default for LightMemConfig {
 }
 
 impl LightMemConfig {
+    pub fn offline_requested() -> bool {
+        std::env::var_os("LIGHTMEM_OFFLINE").is_some()
+    }
     /// Normalize any reranker string ('onnx', 'minilm-squad2', 'tinyroberta-squad2', 'ollama', 'ollama:<model>', 'top1')
     pub fn normalize_reranker(raw: &str, legacy_qa: Option<&str>) -> String {
         let trimmed = raw.trim();
@@ -103,13 +114,21 @@ impl LightMemConfig {
     /// Apply a standard setup preset: 'local', 'ollama-cloud', or 'ollama-local'
     pub fn apply_preset(&mut self, preset: &str) -> Result<()> {
         match preset.to_lowercase().as_str() {
+            "demo" | "hash" => {
+                self.backend = "hash".to_string();
+                self.reranker = "top1".to_string();
+                self.entity_extraction = "off".to_string();
+                Ok(())
+            }
             "local" | "offline" | "onnx" => {
+                self.entity_extraction = "off".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
                 self.reranker = "minilm-squad2".to_string();
                 Ok(())
             }
             "ollama-cloud" | "cloud" => {
+                self.entity_extraction = "llm".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
                 self.reranker = "ollama:gemma4:31b-cloud".to_string();
@@ -117,6 +136,7 @@ impl LightMemConfig {
                 Ok(())
             }
             "ollama-local" | "ollama" => {
+                self.entity_extraction = "llm".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
                 self.reranker = "ollama".to_string();
@@ -124,7 +144,7 @@ impl LightMemConfig {
                 Ok(())
             }
             other => anyhow::bail!(
-                "Unknown preset '{}'. Choose 'local' (full local ONNX), 'ollama-cloud' (Ollama gemma4:31b-cloud), or 'ollama-local' (Ollama localhost).",
+                "Unknown preset '{}'. Choose 'demo' (no downloads), 'local' (local ONNX), 'ollama-cloud' (Ollama gemma4:31b-cloud), or 'ollama-local' (Ollama localhost).",
                 other
             ),
         }
@@ -301,7 +321,7 @@ impl LightMemConfig {
                 self.embedding_model,
                 self.effective_ollama_url()
             ),
-            "hash" => "deterministic-trigram-hash (384-dim offline)".to_string(),
+            "hash" => "deterministic hash (384-dim keyword/demo mode)".to_string(),
             other => other.to_string(),
         }
     }
@@ -316,7 +336,7 @@ impl LightMemConfig {
             "tinyroberta-squad2" => "tinyroberta-squad2 (local ONNX Extractive QA)".to_string(),
             "minilm-squad2" => "minilm-squad2 (local ONNX Extractive QA)".to_string(),
             "ollama" => format!("ollama:auto (prefers bonsai-2:2b @ {})", eff_url),
-            "top1" => "top1 (0ms vector rank-1)".to_string(),
+            "top1" => "top1 (best retrieved memory; no answer model)".to_string(),
             other => format!("{} (local ONNX Extractive QA)", other),
         }
     }
@@ -355,7 +375,24 @@ impl LightMemConfig {
         let mut cfg: Self = serde_json::from_value(raw_val.clone())
             .with_context(|| format!("Invalid configuration at {}", path.display()))?;
         cfg.reranker = Self::normalize_reranker(&cfg.reranker, legacy_qa);
+        anyhow::ensure!(
+            matches!(cfg.entity_extraction.as_str(), "off" | "llm"),
+            "entity_extraction must be off or llm"
+        );
         Ok(cfg)
+    }
+
+    pub fn redacted_json(&self) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self)?;
+        for field in ["api_key", "ollama_api_key"] {
+            if value.get(field).is_some() {
+                value[field] = serde_json::json!("[REDACTED]");
+            }
+        }
+        value["api_key_configured"] = serde_json::json!(self.effective_api_key().is_some());
+        value["ollama_api_key_configured"] =
+            serde_json::json!(self.effective_ollama_api_key().is_some());
+        Ok(value)
     }
 
     pub fn save(&self) -> Result<()> {

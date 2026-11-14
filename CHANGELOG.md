@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — simpler terminal commands
+
+- Add numbered `config --edit` prompts, shared configuration previews, hidden credential input, and explicit embedding/answer-model flag aliases.
+- Default guided local setup to ONNX search/answers with entity extraction off; offer model preparation separately and reuse CLI setup from installers.
+- Add read-only `doctor` diagnostics and live connection-name completion for Bash, Zsh, and Fish.
+- Keep script/JSON use noninteractive and preserve migration approval; shorten the welcome output to useful commands and the active vault.
+
 ## 0.7.9
 
 - **Persistent Backend Server**: Added `lmem serve` multi-threaded HTTP REST API server with Bearer token authentication, CORS support, LAN binding (`--host 0.0.0.0 --port <PORT>`), and seamless remote CLI routing (`lmem config --remote <URL> --api-key <KEY>`).

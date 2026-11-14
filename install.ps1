@@ -72,67 +72,50 @@ if ($UserPath -notlike "*$InstallDir*") {
     Write-Host "  ✓ Added $InstallDir to your User PATH" -ForegroundColor Green
 }
 
+# Use the same defaults and short prompts as lmem setup.
 $SkipModelsFlag = $SkipModels -or ($env:LIGHTMEM_SKIP_MODELS -eq "1") -or ($env:LIGHTMEM_NO_MODELS -eq "1") -or ($env:LIGHTMEM_MODEL -in @("none", "skip", "5"))
-
-if (-not $SkipModelsFlag) {
-    Write-Host "  ◈ Pre-caching default ONNX embedding (bge-small) and Extractive QA (minilm-squad2) models..." -ForegroundColor Cyan
-    $PrevErrPref = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    & $ExePath config --download bge-small
-    if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
-    & $ExePath config --download minilm-squad2
-    if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
-    $ErrorActionPreference = $PrevErrPref
+$LlmChoice = $env:LIGHTMEM_LLM
+if (-not [string]::IsNullOrWhiteSpace($LlmChoice)) {
+    $SetupPreset = switch ($LlmChoice) {
+        { $_ -in @("1", "ollama", "ollama-local") } { "ollama-local" }
+        { $_ -in @("2", "cloud", "ollama-cloud") } { "ollama-cloud" }
+        { $_ -in @("4", "offline", "local") } { "local" }
+        { $_ -in @("demo", "hash") } { "demo" }
+        { $_ -in @("3", "custom") } { "" }
+        default { throw "Unknown LIGHTMEM_LLM choice. Run lmem setup." }
+    }
+    if ($SetupPreset) {
+        & $ExePath setup --preset $SetupPreset --entity-extraction off --yes
+        if ($LASTEXITCODE -ne 0) { throw "LightMem setup failed (exit $LASTEXITCODE)" }
+    } else {
+        Write-Host "Custom model setup: run lmem setup and choose LLM answers."
+    }
+} elseif (-not $SkipModelsFlag -and -not $env:LIGHTMEM_MODEL -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+    & $ExePath setup
+    if ($LASTEXITCODE -ne 0) { Write-Host "Setup was not completed. Run lmem setup when ready." }
 } else {
-    Write-Host "  ↷ Skipped downloading local models (run 'lmem config --download <model>' anytime)" -ForegroundColor DarkGray
+    Write-Host "Configure when ready: lmem setup (default: local search and answers)."
 }
 
-# Interactive LLM Setup
-$LlmChoice = if ($env:LIGHTMEM_LLM) { $env:LIGHTMEM_LLM } else { "" }
-if ([string]::IsNullOrWhiteSpace($LlmChoice) -and [Environment]::UserInteractive) {
-    Write-Host ""
-    Write-Host "  ❖ Select LLM Engine for Memory Ingestion & QA:" -ForegroundColor Red
-    Write-Host "    [1] Local Ollama (http://localhost:11434 · Auto-detects models · Recommended)"
-    Write-Host "    [2] Ollama Cloud (https://ollama.com · gemma4:31b-cloud)"
-    Write-Host "    [3] Custom Remote LLM (URL + Model)"
-    Write-Host "    [4] Offline Local ONNX (100% offline, no LLM required)"
-    Write-Host ""
-    $PromptChoice = Read-Host "  ▸ Enter choice [1-4, default=1]"
-    $LlmChoice = if ([string]::IsNullOrWhiteSpace($PromptChoice)) { "1" } else { $PromptChoice.Trim() }
-}
-if ([string]::IsNullOrWhiteSpace($LlmChoice)) { $LlmChoice = "1" }
-
-switch -Wildcard ($LlmChoice) {
-    "2" {
-        $CloudModel = Read-Host "  ▸ Enter Ollama Cloud model [default: gemma4:31b-cloud]"
-        if ([string]::IsNullOrWhiteSpace($CloudModel)) { $CloudModel = "gemma4:31b-cloud" }
-        & $ExePath config --preset ollama-cloud --reranker "ollama:$CloudModel" --yes
-        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
-        Write-Host "  ✓ Configured Ollama Cloud ($CloudModel)" -ForegroundColor Green
+if ($SkipModelsFlag) {
+    Write-Host "Local model downloads skipped. Prepare later: lmem config --download all"
+} elseif ($env:LIGHTMEM_MODEL) {
+    $EmbeddingChoice = switch ($env:LIGHTMEM_MODEL) {
+        { $_ -in @("1", "bge-small", "4", "all") } { "bge-small" }
+        { $_ -in @("2", "minilm") } { "minilm" }
+        { $_ -in @("3", "nomic") } { "nomic" }
+        default { throw "Unknown LIGHTMEM_MODEL choice." }
     }
-    "3" {
-        $CustomUrl = Read-Host "  ▸ Enter LLM endpoint URL [default: http://localhost:11434]"
-        if ([string]::IsNullOrWhiteSpace($CustomUrl)) { $CustomUrl = "http://localhost:11434" }
-        $CustomModel = Read-Host "  ▸ Enter LLM model name [default: qwen2.5:3b]"
-        if ([string]::IsNullOrWhiteSpace($CustomModel)) { $CustomModel = "qwen2.5:3b" }
-        & $ExePath config --url $CustomUrl --reranker "ollama:$CustomModel" --yes
-        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
-        Write-Host "  ✓ Configured custom LLM ($CustomUrl · $CustomModel)" -ForegroundColor Green
-    }
-    "4" {
-        & $ExePath config --preset local --yes
-        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
-        Write-Host "  ✓ Configured 100% offline local ONNX mode" -ForegroundColor Green
-    }
-    Default {
-        & $ExePath config --preset ollama-local --yes
-        if ($LASTEXITCODE -ne 0) { throw "Native installation command failed (exit $LASTEXITCODE)" }
-        try {
-            $testResp = Invoke-WebRequest -Uri "http://localhost:11434/api/tags" -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop
-            Write-Host "  ✓ Configured Local Ollama (connected at http://localhost:11434)" -ForegroundColor Green
-        } catch {
-            Write-Host "  ! Configured Local Ollama (http://localhost:11434 · start with 'ollama serve')" -ForegroundColor Yellow
-        }
+    & $ExePath config --backend onnx --onnx-model $EmbeddingChoice --yes
+    if ($LASTEXITCODE -ne 0) { throw "Model configuration failed (exit $LASTEXITCODE)" }
+    if ($env:LIGHTMEM_MODEL -in @("4", "all")) {
+        & $ExePath config --download all
+        if ($LASTEXITCODE -ne 0) { throw "Model download failed (exit $LASTEXITCODE)" }
+    } else {
+        & $ExePath config --download $EmbeddingChoice
+        if ($LASTEXITCODE -ne 0) { throw "Embedding download failed (exit $LASTEXITCODE)" }
+        & $ExePath config --download minilm-squad2
+        if ($LASTEXITCODE -ne 0) { throw "Answer-model download failed (exit $LASTEXITCODE)" }
     }
 }
 

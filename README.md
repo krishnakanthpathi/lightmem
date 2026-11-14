@@ -530,6 +530,44 @@ lmem docs                                             # Serve offline docs at ht
 
 ---
 
+## Everyday terminal setup
+
+LightMem uses ordinary commands and short prompts. New local setups use BGE small
+search, MiniLM answers, and entity extraction off.
+
+```sh
+lmem setup                         # Enter accepts local defaults; preview before saving
+lmem config --edit                 # Change one group through numbered prompts
+lmem doctor                        # Read-only checks; no downloads or network requests
+lmem config --preset demo --yes     # Try hash retrieval without model downloads
+lmem config --preset local --dry-run # Preview shared settings and selected-vault migration
+lmem config --answer-model top1     # Clear answer-model spelling; --reranker still works
+```
+
+`--embedding-model` aliases `config --model` for Ollama search models;
+`--answer-model` aliases `config --reranker` and `setup --model`. Existing flag
+meanings are preserved. Settings are shared under the configuration root; a model
+change can require approval to reindex the selected vault. Other vaults may need
+reindexing separately. Entity extraction is an explicit `--entity-extraction llm`
+opt-in; remembered text then goes to the configured model service.
+
+Enable Tab completion for the current shell:
+
+```sh
+source <(lmem completions bash)     # Bash
+source <(lmem completions zsh)      # Zsh, after compinit
+lmem completions fish | source     # Fish
+```
+
+Bash, Zsh, and Fish complete registered connection IDs using a read-only lookup.
+Completion and `doctor` do not create a configuration directory or vault. Doctor
+separates untested providers from index readiness; run `lmem config --test` for an
+explicit embedding check (which can prepare/download models). `--edit` requires a
+terminal. Scripts use explicit flags, `--dry-run`, `--yes` where needed, and
+`--json`; they never enter the new prompts.
+
+See [terminal command guide](docs/terminal-commands.md) for setup and override details.
+
 ## ⇄ Switching Rerankers & Embedding Models
 
 LightMem supports three swappable reranker backends for `lmem answer`, `lmem recall --precision`, and `lmem conflicts`:

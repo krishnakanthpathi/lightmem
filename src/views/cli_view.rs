@@ -228,60 +228,20 @@ impl CliView {
 
     /// Render the full interactive intro screen when `lmem` is invoked with no subcommand.
     pub fn render_intro(db_path: &Path, stats: &StorageStats) {
-        println!("{}", Self::banner_string(Some(db_path), Some(stats)));
-        println!();
+        let cfg = LightMemConfig::load();
         println!(
-            "  {} {}",
-            Self::crimson_bold("╭─"),
-            Self::white_bold("QUICK COMMANDS")
+            "LightMem v{} · {} active memories",
+            env!("CARGO_PKG_VERSION"),
+            stats.active_memories
         );
-        let cmds = [
-            (
-                "│",
-                "lmem remember \"<fact>\" -t decision",
-                "Store a categorized memory (auto-links [[...]])",
-            ),
-            (
-                "│",
-                "lmem recall \"<query>\" --limit 5",
-                "Hybrid BM25 + vector search",
-            ),
-            (
-                "│",
-                "lmem answer \"<question>\"",
-                "Extractive QA via ONNX or Ollama",
-            ),
-            ("│", "lmem graph", "Terminal network tree & connection map"),
-            (
-                "│",
-                "lmem related \"<id>\" --hops 2",
-                "Multi-hop knowledge graph traversal",
-            ),
-            (
-                "│",
-                "lmem list --page 1 --limit 20",
-                "Paginated chronological index",
-            ),
-            (
-                "│",
-                "lmem connect <agent>",
-                "Deploy skill to Antigravity, Codex, Hermes, etc.",
-            ),
-            (
-                "╰─",
-                "lmem stats  |  lmem --help",
-                "Inspect vault telemetry & flags",
-            ),
-        ];
-        for (branch, cmd, desc) in cmds {
-            println!(
-                "  {:<2} {:<36} {}",
-                Self::crimson_bold(branch),
-                cmd.truecolor(248, 250, 252),
-                Self::slate(desc)
-            );
-        }
-        println!();
+        println!("Vault: {}", db_path.display());
+        println!("Search: {}", cfg.active_embedding_summary());
+        println!(
+            "Answers: {} · Entity extraction: {}",
+            cfg.active_reranker_summary(),
+            cfg.entity_extraction
+        );
+        println!("\nSave:  lmem remember \"a fact\"\nFind:  lmem recall \"a question\"\nSetup: lmem setup\nCheck: lmem doctor\nHelp:  lmem --help");
     }
 
     pub fn format_path(p: &Path) -> String {
@@ -1152,6 +1112,85 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_configuration_plan(
+        cfg: &LightMemConfig,
+        plan: &serde_json::Value,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(plan)?);
+            return Ok(());
+        }
+        println!(
+            "{}",
+            Self::white_bold("Configuration preview — no changes applied")
+        );
+        for (label, text) in [
+            (
+                "Config file",
+                plan["config_file"].as_str().unwrap_or_default().to_string(),
+            ),
+            (
+                "Setting scope",
+                "shared across vaults in this configuration root".into(),
+            ),
+            (
+                "Selected vault",
+                plan["selected_db"].as_str().unwrap_or_default().to_string(),
+            ),
+            ("Search", cfg.active_embedding_summary()),
+            ("Answers", cfg.active_reranker_summary()),
+            (
+                "Entity extraction",
+                if cfg.entity_extraction == "llm" {
+                    format!(
+                        "LLM — sends remembered text to {}",
+                        cfg.effective_ollama_url()
+                    )
+                } else {
+                    "off".into()
+                },
+            ),
+            (
+                "Saved remote",
+                cfg.remote_url.clone().unwrap_or_else(|| "none".into()),
+            ),
+        ] {
+            println!("  {:<20} {}", label, text);
+        }
+        let changes = plan["changed_fields"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        println!(
+            "  {:<20} {}",
+            "Changed fields",
+            if changes.is_empty() { "none" } else { &changes }
+        );
+        println!(
+            "  {:<20} {}",
+            "Selected-vault index",
+            if plan["migration_required"] == true {
+                "reindex required; embedding changes need approval"
+            } else {
+                "no migration required"
+            }
+        );
+        println!("  Other vaults are not reindexed. Check them before using changed embeddings.");
+        if plan["migration_required"] == true && plan["embedding_change"] == false {
+            println!("  This vault already needs migration. Run reindex --yes for this vault.");
+        }
+        println!("  No settings saved, models downloaded, or memories written.");
+        println!("  Apply the same command without --dry-run; add --yes to approve migration.");
+        Ok(())
+    }
+
     pub fn render_config(
         cfg: &LightMemConfig,
         updated: bool,
@@ -1163,7 +1202,7 @@ impl CliView {
             let active_db = effective_db
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
-            let mut val = serde_json::to_value(cfg)?;
+            let mut val = cfg.redacted_json()?;
             if let Some(obj) = val.as_object_mut() {
                 obj.insert(
                     "embedding_identity".into(),

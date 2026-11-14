@@ -179,6 +179,18 @@ impl LightMem {
         &self.config
     }
 
+    /// Embed disposable diagnostic text without saving a memory.
+    pub fn test_embedding_provider(&self) -> Result<usize> {
+        let vector = self
+            .embedder()?
+            .embed("LightMem backend connectivity test")?;
+        anyhow::ensure!(
+            !vector.is_empty() && vector.iter().all(|v| v.is_finite()),
+            "Embedding provider returned an invalid vector"
+        );
+        Ok(vector.len())
+    }
+
     /// Store a new memory into the database
     pub fn remember(
         &self,
@@ -568,7 +580,7 @@ impl LightMem {
 
         // Automatic entity extraction via LLM if enabled
         let mut entity_warning = None;
-        if extract_entities {
+        if extract_entities && self.config.entity_extraction == "llm" {
             match ObserverService::extract_entities_via_llm(
                 &final_content,
                 reranker_override,

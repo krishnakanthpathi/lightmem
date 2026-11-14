@@ -1,3 +1,5 @@
+mod terminal;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
@@ -390,10 +392,22 @@ enum Commands {
         json: bool,
     },
 
-    /// View or update backend configuration
-    Config {
-        /// Set backend engine: 'onnx', 'ollama', or 'hash'
+    /// Inspect local configuration and index readiness without downloads or writes
+    Doctor {
         #[arg(long)]
+        json: bool,
+    },
+
+    #[command(hide = true, name = "__connections")]
+    CompletionConnections,
+
+    /// View shared settings, preview changes, or test the saved embedding backend
+    Config {
+        /// Change a setting using short terminal prompts; no full-screen interface
+        #[arg(long, conflicts_with_all = ["json", "yes", "preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "test", "remote", "api_key", "clear_remote", "dry_run"])]
+        edit: bool,
+        /// Set backend engine: 'onnx', 'ollama', or 'hash'
+        #[arg(long, value_parser = ["onnx", "ollama", "hash"])]
         backend: Option<String>,
 
         /// ONNX embedding model name ('bge-small', 'minilm', 'nomic') or path to directory with custom model.onnx
@@ -408,20 +422,36 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
 
-        /// Apply a standard setup preset: 'local' (offline ONNX embeddings + ONNX QA reranker), 'ollama-cloud' (ONNX embeddings + Ollama gemma4:31b-cloud), or 'ollama-local' (ONNX embeddings + Ollama localhost LLM)
+        /// Setup preset: demo (no downloads), local (ONNX), ollama-cloud, or ollama-local
         #[arg(long, visible_alias = "profile")]
         preset: Option<String>,
 
-        /// Ollama embedding model name (e.g. nomic-embed-text)
-        #[arg(long)]
+        /// Ollama embedding model name (explicit alias: --embedding-model)
+        #[arg(long, visible_alias = "embedding-model")]
         model: Option<String>,
 
-        /// Reranker model/engine ('minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama', 'ollama:<model>', or 'top1')
-        #[arg(long)]
+        /// Answer engine (alias: --answer-model); reranker model/engine ('minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama', 'ollama:<model>', or 'top1')
+        #[arg(long, visible_alias = "answer-model")]
         reranker: Option<String>,
 
-        /// Delete / reset the active memory database
+        /// Entity extraction: off (default) or llm (sends remembered text to the configured endpoint)
+        #[arg(long, value_parser = ["off", "llm"])]
+        entity_extraction: Option<String>,
+
+        /// Save an LLM endpoint key; use 'none' to remove it (environment keys still apply)
         #[arg(long)]
+        ollama_api_key: Option<String>,
+
+        /// Preview proposed settings and migration requirements without writes or downloads
+        #[arg(long, conflicts_with_all = ["download", "reset_db", "test"])]
+        dry_run: bool,
+
+        /// Test saved embeddings with disposable text; no memory is saved (may download ONNX assets)
+        #[arg(long, conflicts_with_all = ["preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "remote", "api_key", "clear_remote"])]
+        test: bool,
+
+        /// Permanently delete the selected local vault; requires --yes
+        #[arg(long, requires = "yes", conflicts_with_all = ["preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "remote", "api_key", "clear_remote"])]
         reset_db: bool,
 
         /// Approve migration of the selected database when the embedding model changes
@@ -445,9 +475,9 @@ enum Commands {
         json: bool,
     },
 
-    /// Interactive wizard to configure LLM and embedding engines
+    /// Guided terminal setup with a configuration preview before saving
     Setup {
-        /// Setup preset directly without interactive prompt ('local', 'ollama-local', 'ollama-cloud')
+        /// Setup preset: demo (no downloads), local (ONNX), ollama-local, or ollama-cloud
         #[arg(long)]
         preset: Option<String>,
 
@@ -455,9 +485,17 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
 
-        /// LLM model name or reranker spec
-        #[arg(long)]
+        /// Answer engine spec (e.g. ollama:qwen2.5:3b, minilm-squad2, or top1)
+        #[arg(long, visible_alias = "answer-model")]
         model: Option<String>,
+
+        /// Override entity extraction independently of the preset
+        #[arg(long, value_parser = ["off", "llm"])]
+        entity_extraction: Option<String>,
+
+        /// Preview setup without saving, downloading, or reindexing
+        #[arg(long)]
+        dry_run: bool,
 
         /// Approve prompts without confirmation
         #[arg(short = 'y', long)]
@@ -1250,6 +1288,110 @@ fn remove_db_files(db_path: &Path) {
     }
 }
 
+fn parse_reranker_setting(raw: &str) -> Result<String> {
+    let lower = raw.trim().to_lowercase();
+    if let Some(model) = lower.strip_prefix("onnx:") {
+        anyhow::ensure!(
+            matches!(
+                model,
+                "minilm-squad2" | "tinyroberta-squad2" | "minilm" | "tinyroberta"
+            ),
+            "Unknown ONNX answer model: {}",
+            model
+        );
+    }
+    anyhow::ensure!(
+        matches!(lower.as_str(), "onnx" | "qa" | "precision" | "ollama" | "openai" | "llm" | "top1" | "minilm-squad2" | "tinyroberta-squad2")
+        || lower.starts_with("onnx:") || lower.contains(':'),
+        "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or ollama:<model>.", raw
+    );
+    let normalized = LightMemConfig::normalize_reranker(raw, None);
+    anyhow::ensure!(
+        !normalized.ends_with(':'),
+        "Answer engine needs a model after ':'"
+    );
+    Ok(normalized)
+}
+
+/// Read the selected vault without creating it or applying schema migrations.
+fn configuration_plan(
+    previous: &LightMemConfig,
+    proposed: &LightMemConfig,
+    db_path: &Path,
+) -> Result<serde_json::Value> {
+    use rusqlite::OptionalExtension;
+    let identity = proposed.embedding_identity()?;
+    let mut count = 0_i64;
+    let mut stored: Option<String> = None;
+    if db_path.exists() {
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .with_context(|| format!("Cannot inspect selected vault {}", db_path.display()))?;
+        count = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+        let has_state: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_state')",
+            [], |row| row.get(0),
+        )?;
+        if has_state {
+            stored = conn
+                .query_row(
+                    "SELECT identity FROM embedding_state WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+        }
+    }
+    let before = serde_json::to_value(previous)?;
+    let after = serde_json::to_value(proposed)?;
+    let keys: std::collections::BTreeSet<_> = before
+        .as_object()
+        .context("Invalid configuration")?
+        .keys()
+        .chain(after.as_object().context("Invalid configuration")?.keys())
+        .collect();
+    let changes: Vec<_> = keys
+        .into_iter()
+        .filter(|key| before.get(*key) != after.get(*key))
+        .cloned()
+        .collect();
+    Ok(serde_json::json!({
+        "dry_run": true,
+        "config_scope": "shared across vaults in this configuration root",
+        "config_file": LightMemConfig::config_file(),
+        "selected_db": db_path,
+        "vault_exists": db_path.exists(),
+        "total_memories": count,
+        "changed_fields": changes,
+        "stored_embedding_identity": stored,
+        "requested_embedding_identity": identity,
+        "migration_required": count > 0 && stored.as_deref() != Some(identity.as_str()),
+        "embedding_change": previous.embedding_identity()? != identity,
+        "other_vaults": "Not reindexed by this command; check each before using changed embeddings",
+        "configuration": proposed.redacted_json()?,
+    }))
+}
+
+fn apply_configuration(
+    previous: &LightMemConfig,
+    proposed: &LightMemConfig,
+    db_path: &Path,
+    yes: bool,
+    json: bool,
+) -> Result<bool> {
+    let identity = proposed.embedding_identity()?;
+    if previous.embedding_identity()? != identity && db_path.exists() {
+        let lm = LightMem::open_at(db_path, proposed.clone())?;
+        if !migrate_embeddings(&lm, yes, json, false)? {
+            return Ok(false);
+        }
+    }
+    proposed.save()?;
+    Ok(true)
+}
+
 fn migrate_embeddings(lm: &LightMem, yes: bool, machine_output: bool, force: bool) -> Result<bool> {
     if !force && !lm.embedding_migration_needed()? {
         return Ok(true);
@@ -1333,6 +1475,26 @@ fn main() -> Result<()> {
     if cli.version {
         return CliView::render_version(cli.json);
     }
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        return print_completions(*shell);
+    }
+    if matches!(cli.command, Some(Commands::CompletionConnections)) {
+        for id in terminal::connection_ids()? {
+            println!("{id}");
+        }
+        return Ok(());
+    }
+    if let Some(Commands::Doctor { json }) = &cli.command {
+        return terminal::doctor(
+            &cli.db,
+            cli.global,
+            cli.connection.as_deref(),
+            cli.scope.clone(),
+            cli.session.as_deref(),
+            cli.remote.as_deref(),
+            *json || cli.json,
+        );
+    }
     let env_db = std::env::var("LIGHTMEM_DB")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -1383,10 +1545,14 @@ fn main() -> Result<()> {
         .or_else(|| connection.map(|c| c.db_path.as_path()));
     let global = cli.global;
 
-    let cfg = LightMemConfig::try_load().unwrap_or_default();
+    let cfg = if matches!(cli.command, Some(Commands::Version { .. })) {
+        LightMemConfig::default()
+    } else {
+        LightMemConfig::try_load()?
+    };
     let effective_remote_url = if cli.remote.is_some() {
         cli.remote
-    } else if cli.db.is_some() || env_db.is_some() {
+    } else if cli.db.is_some() || env_db.is_some() || cli.global {
         None
     } else {
         cfg.effective_remote_url()
@@ -1423,7 +1589,10 @@ fn main() -> Result<()> {
     };
 
     match command {
-        Commands::Identity { .. } | Commands::Status { .. } => unreachable!(),
+        Commands::Identity { .. }
+        | Commands::Status { .. }
+        | Commands::Doctor { .. }
+        | Commands::CompletionConnections => unreachable!(),
         Commands::Context { .. } => {
             let value = match connection {
                 Some(connection) => serde_json::to_value(connection)?,
@@ -2082,6 +2251,7 @@ fn main() -> Result<()> {
         }
 
         Commands::Config {
+            edit,
             preset,
             backend,
             onnx_model,
@@ -2089,6 +2259,10 @@ fn main() -> Result<()> {
             url,
             model,
             reranker,
+            entity_extraction,
+            ollama_api_key,
+            dry_run,
+            test,
             reset_db,
             yes,
             remote,
@@ -2096,23 +2270,58 @@ fn main() -> Result<()> {
             clear_remote,
             json,
         } => {
+            let path = effective_db
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+            if edit {
+                anyhow::ensure!(
+                    !cli.json,
+                    "Use config flags with --json; --edit requires a terminal."
+                );
+                let Some(proposed) = terminal::edit_configuration(&cfg)? else {
+                    return Ok(());
+                };
+                terminal::validate(&proposed)?;
+                let plan = configuration_plan(&cfg, &proposed, &path)?;
+                CliView::render_configuration_plan(&proposed, &plan, false)?;
+                if terminal::confirm(
+                    "Save these shared settings and approve selected-vault migration?",
+                    false,
+                )? {
+                    // Abort if another process edited the settings while the prompt was open.
+                    terminal::ensure_unchanged(&cfg)?;
+                    if apply_configuration(&cfg, &proposed, &path, true, false)? {
+                        terminal::render_config(&proposed, effective_db, global)?;
+                    }
+                } else {
+                    eprintln!("Cancelled. No settings changed.");
+                }
+                return Ok(());
+            }
+            if test {
+                // Provider diagnostics must not open or change the selected vault.
+                let scratch = tempfile::tempdir()?;
+                let lm = LightMem::open_at(&scratch.path().join("diagnostic.db"), cfg.clone())?;
+                let dimensions = lm.test_embedding_provider()
+                    .context("Embedding test failed. Check 'lmem config', model assets, endpoint, and credentials")?;
+                let result = serde_json::json!({"status":"ok", "backend":cfg.backend,
+                    "dimensions":dimensions, "memory_saved":false,
+                    "tests":"local saved embedding configuration; answer quality and remote vault health are separate"});
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("Embedding test passed: {} dimensions ({}). No memory saved.\nAnswer quality is not tested; use 'lmem answer' with a known fact.", dimensions, cfg.backend);
+                }
+                return Ok(());
+            }
             if reset_db {
                 let lm = open_controller(effective_db, global, connection)?;
                 let db_path = lm.db_path().to_path_buf();
                 let removed = lm.clear_all(true)?;
                 drop(lm);
                 remove_db_files(&db_path);
-                CliView::render_clear(removed, true, &db_path, false)?;
-                if preset.is_none()
-                    && backend.is_none()
-                    && onnx_model.is_none()
-                    && download.is_none()
-                    && url.is_none()
-                    && model.is_none()
-                    && reranker.is_none()
-                {
-                    return Ok(());
-                }
+                CliView::render_clear(removed, true, &db_path, json)?;
+                return Ok(());
             }
 
             if let Some(ref dl) = download {
@@ -2124,6 +2333,7 @@ fn main() -> Result<()> {
                         let _ = lightmem::OnnxQaReranker::ensure_model_downloaded(Some(
                             "minilm-squad2",
                         ))?;
+                        let _ = lightmem::OnnxQaReranker::ensure_model_downloaded(Some("tinyroberta-squad2"))?;
                     }
                     "qa" | "minilm-squad2" | "deepset/minilm-uncased-squad2" => {
                         let _ = lightmem::OnnxQaReranker::ensure_model_downloaded(Some(
@@ -2152,11 +2362,24 @@ fn main() -> Result<()> {
             }
 
             let mut cfg = LightMemConfig::try_load()?;
-            let previous_identity = cfg.embedding_identity().ok();
+            let previous = cfg.clone();
             let mut changed = false;
 
             if let Some(ref p) = preset {
                 cfg.apply_preset(p)?;
+                changed = true;
+            }
+            if let Some(mode) = entity_extraction {
+                cfg.entity_extraction = mode;
+                changed = true;
+            }
+            if let Some(key) = ollama_api_key {
+                let key = key.trim();
+                cfg.ollama_api_key = if key.is_empty() || key.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(key.into())
+                };
                 changed = true;
             }
 
@@ -2202,34 +2425,8 @@ fn main() -> Result<()> {
                 changed = true;
             }
             if let Some(r) = reranker {
-                let trimmed = r.trim();
-                let lower = trimmed.to_lowercase();
-                if lower.starts_with("ollama:")
-                    || lower.starts_with("openai:")
-                    || lower.starts_with("llm:")
-                    || lower.starts_with("onnx:")
-                    || matches!(
-                        lower.as_str(),
-                        "onnx"
-                            | "qa"
-                            | "precision"
-                            | "ollama"
-                            | "openai"
-                            | "llm"
-                            | "top1"
-                            | "minilm-squad2"
-                            | "tinyroberta-squad2"
-                    )
-                    || lower.contains(':')
-                {
-                    cfg.reranker = LightMemConfig::normalize_reranker(trimmed, None);
-                    changed = true;
-                } else {
-                    anyhow::bail!(
-                        "Invalid reranker '{}'. Choose 'minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama' ('ollama:<model>'), 'openai' ('openai:<model>'), or 'top1'.",
-                        r
-                    );
-                }
+                cfg.reranker = parse_reranker_setting(&r)?;
+                changed = true;
             }
 
             if let Some(r) = remote {
@@ -2256,136 +2453,85 @@ fn main() -> Result<()> {
                 changed = true;
             }
 
-            if changed {
-                let path = effective_db
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
-                let lm = LightMem::open_at(&path, cfg.clone())?;
-                if previous_identity.as_deref() != Some(lm.requested_embedding_identity())
-                    && !migrate_embeddings(&lm, yes, false, false)?
-                {
-                    return Ok(());
-                }
-                cfg.save()?;
+            terminal::validate(&cfg)?;
+            if dry_run {
+                let plan = configuration_plan(&previous, &cfg, &path)?;
+                return CliView::render_configuration_plan(&cfg, &plan, json);
             }
-            CliView::render_config(&cfg, changed, json, effective_db, global)?;
+            if changed && !apply_configuration(&previous, &cfg, &path, yes, json)? {
+                return Ok(());
+            }
+            if json {
+                CliView::render_config(&cfg, changed, true, effective_db, global)?;
+            } else {
+                terminal::render_config(&cfg, effective_db, global)?;
+            }
         }
 
         Commands::Setup {
             preset,
             url,
             model,
+            entity_extraction,
+            dry_run,
             yes,
             json,
         } => {
-            let mut cfg = LightMemConfig::try_load()?;
-            let previous_identity = cfg.embedding_identity().ok();
-            let changed = true;
-
-            if let Some(ref p) = preset {
-                cfg.apply_preset(p)?;
-            } else if io::stdin().is_terminal() && !yes {
-                println!(
-                    "\n  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mSetup Wizard\x1b[0m"
-                );
-                println!(
-                    "  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m"
-                );
-                println!(
-                    "  \x1b[1;38;2;220;38;38m▸\x1b[0m \x1b[38;2;228;228;231mConfigure LLM Engine for Memory Ingestion & QA\x1b[0m\n"
-                );
-
-                println!(
-                    "    \x1b[1;31m[1]\x1b[0m \x1b[1;37mLocal Ollama\x1b[0m   ─ http://localhost:11434 (Auto-detects models · Recommended)"
-                );
-                println!(
-                    "    \x1b[38;2;148;163;184m[2]\x1b[0m Ollama Cloud  ─ https://ollama.com (Cloud LLM e.g. gemma4:31b-cloud)"
-                );
-                println!(
-                    "    \x1b[38;2;148;163;184m[3]\x1b[0m Custom Remote ─ OpenAI-compatible / Remote Ollama (URL + Model)"
-                );
-                println!(
-                    "    \x1b[38;2;148;163;184m[4]\x1b[0m Offline Local ─ 100% offline (Local ONNX QA + deterministic NLP · No LLM)\n"
-                );
-
-                print!("  \x1b[1;31m▸\x1b[0m Enter choice [1-4, default=1]: ");
-                io::stdout().flush()?;
-                let mut choice = String::new();
-                io::stdin().read_line(&mut choice)?;
-                let trimmed = choice.trim();
-
-                match trimmed {
-                    "2" | "cloud" | "ollama-cloud" => {
-                        print!("  \x1b[1;31m▸\x1b[0m Enter Ollama Cloud model [default: gemma4:31b-cloud]: ");
-                        io::stdout().flush()?;
-                        let mut m = String::new();
-                        io::stdin().read_line(&mut m)?;
-                        let m_trim = m.trim();
-                        let cloud_m = if m_trim.is_empty() {
-                            "gemma4:31b-cloud"
-                        } else {
-                            m_trim
-                        };
-                        cfg.apply_preset("ollama-cloud")?;
-                        cfg.reranker = format!("ollama:{}", cloud_m);
-                    }
-                    "3" | "custom" => {
-                        print!("  \x1b[1;31m▸\x1b[0m Enter LLM endpoint URL [default: http://localhost:11434]: ");
-                        io::stdout().flush()?;
-                        let mut u = String::new();
-                        io::stdin().read_line(&mut u)?;
-                        let u_trim = u.trim();
-                        let target_url = if u_trim.is_empty() {
-                            "http://localhost:11434"
-                        } else {
-                            u_trim
-                        };
-                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(target_url);
-
-                        print!("  \x1b[1;31m▸\x1b[0m Enter LLM model name [e.g. qwen2.5:3b]: ");
-                        io::stdout().flush()?;
-                        let mut m = String::new();
-                        io::stdin().read_line(&mut m)?;
-                        let m_trim = m.trim();
-                        let model_name = if m_trim.is_empty() {
-                            "qwen2.5:3b"
-                        } else {
-                            m_trim
-                        };
-                        cfg.reranker = format!("ollama:{}", model_name);
-                    }
-                    "4" | "local" | "offline" => {
-                        cfg.apply_preset("local")?;
-                    }
-                    _ => {
-                        cfg.apply_preset("ollama-local")?;
-                    }
-                }
-            } else {
-                // Non-interactive fallback: apply ollama-local preset
-                cfg.apply_preset("ollama-local")?;
+            let previous = LightMemConfig::try_load()?;
+            let mut cfg = previous.clone();
+            let interactive = io::stdin().is_terminal() && io::stderr().is_terminal() && !json;
+            let explicit =
+                preset.is_some() || url.is_some() || model.is_some() || entity_extraction.is_some();
+            if let Some(preset) = preset {
+                cfg.apply_preset(&preset)?;
+            } else if !explicit {
+                anyhow::ensure!(interactive && !yes,
+                    "Choose settings explicitly: lmem setup --preset local --dry-run (or --preset demo for no downloads). Add --yes to save.");
+                cfg = terminal::setup_configuration(&previous)?;
             }
-
-            if let Some(ref u) = url {
-                cfg.ollama_url = LightMemConfig::normalize_ollama_url(u);
+            if let Some(url) = url {
+                cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
             }
-            if let Some(ref m) = model {
-                cfg.reranker = LightMemConfig::normalize_reranker(m, None);
+            if let Some(model) = model {
+                cfg.reranker = parse_reranker_setting(&model)?;
             }
-
-            if changed {
-                let path = effective_db
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
-                let lm = LightMem::open_at(&path, cfg.clone())?;
-                if previous_identity.as_deref() != Some(lm.requested_embedding_identity())
-                    && !migrate_embeddings(&lm, yes, json, false)?
-                {
+            if let Some(mode) = entity_extraction {
+                cfg.entity_extraction = mode;
+            }
+            let path = effective_db
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+            terminal::validate(&cfg)?;
+            let plan = configuration_plan(&previous, &cfg, &path)?;
+            if dry_run {
+                return CliView::render_configuration_plan(&cfg, &plan, json);
+            }
+            if !yes {
+                anyhow::ensure!(interactive,
+                    "Setup needs confirmation. Preview with --dry-run, then repeat with --yes to save. No settings changed.");
+                CliView::render_configuration_plan(&cfg, &plan, false)?;
+                eprint!("Save these shared settings and approve selected-vault migration if embeddings change? [y/N] ");
+                io::stderr().flush()?;
+                let mut response = String::new();
+                io::stdin().read_line(&mut response)?;
+                if !matches!(response.trim().to_lowercase().as_str(), "y" | "yes") {
+                    eprintln!("Setup cancelled. Configuration and embeddings were not changed.");
                     return Ok(());
                 }
-                cfg.save()?;
             }
-            CliView::render_config(&cfg, changed, json, effective_db, global)?;
+            terminal::ensure_unchanged(&previous)?;
+            if !apply_configuration(&previous, &cfg, &path, true, json)? {
+                return Ok(());
+            }
+            if json {
+                CliView::render_config(&cfg, true, true, effective_db, global)?;
+            } else {
+                terminal::render_config(&cfg, effective_db, global)?;
+                if interactive {
+                    terminal::offer_downloads(&cfg)?;
+                }
+                terminal::completion_hint();
+            }
         }
 
         Commands::Reindex { yes, json } => {
@@ -2734,91 +2880,7 @@ fn main() -> Result<()> {
             server.run_stdio()?;
         }
 
-        Commands::Completions { shell } => {
-            use clap::builder::PossibleValuesParser;
-            use clap::CommandFactory;
-            let mut cmd = Cli::command();
-            cmd = cmd.mut_subcommand("remember", |sub| {
-                sub.mut_arg("ttl", |a| {
-                    a.value_parser(PossibleValuesParser::new(["1h", "24h", "7d", "30d"]))
-                })
-                .mut_arg("provenance", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "explicit_statement",
-                        "validated",
-                        "observed",
-                        "corrected",
-                        "inferred",
-                        "imported",
-                        "attachment_metadata",
-                        "attachment_llm_extracted",
-                    ]))
-                })
-            });
-            cmd = cmd.mut_subcommand("config", |sub| {
-                sub.mut_arg("preset", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "local",
-                        "ollama-cloud",
-                        "ollama-local",
-                    ]))
-                })
-                .mut_arg("backend", |a| {
-                    a.value_parser(PossibleValuesParser::new(["onnx", "ollama", "hash"]))
-                })
-                .mut_arg("onnx_model", |a| {
-                    a.value_parser(PossibleValuesParser::new(["bge-small", "minilm", "nomic"]))
-                })
-                .mut_arg("download", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "bge-small",
-                        "minilm",
-                        "nomic",
-                        "minilm-squad2",
-                        "tinyroberta-squad2",
-                        "all",
-                    ]))
-                })
-                .mut_arg("reranker", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "minilm-squad2",
-                        "tinyroberta-squad2",
-                        "onnx",
-                        "ollama",
-                        "ollama:bonsai-2:2b",
-                        "ollama:gemma4:31b-cloud",
-                        "ollama:qwen2.5:3b",
-                        "ollama:qwen2.5:1.5b",
-                        "ollama:llama3.2:1b",
-                        "top1",
-                    ]))
-                })
-            });
-            cmd = cmd.mut_subcommand("answer", |sub| {
-                sub.mut_arg("reranker", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "onnx",
-                        "ollama",
-                        "ollama:bonsai-2:2b",
-                        "top1",
-                        "minilm-squad2",
-                        "tinyroberta-squad2",
-                    ]))
-                })
-            });
-            cmd = cmd.mut_subcommand("conflicts", |sub| {
-                sub.mut_arg("reranker", |a| {
-                    a.value_parser(PossibleValuesParser::new([
-                        "onnx",
-                        "ollama",
-                        "top1",
-                        "minilm-squad2",
-                        "tinyroberta-squad2",
-                    ]))
-                })
-            });
-            clap_complete::generate(shell, &mut cmd, "lmem", &mut io::stdout());
-        }
+        Commands::Completions { shell } => print_completions(shell)?,
 
         Commands::Version { json } => {
             CliView::render_version(json)?;
@@ -3406,5 +3468,120 @@ fn clean_rc_file(path: &Path, pattern: &str) -> Result<()> {
         "  \x1b[1;32m◈\x1b[0m Cleaned completion hooks from {}",
         path.display()
     );
+    Ok(())
+}
+
+fn print_completions(shell: clap_complete::Shell) -> Result<()> {
+    use clap::builder::PossibleValuesParser;
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    cmd = cmd.mut_arg("scope", |a| {
+        a.value_parser(PossibleValuesParser::new(["user", "project", "agent"]))
+    });
+
+    cmd = cmd.mut_subcommand("remember", |sub| {
+        sub.mut_arg("ttl", |a| {
+            a.value_parser(PossibleValuesParser::new(["1h", "24h", "7d", "30d"]))
+        })
+        .mut_arg("provenance", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "explicit_statement",
+                "validated",
+                "observed",
+                "corrected",
+                "inferred",
+                "imported",
+                "attachment_metadata",
+                "attachment_llm_extracted",
+            ]))
+        })
+    });
+    cmd = cmd.mut_subcommand("config", |sub| {
+        sub.mut_arg("preset", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "demo",
+                "local",
+                "ollama-cloud",
+                "ollama-local",
+            ]))
+        })
+        .mut_arg("backend", |a| {
+            a.value_parser(PossibleValuesParser::new(["onnx", "ollama", "hash"]))
+        })
+        .mut_arg("onnx_model", |a| {
+            a.value_parser(PossibleValuesParser::new(["bge-small", "minilm", "nomic"]))
+        })
+        .mut_arg("download", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "bge-small",
+                "minilm",
+                "nomic",
+                "minilm-squad2",
+                "tinyroberta-squad2",
+                "qa",
+                "all",
+            ]))
+        })
+        .mut_arg("reranker", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "minilm-squad2",
+                "tinyroberta-squad2",
+                "onnx",
+                "ollama",
+                "ollama:bonsai-2:2b",
+                "ollama:gemma4:31b-cloud",
+                "ollama:qwen2.5:3b",
+                "ollama:qwen2.5:1.5b",
+                "ollama:llama3.2:1b",
+                "top1",
+            ]))
+        })
+    });
+    cmd = cmd.mut_subcommand("setup", |sub| {
+        sub.mut_arg("preset", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "demo",
+                "local",
+                "ollama-local",
+                "ollama-cloud",
+            ]))
+        })
+        .mut_arg("model", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "minilm-squad2",
+                "tinyroberta-squad2",
+                "ollama",
+                "ollama:qwen2.5:3b",
+                "top1",
+            ]))
+        })
+    });
+    cmd = cmd.mut_subcommand("answer", |sub| {
+        sub.mut_arg("reranker", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "onnx",
+                "ollama",
+                "ollama:bonsai-2:2b",
+                "top1",
+                "minilm-squad2",
+                "tinyroberta-squad2",
+            ]))
+        })
+    });
+    cmd = cmd.mut_subcommand("conflicts", |sub| {
+        sub.mut_arg("reranker", |a| {
+            a.value_parser(PossibleValuesParser::new([
+                "onnx",
+                "ollama",
+                "top1",
+                "minilm-squad2",
+                "tinyroberta-squad2",
+            ]))
+        })
+    });
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut cmd, "lmem", &mut script);
+    let script = String::from_utf8(script)?;
+    print!("{}", terminal::complete_connections(shell, script));
     Ok(())
 }

@@ -204,9 +204,7 @@ fn func_embedding_identity_and_summaries() {
         cfg.embedding_identity().unwrap(),
         "card-v1:hash:fnv-bigram-v1"
     );
-    assert!(cfg
-        .active_embedding_summary()
-        .contains("deterministic-trigram-hash"));
+    assert!(cfg.active_embedding_summary().contains("keyword/demo"));
 
     cfg.backend = "ollama".to_string();
     cfg.ollama_url = "http://localhost:11434/api".to_string();
