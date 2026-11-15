@@ -727,14 +727,6 @@ enum Commands {
         no_browser: bool,
     },
 
-    /// Open the authenticated local memory and configuration workspace
-    Ui {
-        #[arg(long)]
-        port: Option<u16>,
-        #[arg(long)]
-        no_browser: bool,
-    },
-
     /// Switch to local mode (clears saved remote URL and API key)
     #[command(visible_alias = "disconnect")]
     Local {
@@ -1048,7 +1040,7 @@ fn handle_remote_command(
             open,
             json: cmd_json,
         } => {
-            anyhow::ensure!(image.is_none() && save_to.is_none() && !path && !open, "Remote recall does not support --image, --save-to, --path, or --open. Use the workspace to download attachments.");
+            anyhow::ensure!(image.is_none() && save_to.is_none() && !path && !open, "Remote recall does not support --image, --save-to, --path, or --open. Use local mode to download attachments.");
             if *precision {
                 anyhow::ensure!(media.is_none() && !multi_hop && min_similarity.is_none(), "Precision recall returns an answer; media, multi-hop, and similarity filters are not supported. Use recall without --precision for filtered results.");
                 let answer = client.answer(&lightmem::AnswerRequest { question: query.clone(), category: *category, as_of: *as_of, date: *date, limit: *limit, ..Default::default() })?;
@@ -1112,7 +1104,7 @@ fn handle_remote_command(
             path,
             json: cmd_json,
         } => {
-            anyhow::ensure!(save_to.is_none() && !path, "Remote list does not support --save-to or --path. Use the workspace to download attachments.");
+            anyhow::ensure!(save_to.is_none() && !path, "Remote list does not support --save-to or --path. Use local mode to download attachments.");
             let paginated = client.list(
                 *limit,
                 *offset,
@@ -1138,7 +1130,7 @@ fn handle_remote_command(
             open,
             json: cmd_json,
         } => {
-            anyhow::ensure!(save_to.is_none() && !path && !open, "Remote inspect does not support --save-to, --path, or --open. Use the workspace to download attachments.");
+            anyhow::ensure!(save_to.is_none() && !path && !open, "Remote inspect does not support --save-to, --path, or --open. Use local mode to download attachments.");
             let as_json = *cmd_json || json;
             let mut inspected = Vec::new();
             for term in terms {
@@ -1300,7 +1292,7 @@ fn handle_remote_command(
 
         Commands::Config { .. } | Commands::Setup { .. } | Commands::Docs { .. }
         | Commands::Bundle { action: BundleCommand::Info { .. }, .. }
-        | Commands::Serve { .. } | Commands::Ui { .. } | Commands::Version { .. } | Commands::Completions { .. }
+        | Commands::Serve { .. } | Commands::Version { .. } | Commands::Completions { .. }
         | Commands::Connect { mcp: false, .. } | Commands::Uninstall { .. }
         | Commands::Local { .. } | Commands::Remote { .. } => Ok(false),
         cmd => {
@@ -1902,7 +1894,6 @@ fn main() -> Result<()> {
                 Commands::Config { .. }
                     | Commands::Setup { .. }
                     | Commands::Docs { .. }
-                    | Commands::Ui { .. }
                     | Commands::Serve { .. }
                     | Commands::Version { .. }
                     | Commands::Completions { .. }
@@ -3423,11 +3414,6 @@ fn main() -> Result<()> {
                 cli.db.as_deref(),
                 cli.connection.as_deref(),
             )?;
-        }
-
-        Commands::Ui { port, no_browser } => {
-            let controller = open_controller(effective_db, global, connection)?;
-            lightmem::services::workspace::serve_workspace(Arc::new(controller), port, no_browser)?;
         }
 
         Commands::Uninstall {

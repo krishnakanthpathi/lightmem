@@ -268,7 +268,7 @@ fn live_connection_completion_is_readonly_and_filters_invalid_values() {
 #[test]
 fn no_memory_editor_or_tui_is_added() {
     let f = Fixture::new();
-    for command in ["edit", "tui"] {
+    for command in ["edit", "tui", "ui"] {
         assert!(!f.run(&[command]).status.success());
     }
 }

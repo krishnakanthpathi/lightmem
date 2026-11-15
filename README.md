@@ -92,20 +92,6 @@ cargo install --path . --root ~/.local --force
 
 ---
 
-## Local management workspace (0.8.0)
-
-```bash
-lmem ui                              # Open the authenticated loopback workspace
-lmem --db ./demo.db ui                # Explicit local vault
-lmem --connection codex --scope project ui --no-browser
-```
-
-Use the private startup URL to open the workspace. It binds only to `127.0.0.1`; its temporary token grants access to this server. The token is removed from the address bar after loading and retained in this tab’s session. Ctrl+C stops the server.
-
-The workspace provides a visible vault/scope context, memory search and sourced answers, attachment downloads, add/archive/restore, named connections, model preparation, configuration preview and reindex approval, and bundle export/restore preview. Settings are shared under the configuration root; indexes are per vault. Remote CLI routing does not change this workspace’s local target. See the [review guide](docs/review-0.8.0.md) for a disposable demo.
-
----
-
 ## 🐍 Python SDK Quickstart
 
 Install the official Python package with precompiled native wheels:

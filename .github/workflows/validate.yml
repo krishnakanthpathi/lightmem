@@ -33,7 +33,6 @@ jobs:
           node-version: "22"
       - name: Validate browser scripts and documentation contracts
         run: |
-          node --check static/workspace.js
           node --check static/docs.js
           node --check static/site.js
           python -m unittest discover -s tests -p 'test_*.py' -v

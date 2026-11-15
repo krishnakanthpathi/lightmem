@@ -27,11 +27,11 @@ class Page(HTMLParser):
 
 class DocumentationContracts(unittest.TestCase):
     def test_static_entry_points_and_internal_links_exist(self):
-        for name in ["index.html", "docs.html", "workspace.html"]:
+        for name in ["index.html", "docs.html"]:
             page = Page((ROOT / "static" / name).read_text())
             self.assertEqual(len(page.ids), len(set(page.ids)), name)
             for link in page.links:
-                if link.startswith("#") and name != "workspace.html":
+                if link.startswith("#"):
                     self.assertIn(link[1:], page.ids, (name, link))
             for asset in page.assets:
                 self.assertTrue((ROOT / "static" / asset.split("?", 1)[0].lstrip("/")).is_file(), (name, asset))
@@ -46,7 +46,7 @@ class DocumentationContracts(unittest.TestCase):
         cycle = docs.split('id="first-memory"', 1)[1].split('</pre>', 1)[0]
         self.assertNotIn('./arch.png', cycle)
         self.assertNotIn(' -f ', cycle)
-        for entry in ['id="command-ui"', 'id="command-serve"', 'id="install-windows"']:
+        for entry in ['id="command-serve"', 'id="install-windows"']:
             self.assertIn(entry, docs)
 
 

@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -16,18 +16,6 @@ use std::sync::{
 
 pub(crate) fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
     match path {
-        "/" | "/app" => Some((
-            include_bytes!("../../static/workspace.html"),
-            "text/html; charset=utf-8",
-        )),
-        "/workspace.css" => Some((
-            include_bytes!("../../static/workspace.css"),
-            "text/css; charset=utf-8",
-        )),
-        "/workspace.js" => Some((
-            include_bytes!("../../static/workspace.js"),
-            "application/javascript; charset=utf-8",
-        )),
         "/logo.png" => Some((include_bytes!("../../static/logo.png"), "image/png")),
         _ => None,
     }
@@ -152,7 +140,7 @@ impl WorkspaceState {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
-        anyhow::ensure!(current == *self.base_config.lock().map_err(|_| anyhow::anyhow!("Configuration state unavailable"))?, "Configuration changed outside this workspace. Restart lmem ui before applying settings.");
+        anyhow::ensure!(current == *self.base_config.lock().map_err(|_| anyhow::anyhow!("Configuration state unavailable"))?, "Configuration changed outside this workspace. Reload configuration before applying settings.");
         Ok(())
     }
 }
@@ -282,7 +270,7 @@ pub(crate) fn handle(mut stream: TcpStream, req: &HttpRequest, state: &Arc<Works
             stream,
             403,
             "Forbidden",
-            "Management requires a loopback-bound workspace. Run lmem ui locally.",
+            "Management requires a loopback connection.",
         );
         return;
     }
@@ -596,39 +584,4 @@ fn dispatch(req: &HttpRequest, state: &Arc<WorkspaceState>) -> Result<Value> {
         }
         _ => anyhow::bail!("Unknown workspace endpoint"),
     }
-}
-
-/// Opens a temporary authenticated workspace bound exclusively to this computer.
-pub fn serve_workspace(
-    controller: Arc<LightMem>,
-    port: Option<u16>,
-    no_browser: bool,
-) -> Result<()> {
-    let listener = if let Some(port) = port {
-        TcpListener::bind(("127.0.0.1", port))?
-    } else {
-        (8081..8101)
-            .find_map(|p| TcpListener::bind(("127.0.0.1", p)).ok())
-            .context("No workspace port available; use --port")?
-    };
-    let token = format!("lmem_{}", uuid::Uuid::new_v4().simple());
-    let url = format!(
-        "http://127.0.0.1:{}/app#token={token}",
-        listener.local_addr()?.port()
-    );
-    println!("LightMem local workspace\nVault: {}\nOpen: {url}\nThis temporary URL grants access to this workspace. Keep it private.\nPress Ctrl+C to stop.", controller.db_path().display());
-    if !no_browser {
-        #[cfg(target_os = "macos")]
-        let result = std::process::Command::new("open").arg(&url).spawn();
-        #[cfg(target_os = "windows")]
-        let result = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
-            .spawn();
-        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-        let result = std::process::Command::new("xdg-open").arg(&url).spawn();
-        if let Err(e) = result {
-            eprintln!("Open the URL above in your browser: {e}");
-        }
-    }
-    super::api_server::serve_loop(listener, controller, Some(token))
 }

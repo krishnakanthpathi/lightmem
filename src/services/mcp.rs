@@ -824,7 +824,7 @@ impl McpServer {
                 }
 
                 if updated {
-                    anyhow::ensure!(cfg.embedding_identity()? == previous_identity || lm.stats()?.total_memories == 0, "Changing embeddings for a populated vault requires migration. Use lmem config --yes or the local workspace to preview and migrate.");
+                    anyhow::ensure!(cfg.embedding_identity()? == previous_identity || lm.stats()?.total_memories == 0, "Changing embeddings for a populated vault requires migration. Use lmem config --yes to preview and migrate.");
                     cfg.save()?;
                 }
 

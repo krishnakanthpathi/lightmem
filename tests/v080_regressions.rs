@@ -569,8 +569,6 @@ fn workspace_config_preview_job_and_model_test_preserve_vault_binding() {
     assert_eq!(status, 200);
     assert_eq!(test["ok"], true);
     assert_eq!(client.stats().unwrap().total_memories, 1);
-    let assets = ureq::get(&format!("{}/app", server.base)).call().unwrap();
-    assert!(assets.into_string().unwrap().contains("memoryDialog"));
 }
 
 #[test]
