@@ -624,9 +624,17 @@ impl LightMem {
             .map(|a| a.metadata.clone())
             .collect();
 
-        // Automatic entity extraction via LLM if enabled
+        // Automatic entity extraction via LLM if enabled and an LLM is available
         let mut entity_warning = None;
-        if extract_entities && self.config.entity_extraction == "llm" {
+        let should_extract_entities = extract_entities
+            && !self.config.entity_extraction.eq_ignore_ascii_case("off")
+            && !self.config.entity_extraction.is_empty()
+            && (self.config.has_active_llm()
+                || self.config.has_explicit_entity_llm()
+                || (self.config.entity_extraction == "llm"
+                    && self.config.effective_ollama_url() != "http://localhost:11434"));
+
+        if should_extract_entities {
             match ObserverService::extract_entities_via_llm(
                 &final_content,
                 reranker_override,
@@ -1578,37 +1586,42 @@ impl LightMem {
             return Ok(Box::new(Top1Reranker));
         }
 
-        if lower == "ollama" || lower == "openai" || lower == "llm" {
-            let cfg_ollama = self
-                .config
-                .reranker
-                .strip_prefix("ollama:")
-                .or_else(|| self.config.reranker.strip_prefix("OLLAMA:"))
-                .or_else(|| self.config.reranker.strip_prefix("openai:"))
-                .or_else(|| self.config.reranker.strip_prefix("OPENAI:"))
-                .or_else(|| self.config.reranker.strip_prefix("llm:"))
-                .or_else(|| self.config.reranker.strip_prefix("LLM:"))
-                .map(|s| s.to_string());
+        if lower == "ollama"
+            || lower == "openai"
+            || lower == "openrouter"
+            || lower == "gemini"
+            || lower == "groq"
+            || lower == "deepseek"
+            || lower == "mistral"
+            || lower == "llm"
+        {
             return Ok(Box::new(OllamaReranker::with_api_key(
                 self.config.effective_ollama_url(),
-                cfg_ollama,
+                Some(lower),
                 self.config.effective_ollama_api_key(),
             )));
         }
 
-        if let Some(ollama_model) = active_reranker
-            .strip_prefix("ollama:")
-            .or_else(|| active_reranker.strip_prefix("OLLAMA:"))
-            .or_else(|| active_reranker.strip_prefix("openai:"))
-            .or_else(|| active_reranker.strip_prefix("OPENAI:"))
-            .or_else(|| active_reranker.strip_prefix("llm:"))
-            .or_else(|| active_reranker.strip_prefix("LLM:"))
-        {
-            return Ok(Box::new(OllamaReranker::with_api_key(
-                self.config.effective_ollama_url(),
-                Some(ollama_model.to_string()),
-                self.config.effective_ollama_api_key(),
-            )));
+        for prefix in &[
+            "openai:",
+            "openrouter:",
+            "gemini:",
+            "groq:",
+            "deepseek:",
+            "mistral:",
+            "ollama:",
+            "llm:",
+        ] {
+            if active_reranker.len() > prefix.len()
+                && active_reranker[..prefix.len()].eq_ignore_ascii_case(prefix)
+            {
+                let model = active_reranker[prefix.len()..].trim();
+                return Ok(Box::new(OllamaReranker::with_api_key(
+                    self.config.effective_ollama_url(),
+                    Some(model.to_string()),
+                    self.config.effective_ollama_api_key(),
+                )));
+            }
         }
 
         if let Some(onnx_model) = active_reranker
@@ -1696,6 +1709,7 @@ impl LightMem {
                     .collect()
             };
             let q_words = tokenize(question);
+
             for cand in &candidates {
                 for ent in &cand.memory.entities {
                     let name_words = tokenize(&ent.name);
@@ -1718,14 +1732,34 @@ impl LightMem {
                     let name_in_question = q_words
                         .windows(name_words.len())
                         .any(|w| w == name_words.as_slice());
-                    if name_in_question {
-                        return Ok(AnswerResult {
-                            answer: ent.val.clone(),
-                            selected_memory: Some(cand.memory.clone()),
-                            confidence: cand.memory.confidence.max(0.95),
-                            reranker_used: "entity_index".to_string(),
-                        });
+                    if !name_in_question {
+                        continue;
                     }
+
+                    // Ambiguity check: if multiple retrieved candidates discuss this entity slot name,
+                    // do not bypass the reranker—semantic disambiguation is required.
+                    let competing_candidates = candidates
+                        .iter()
+                        .filter(|c| {
+                            c.memory
+                                .entities
+                                .iter()
+                                .any(|e| tokenize(&e.name) == name_words)
+                                || tokenize(&c.memory.content)
+                                    .windows(name_words.len())
+                                    .any(|w| w == name_words.as_slice())
+                        })
+                        .count();
+                    if competing_candidates > 1 {
+                        continue;
+                    }
+
+                    return Ok(AnswerResult {
+                        answer: ent.val.clone(),
+                        selected_memory: Some(cand.memory.clone()),
+                        confidence: cand.memory.confidence.max(0.95),
+                        reranker_used: "entity_index".to_string(),
+                    });
                 }
             }
         }

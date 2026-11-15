@@ -59,22 +59,33 @@ impl LightMemConfig {
     pub fn offline_requested() -> bool {
         std::env::var_os("LIGHTMEM_OFFLINE").is_some()
     }
-    /// Normalize any reranker string ('onnx', 'minilm-squad2', 'tinyroberta-squad2', 'ollama', 'ollama:<model>', 'top1')
+    /// Normalize any reranker string ('onnx', 'minilm-squad2', 'tinyroberta-squad2', 'ollama', 'ollama:<model>', 'top1', 'openai:<model>', etc.)
     pub fn normalize_reranker(raw: &str, legacy_qa: Option<&str>) -> String {
         let trimmed = raw.trim();
         let lower = trimmed.to_lowercase();
         if lower == "top1" {
             return "top1".to_string();
         }
-        if let Some(ollama_m) = trimmed
-            .strip_prefix("ollama:")
-            .or_else(|| trimmed.strip_prefix("OLLAMA:"))
-            .or_else(|| trimmed.strip_prefix("openai:"))
-            .or_else(|| trimmed.strip_prefix("OPENAI:"))
-            .or_else(|| trimmed.strip_prefix("llm:"))
-            .or_else(|| trimmed.strip_prefix("LLM:"))
-        {
-            return format!("ollama:{}", ollama_m.trim());
+        for prefix in &[
+            "openai:",
+            "openrouter:",
+            "gemini:",
+            "groq:",
+            "deepseek:",
+            "mistral:",
+            "ollama:",
+            "llm:",
+        ] {
+            if trimmed.len() > prefix.len()
+                && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+            {
+                let clean_p = if prefix.eq_ignore_ascii_case("llm:") {
+                    "ollama:"
+                } else {
+                    *prefix
+                };
+                return format!("{}{}", clean_p, trimmed[prefix.len()..].trim());
+            }
         }
         if let Some(onnx_m) = trimmed
             .strip_prefix("onnx:")
@@ -83,13 +94,13 @@ impl LightMemConfig {
             return Self::normalize_reranker(onnx_m, None);
         }
         match lower.as_str() {
-            "ollama" | "openai" | "llm" => {
+            "ollama" | "openai" | "openrouter" | "gemini" | "groq" | "deepseek" | "mistral" | "llm" => {
                 if let Some(qm) = legacy_qa.map(str::trim).filter(|m| {
                     !m.is_empty() && !matches!(*m, "minilm-squad2" | "tinyroberta-squad2")
                 }) {
-                    format!("ollama:{}", qm)
+                    format!("{}:{}", lower, qm)
                 } else {
-                    "ollama".to_string()
+                    lower
                 }
             }
             "tinyroberta-squad2"
@@ -111,7 +122,7 @@ impl LightMemConfig {
         }
     }
 
-    /// Apply a standard setup preset: 'local', 'ollama-cloud', or 'ollama-local'
+    /// Apply a standard setup preset: 'local', 'ollama', 'openai', 'openrouter', 'gemini', 'groq', 'demo'
     pub fn apply_preset(&mut self, preset: &str) -> Result<()> {
         match preset.to_lowercase().as_str() {
             "demo" | "hash" => {
@@ -143,8 +154,40 @@ impl LightMemConfig {
                 self.ollama_url = "http://localhost:11434".to_string();
                 Ok(())
             }
+            "openai" => {
+                self.entity_extraction = "llm".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "openai:gpt-4o-mini".to_string();
+                self.ollama_url = "https://api.openai.com".to_string();
+                Ok(())
+            }
+            "openrouter" => {
+                self.entity_extraction = "llm".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "openrouter:anthropic/claude-3.5-sonnet".to_string();
+                self.ollama_url = "https://openrouter.ai/api".to_string();
+                Ok(())
+            }
+            "gemini" => {
+                self.entity_extraction = "llm".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "gemini:gemini-1.5-flash".to_string();
+                self.ollama_url = "https://generativelanguage.googleapis.com/v1beta/openai".to_string();
+                Ok(())
+            }
+            "groq" => {
+                self.entity_extraction = "llm".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.reranker = "groq:llama-3.3-70b-versatile".to_string();
+                self.ollama_url = "https://api.groq.com/openai".to_string();
+                Ok(())
+            }
             other => anyhow::bail!(
-                "Unknown preset '{}'. Choose 'demo' (no downloads), 'local' (local ONNX), 'ollama-cloud' (Ollama gemma4:31b-cloud), or 'ollama-local' (Ollama localhost).",
+                "Unknown preset '{}'. Choose 'local' (offline ONNX), 'ollama' (localhost LLM), 'openai', 'openrouter', 'gemini', 'groq', or 'demo'.",
                 other
             ),
         }
@@ -163,6 +206,9 @@ impl LightMemConfig {
             "/v1",
         ] {
             if u.ends_with(suffix) {
+                if suffix == "/api" && u.contains("openrouter.ai") {
+                    continue;
+                }
                 u = u[..u.len() - suffix.len()]
                     .trim_end_matches('/')
                     .to_string();
@@ -175,31 +221,220 @@ impl LightMemConfig {
         }
     }
 
+    /// Returns (provider_identifier, default_base_url, optional_primary_env_var_for_api_key)
+    pub fn active_provider(&self) -> (&'static str, &'static str, Option<&'static str>) {
+        let norm = Self::normalize_reranker(&self.reranker, None);
+        let lower = norm.to_lowercase();
+        if lower.starts_with("openai:") || lower == "openai" {
+            ("openai", "https://api.openai.com", Some("OPENAI_API_KEY"))
+        } else if lower.starts_with("openrouter:") || lower == "openrouter" {
+            (
+                "openrouter",
+                "https://openrouter.ai/api",
+                Some("OPENROUTER_API_KEY"),
+            )
+        } else if lower.starts_with("gemini:") || lower == "gemini" {
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                Some("GEMINI_API_KEY"),
+            )
+        } else if lower.starts_with("groq:") || lower == "groq" {
+            ("groq", "https://api.groq.com/openai", Some("GROQ_API_KEY"))
+        } else if lower.starts_with("deepseek:") || lower == "deepseek" {
+            ("deepseek", "https://api.deepseek.com", Some("DEEPSEEK_API_KEY"))
+        } else if lower.starts_with("mistral:") || lower == "mistral" {
+            ("mistral", "https://api.mistral.ai", Some("MISTRAL_API_KEY"))
+        } else if lower == "top1" {
+            ("top1", "", None)
+        } else if lower == "minilm-squad2"
+            || lower == "tinyroberta-squad2"
+            || lower == "onnx"
+            || lower == "qa"
+        {
+            ("onnx", "", None)
+        } else {
+            ("ollama", "http://localhost:11434", Some("OLLAMA_API_KEY"))
+        }
+    }
+
     /// Resolves the effective base URL for Ollama / OpenAI-compatible endpoints:
-    /// Always defaults to localhost `http://localhost:11434` unless an explicit custom URL was provided.
+    /// Respects custom configured URL; otherwise defaults to active provider's default URL.
     pub fn effective_ollama_url(&self) -> String {
+        let raw = self.ollama_url.trim();
+        if !raw.is_empty() && raw != "http://localhost:11434" {
+            return Self::normalize_ollama_url(raw);
+        }
+        if let Some(env_url) = std::env::var("LIGHTMEM_MODEL_URL")
+            .ok()
+            .or_else(|| std::env::var("OLLAMA_URL").ok())
+            .or_else(|| std::env::var("OLLAMA_HOST").ok())
+            .filter(|s| !s.trim().is_empty())
+        {
+            return Self::normalize_ollama_url(&env_url);
+        }
+        let (_prov, default_url, _key_env) = self.active_provider();
+        if !default_url.is_empty() {
+            return default_url.to_string();
+        }
         Self::normalize_ollama_url(&self.ollama_url)
     }
 
-    /// Resolves effective Ollama API key from config, or environment variables (OLLAMA_API_KEY, LMEM_OLLAMA_API_KEY).
+    /// Resolves effective API key from config, provider-specific environment variables, or fallback environment variables.
     pub fn effective_ollama_api_key(&self) -> Option<String> {
-        self.ollama_api_key
+        let from_config = self
+            .ollama_api_key
             .as_deref()
             .map(str::trim)
             .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
-            .map(String::from)
-            .or_else(|| {
-                std::env::var("OLLAMA_API_KEY")
-                    .ok()
-                    .map(|k| k.trim().to_string())
-                    .filter(|k| !k.is_empty())
-            })
+            .map(String::from);
+        if from_config.is_some() {
+            return from_config;
+        }
+
+        let (prov, _default_url, key_env) = self.active_provider();
+
+        // Check provider-specific environment variables
+        if let Some(env_name) = key_env {
+            if let Ok(key) = std::env::var(env_name) {
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        if prov == "gemini" {
+            if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+
+        // Generic / legacy fallbacks
+        std::env::var("OLLAMA_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
             .or_else(|| {
                 std::env::var("LMEM_OLLAMA_API_KEY")
                     .ok()
                     .map(|k| k.trim().to_string())
                     .filter(|k| !k.is_empty())
             })
+            .or_else(|| {
+                std::env::var("LLM_API_KEY")
+                    .ok()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+            })
+            .or_else(|| {
+                if self.remote_url.is_none() {
+                    self.api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+                        .map(String::from)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Returns true if an LLM is configured as the active answer engine.
+    pub fn has_active_llm(&self) -> bool {
+        let (prov, _, _) = self.active_provider();
+        prov != "onnx" && prov != "top1"
+    }
+
+    /// Returns true if entity extraction has an explicit LLM provider or model configured.
+    pub fn has_explicit_entity_llm(&self) -> bool {
+        let norm = self.entity_extraction.trim().to_lowercase();
+        if norm == "off" || norm.is_empty() {
+            return false;
+        }
+        norm.starts_with("openai:")
+            || norm.starts_with("openrouter:")
+            || norm.starts_with("gemini:")
+            || norm.starts_with("groq:")
+            || norm.starts_with("deepseek:")
+            || norm.starts_with("mistral:")
+            || norm.starts_with("ollama:")
+            || norm.starts_with("llm:")
+    }
+
+    /// Returns a human-friendly provider descriptor for CLI display
+    pub fn active_provider_summary(&self) -> (&'static str, String) {
+        let (prov, _def_url, key_env) = self.active_provider();
+        let eff_url = self.effective_ollama_url();
+        if prov == "onnx" && (self.entity_extraction.eq_ignore_ascii_case("off") || !self.has_active_llm()) {
+            return (
+                "Local",
+                format!("{} (local ONNX Extractive QA, offline @ {})", self.reranker, eff_url),
+            );
+        }
+        if prov == "top1" && self.entity_extraction.eq_ignore_ascii_case("off") {
+            return ("Top-1", "top1 (direct rank-1 selection; no generative model)".to_string());
+        }
+        let eff_url = self.effective_ollama_url();
+        let cred_disp = if self
+            .ollama_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+            .is_some()
+            || (self.remote_url.is_none()
+                && self
+                    .api_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+                    .is_some())
+        {
+            "configured (secret)".to_string()
+        } else if let Some(env_name) = key_env {
+            if std::env::var(env_name)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .is_some()
+            {
+                format!("from {}", env_name)
+            } else if prov == "gemini"
+                && std::env::var("GOOGLE_API_KEY")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .is_some()
+            {
+                "from GOOGLE_API_KEY".to_string()
+            } else if self.effective_ollama_api_key().is_some() {
+                "configured (secret)".to_string()
+            } else {
+                "none".to_string()
+            }
+        } else {
+            "none".to_string()
+        };
+        let prov_label = match prov {
+            "openai" => "OpenAI",
+            "openrouter" => "OpenRouter",
+            "gemini" => "Gemini",
+            "groq" => "Groq",
+            "deepseek" => "DeepSeek",
+            "mistral" => "Mistral",
+            "onnx" => "Local ONNX",
+            "top1" => "Top-1",
+            _ => "Ollama",
+        };
+        let model_display = if self.reranker == "ollama" {
+            format!("ollama:auto (prefers bonsai-2:2b @ {})", eff_url)
+        } else {
+            format!("{} (@ {})", self.reranker, eff_url)
+        };
+        (
+            prov_label,
+            format!("{} · credential: {}", model_display, cred_disp),
+        )
     }
 
     /// Resolves effective remote backend URL from environment variables (LIGHTMEM_REMOTE_URL, LIGHTMEM_URL) or config.
@@ -329,13 +564,36 @@ impl LightMemConfig {
     pub fn active_reranker_summary(&self) -> String {
         let norm = Self::normalize_reranker(&self.reranker, None);
         let eff_url = self.effective_ollama_url();
-        if let Some(ollama_model) = norm.strip_prefix("ollama:") {
-            return format!("ollama:{} (@ {})", ollama_model, eff_url);
+        for prefix in &[
+            "openai:",
+            "openrouter:",
+            "gemini:",
+            "groq:",
+            "deepseek:",
+            "mistral:",
+            "ollama:",
+        ] {
+            if let Some(model) = norm.strip_prefix(prefix) {
+                let prov = match *prefix {
+                    "openai:" => "OpenAI",
+                    "openrouter:" => "OpenRouter",
+                    "gemini:" => "Gemini",
+                    "groq:" => "Groq",
+                    "deepseek:" => "DeepSeek",
+                    "mistral:" => "Mistral",
+                    _ => "ollama",
+                };
+                return format!("{}:{} (@ {})", prov, model, eff_url);
+            }
         }
         match norm.as_str() {
             "tinyroberta-squad2" => "tinyroberta-squad2 (local ONNX Extractive QA)".to_string(),
             "minilm-squad2" => "minilm-squad2 (local ONNX Extractive QA)".to_string(),
             "ollama" => format!("ollama:auto (prefers bonsai-2:2b @ {})", eff_url),
+            "openai" => format!("OpenAI:gpt-4o-mini (@ {})", eff_url),
+            "openrouter" => format!("OpenRouter:claude-3.5-sonnet (@ {})", eff_url),
+            "gemini" => format!("Gemini:gemini-1.5-flash (@ {})", eff_url),
+            "groq" => format!("Groq:llama-3.3-70b (@ {})", eff_url),
             "top1" => "top1 (best retrieved memory; no answer model)".to_string(),
             other => format!("{} (local ONNX Extractive QA)", other),
         }
@@ -344,18 +602,62 @@ impl LightMemConfig {
     pub fn active_entity_extraction_summary(&self) -> String {
         let norm = self.entity_extraction.trim();
         if norm.eq_ignore_ascii_case("off") || norm.is_empty() {
+            if !self.has_active_llm() && !self.has_explicit_entity_llm() {
+                return "skipped (requires LLM)".to_string();
+            }
             return "off".to_string();
         }
+        if !self.has_active_llm() && !self.has_explicit_entity_llm() {
+            return "skipped (requires LLM)".to_string();
+        }
         let eff_url = self.effective_ollama_url();
-        if let Some(m) = norm.strip_prefix("llm:").or_else(|| norm.strip_prefix("ollama:")) {
-            return format!("llm:{} (@ {})", m.trim(), eff_url);
+        for prefix in &[
+            "openai:",
+            "openrouter:",
+            "gemini:",
+            "groq:",
+            "deepseek:",
+            "mistral:",
+            "ollama:",
+            "llm:",
+        ] {
+            if let Some(m) = norm.strip_prefix(prefix) {
+                let prov = match *prefix {
+                    "openai:" => "OpenAI",
+                    "openrouter:" => "OpenRouter",
+                    "gemini:" => "Gemini",
+                    "groq:" => "Groq",
+                    "deepseek:" => "DeepSeek",
+                    "mistral:" => "Mistral",
+                    _ => "llm",
+                };
+                return format!("{}:{} (@ {})", prov, m.trim(), eff_url);
+            }
         }
         let r_norm = Self::normalize_reranker(&self.reranker, None);
-        if let Some(model) = r_norm.strip_prefix("ollama:") {
-            format!("llm:{} (@ {})", model, eff_url)
-        } else {
-            format!("llm (@ {})", eff_url)
+        for prefix in &[
+            "openai:",
+            "openrouter:",
+            "gemini:",
+            "groq:",
+            "deepseek:",
+            "mistral:",
+            "ollama:",
+        ] {
+            if let Some(model) = r_norm.strip_prefix(prefix) {
+                let prov = match *prefix {
+                    "openai:" => "OpenAI",
+                    "openrouter:" => "OpenRouter",
+                    "gemini:" => "Gemini",
+                    "groq:" => "Groq",
+                    "deepseek:" => "DeepSeek",
+                    "mistral:" => "Mistral",
+                    _ => "llm",
+                };
+                return format!("{}:{} (@ {})", prov, model, eff_url);
+            }
         }
+        format!("llm (@ {})", eff_url)
     }
 
     pub fn config_dir() -> PathBuf {
@@ -395,8 +697,14 @@ impl LightMemConfig {
         anyhow::ensure!(
             matches!(cfg.entity_extraction.as_str(), "off" | "llm")
                 || cfg.entity_extraction.starts_with("llm:")
-                || cfg.entity_extraction.starts_with("ollama:"),
-            "entity_extraction must be off, llm, or llm:<model>"
+                || cfg.entity_extraction.starts_with("ollama:")
+                || cfg.entity_extraction.starts_with("openai:")
+                || cfg.entity_extraction.starts_with("openrouter:")
+                || cfg.entity_extraction.starts_with("gemini:")
+                || cfg.entity_extraction.starts_with("groq:")
+                || cfg.entity_extraction.starts_with("deepseek:")
+                || cfg.entity_extraction.starts_with("mistral:"),
+            "entity_extraction must be off, llm, or <provider>:<model>"
         );
         Ok(cfg)
     }
@@ -572,6 +880,53 @@ mod tests {
         assert_eq!(
             cfg.effective_ollama_url(),
             "https://custom-ollama-proxy.internal"
+        );
+    }
+
+    #[test]
+    fn test_provider_prefixes_and_presets() {
+        let mut cfg = LightMemConfig::default();
+
+        // Presets
+        cfg.apply_preset("openai").unwrap();
+        assert_eq!(cfg.reranker, "openai:gpt-4o-mini");
+        assert_eq!(cfg.effective_ollama_url(), "https://api.openai.com");
+
+        cfg.apply_preset("openrouter").unwrap();
+        assert_eq!(cfg.reranker, "openrouter:anthropic/claude-3.5-sonnet");
+        assert_eq!(cfg.effective_ollama_url(), "https://openrouter.ai/api");
+
+        cfg.apply_preset("gemini").unwrap();
+        assert_eq!(cfg.reranker, "gemini:gemini-1.5-flash");
+        assert_eq!(
+            cfg.effective_ollama_url(),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+
+        cfg.apply_preset("groq").unwrap();
+        assert_eq!(cfg.reranker, "groq:llama-3.3-70b-versatile");
+        assert_eq!(cfg.effective_ollama_url(), "https://api.groq.com/openai");
+
+        cfg.apply_preset("local").unwrap();
+        assert_eq!(cfg.reranker, "minilm-squad2");
+        assert_eq!(cfg.entity_extraction, "off");
+
+        // Normalization
+        assert_eq!(
+            LightMemConfig::normalize_reranker("OPENAI:gpt-4o", None),
+            "openai:gpt-4o"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_reranker("openrouter:meta-llama/llama-3", None),
+            "openrouter:meta-llama/llama-3"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_reranker("gemini:gemini-2.0-flash", None),
+            "gemini:gemini-2.0-flash"
+        );
+        assert_eq!(
+            LightMemConfig::normalize_reranker("groq:mixtral", None),
+            "groq:mixtral"
         );
     }
 }

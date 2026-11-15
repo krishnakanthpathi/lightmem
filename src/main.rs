@@ -433,7 +433,7 @@ enum Commands {
         #[arg(long, visible_alias = "profile")]
         preset: Option<String>,
 
-        /// Ollama embedding model name (explicit alias: --embedding-model)
+        /// Ollama vector embedding model name (explicit alias: --embedding-model; for the answer/generative LLM use --reranker or --answer-model)
         #[arg(long, visible_alias = "embedding-model")]
         model: Option<String>,
 
@@ -446,7 +446,7 @@ enum Commands {
         entity_extraction: Option<String>,
 
         /// Save an LLM endpoint key; use 'none' to remove it (environment keys still apply)
-        #[arg(long)]
+        #[arg(long, visible_alias = "model-api-key")]
         ollama_api_key: Option<String>,
 
         /// Preview proposed settings and migration requirements without writes or downloads
@@ -1480,9 +1480,26 @@ fn parse_reranker_setting(raw: &str) -> Result<String> {
         );
     }
     anyhow::ensure!(
-        matches!(lower.as_str(), "onnx" | "qa" | "precision" | "ollama" | "openai" | "llm" | "top1" | "minilm-squad2" | "tinyroberta-squad2")
-        || lower.starts_with("onnx:") || lower.contains(':'),
-        "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or ollama:<model>.", raw
+        matches!(
+            lower.as_str(),
+            "onnx"
+                | "qa"
+                | "precision"
+                | "ollama"
+                | "openai"
+                | "openrouter"
+                | "gemini"
+                | "groq"
+                | "deepseek"
+                | "mistral"
+                | "llm"
+                | "top1"
+                | "minilm-squad2"
+                | "tinyroberta-squad2"
+        ) || lower.starts_with("onnx:")
+            || lower.contains(':'),
+        "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or a model spec like ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>.",
+        raw
     );
     let normalized = LightMemConfig::normalize_reranker(raw, None);
     anyhow::ensure!(
@@ -2754,7 +2771,7 @@ fn main() -> Result<()> {
                     // Abort if another process edited the settings while the prompt was open.
                     terminal::ensure_unchanged(&cfg)?;
                     if apply_configuration(&cfg, &proposed, &path, true, false)? {
-                        terminal::render_config(&proposed, effective_db, global)?;
+                        terminal::render_config(&proposed, true, effective_db, global)?;
                     }
                 } else {
                     eprintln!("Cancelled. No settings changed.");
@@ -2847,10 +2864,18 @@ fn main() -> Result<()> {
                     "off".to_string()
                 } else if trimmed.eq_ignore_ascii_case("llm") {
                     "llm".to_string()
-                } else if trimmed.starts_with("llm:") || trimmed.starts_with("ollama:") {
+                } else if trimmed.starts_with("llm:")
+                    || trimmed.starts_with("ollama:")
+                    || trimmed.starts_with("openai:")
+                    || trimmed.starts_with("openrouter:")
+                    || trimmed.starts_with("gemini:")
+                    || trimmed.starts_with("groq:")
+                    || trimmed.starts_with("deepseek:")
+                    || trimmed.starts_with("mistral:")
+                {
                     trimmed.to_string()
                 } else {
-                    format!("llm:{}", trimmed)
+                    format!("ollama:{}", trimmed)
                 };
                 cfg.entity_extraction = normalized;
                 changed = true;
@@ -2903,15 +2928,42 @@ fn main() -> Result<()> {
                 changed = true;
             }
             if let Some(m) = model {
-                cfg.embedding_model = m;
-                changed = true;
+                let lower = m.trim().to_lowercase();
+                let is_local_switch = lower == "local" || lower == "offline" || lower == "onnx";
+                let has_provider_prefix = lower.starts_with("openai:")
+                    || lower.starts_with("openrouter:")
+                    || lower.starts_with("gemini:")
+                    || lower.starts_with("groq:")
+                    || lower.starts_with("deepseek:")
+                    || lower.starts_with("mistral:")
+                    || lower.starts_with("ollama:")
+                    || lower.starts_with("llm:")
+                    || lower.starts_with("onnx:");
+
+                if is_local_switch {
+                    cfg.apply_preset("local")?;
+                    changed = true;
+                } else if has_provider_prefix
+                    || (reranker.is_none()
+                        && cfg.backend != "ollama"
+                        && backend.as_deref() != Some("ollama"))
+                {
+                    cfg.reranker = parse_reranker_setting(&m)?;
+                    if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
+                        cfg.entity_extraction = cfg.reranker.clone();
+                    }
+                    changed = true;
+                } else {
+                    cfg.embedding_model = m;
+                    changed = true;
+                }
             }
             if let Some(r) = reranker {
                 cfg.reranker = parse_reranker_setting(&r)?;
                 changed = true;
             }
 
-            if let Some(r) = remote {
+            if let Some(ref r) = remote {
                 let trimmed = r.trim();
                 if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
                     cfg.remote_url = None;
@@ -2924,8 +2976,14 @@ fn main() -> Result<()> {
                 let trimmed = k.trim();
                 if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
                     cfg.api_key = None;
+                    if cfg.remote_url.is_none() && remote.is_none() {
+                        cfg.ollama_api_key = None;
+                    }
                 } else {
                     cfg.api_key = Some(trimmed.to_string());
+                    if cfg.remote_url.is_none() && remote.is_none() {
+                        cfg.ollama_api_key = Some(trimmed.to_string());
+                    }
                 }
                 changed = true;
             }
@@ -2946,7 +3004,7 @@ fn main() -> Result<()> {
             if json {
                 CliView::render_config(&cfg, changed, true, effective_db, global)?;
             } else {
-                terminal::render_config(&cfg, effective_db, global)?;
+                terminal::render_config(&cfg, changed, effective_db, global)?;
             }
         }
 
@@ -2983,10 +3041,18 @@ fn main() -> Result<()> {
                     "off".to_string()
                 } else if trimmed.eq_ignore_ascii_case("llm") {
                     "llm".to_string()
-                } else if trimmed.starts_with("llm:") || trimmed.starts_with("ollama:") {
+                } else if trimmed.starts_with("llm:")
+                    || trimmed.starts_with("ollama:")
+                    || trimmed.starts_with("openai:")
+                    || trimmed.starts_with("openrouter:")
+                    || trimmed.starts_with("gemini:")
+                    || trimmed.starts_with("groq:")
+                    || trimmed.starts_with("deepseek:")
+                    || trimmed.starts_with("mistral:")
+                {
                     trimmed.to_string()
                 } else {
-                    format!("llm:{}", trimmed)
+                    format!("ollama:{}", trimmed)
                 };
                 cfg.entity_extraction = normalized;
             }
@@ -3018,7 +3084,7 @@ fn main() -> Result<()> {
             if json {
                 CliView::render_config(&cfg, true, true, effective_db, global)?;
             } else {
-                terminal::render_config(&cfg, effective_db, global)?;
+                terminal::render_config(&cfg, true, effective_db, global)?;
                 if interactive {
                     terminal::offer_downloads(&cfg)?;
                 }

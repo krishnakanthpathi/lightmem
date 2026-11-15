@@ -1293,18 +1293,21 @@ impl CliView {
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "Answer Reranker:",
+            "Model:",
             Self::emerald_bold(&cfg.active_reranker_summary())
         );
+        let extraction_summary = if !cfg.has_active_llm() && !cfg.has_explicit_entity_llm() {
+            Self::slate("skipped (requires LLM)")
+        } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
+            Self::gold_bold(&cfg.active_entity_extraction_summary())
+        } else {
+            Self::slate("off")
+        };
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Entity Extraction:",
-            if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
-                Self::gold_bold(&cfg.active_entity_extraction_summary())
-            } else {
-                Self::slate("off")
-            }
+            extraction_summary
         );
         println!(
             "  │  {} {:<18} {}",
@@ -1479,42 +1482,26 @@ impl CliView {
             "Search Embedder:",
             Self::emerald_bold(&cfg.active_embedding_summary())
         );
+        let (_prov_name, prov_desc) = cfg.active_provider_summary();
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "Answer Reranker:",
-            Self::emerald_bold(&cfg.active_reranker_summary())
+            "Model:",
+            Self::emerald_bold(&prov_desc)
         );
+        let extraction_summary = if !cfg.has_active_llm() && !cfg.has_explicit_entity_llm() {
+            Self::slate("skipped (requires LLM)")
+        } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
+            Self::gold_bold(&cfg.active_entity_extraction_summary())
+        } else {
+            Self::slate("off")
+        };
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Entity Extraction:",
-            if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
-                Self::gold_bold(&cfg.active_entity_extraction_summary())
-            } else {
-                Self::slate("off")
-            }
+            extraction_summary
         );
-        let model_key_disp = if cfg.effective_ollama_api_key().is_some() {
-            Self::gold("configured (secret)")
-        } else {
-            Self::slate("none")
-        };
-        println!(
-            "  │  {} {:<18} {} (credential: {})",
-            Self::slate("▸"),
-            "Model Service:",
-            cfg.effective_ollama_url(),
-            model_key_disp
-        );
-        if let Ok(id) = cfg.embedding_identity() {
-            println!(
-                "  │  {} {:<18} {}",
-                Self::slate("▸"),
-                "Vector Identity:",
-                Self::slate(&id)
-            );
-        }
         println!(
             "  ╰─ {} {:<18} {}",
             Self::slate("▸"),
@@ -1567,47 +1554,72 @@ impl CliView {
         );
         println!();
 
-        println!(
-            "  {} {}",
-            Self::crimson_bold("◈"),
-            Self::white_bold("Available Setup Presets")
-        );
-        println!(
-            "    {} {:<14} {:<34} {}",
-            Self::emerald_bold("•"),
-            Self::emerald_bold("local"),
-            Self::violet("lmem config --preset local"),
-            Self::slate("Offline ONNX search + answers (bge-small + minilm)")
-        );
-        println!(
-            "    {} {:<14} {:<34} {}",
-            Self::emerald_bold("•"),
-            Self::emerald_bold("ollama-cloud"),
-            Self::violet("lmem config --preset ollama-cloud"),
-            Self::slate("Local ONNX embeddings + Ollama gemma4:31b-cloud reranker")
-        );
-        println!(
-            "    {} {:<14} {:<34} {}",
-            Self::emerald_bold("•"),
-            Self::emerald_bold("ollama-local"),
-            Self::violet("lmem config --preset ollama-local"),
-            Self::slate("Local ONNX embeddings + Ollama localhost LLM (bonsai-2:2b)")
-        );
-        println!(
-            "    {} {:<14} {:<34} {}",
-            Self::slate("•"),
-            Self::slate("demo"),
-            Self::violet("lmem config --preset demo"),
-            Self::slate("No-download deterministic hash search (test mode)")
-        );
-        println!();
-        println!("  {} {}", Self::gold("💡"), Self::white_bold("Quick Actions:"));
-        println!("    • Edit settings:    {}", Self::violet("lmem config --edit"));
-        println!("    • Run diagnostics:  {}", Self::violet("lmem doctor"));
-        println!("    • Test embeddings:  {}", Self::violet("lmem config --test"));
-        println!("    • Switch mode:      {} or {}", Self::violet("lmem remote [url]"), Self::violet("lmem local"));
-        println!("    • All flags:        {}", Self::gold("lmem config --help"));
-        println!();
+        if !updated {
+            println!(
+                "  {} {}",
+                Self::crimson_bold("◈"),
+                Self::white_bold("Available Setup Presets")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::emerald_bold("•"),
+                Self::emerald_bold("local"),
+                Self::violet("lmem config --preset local"),
+                Self::slate("Offline ONNX search + answers (100% private, no setup)")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::emerald_bold("•"),
+                Self::emerald_bold("ollama"),
+                Self::violet("lmem config --preset ollama"),
+                Self::slate("Local ONNX embeddings + Ollama LLM (localhost:11434)")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::emerald_bold("•"),
+                Self::emerald_bold("openai"),
+                Self::violet("lmem config --preset openai"),
+                Self::slate("Local ONNX embeddings + OpenAI (gpt-4o-mini)")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::emerald_bold("•"),
+                Self::emerald_bold("openrouter"),
+                Self::violet("lmem config --preset openrouter"),
+                Self::slate("Local ONNX embeddings + OpenRouter (Claude 3.5 Sonnet)")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::emerald_bold("•"),
+                Self::emerald_bold("gemini"),
+                Self::violet("lmem config --preset gemini"),
+                Self::slate("Local ONNX embeddings + Google Gemini (1.5 Flash)")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::emerald_bold("•"),
+                Self::emerald_bold("groq"),
+                Self::violet("lmem config --preset groq"),
+                Self::slate("Local ONNX embeddings + Groq (Llama 3.3 70B)")
+            );
+            println!(
+                "    {} {:<14} {:<34} {}",
+                Self::slate("•"),
+                Self::slate("demo"),
+                Self::violet("lmem config --preset demo"),
+                Self::slate("No-download deterministic hash search (test mode)")
+            );
+            println!();
+            println!("  {} {}", Self::gold("💡"), Self::white_bold("Quick Actions:"));
+            println!("    • Easy setup:       {}", Self::violet("lmem setup"));
+            println!("    • Change model:     {}", Self::violet("lmem config --model <provider>:<model>"));
+            println!("    • Set API key:      {}", Self::violet("lmem config --api-key <key>"));
+            println!("    • Run diagnostics:  {}", Self::violet("lmem doctor"));
+            println!("    • Test embeddings:  {}", Self::violet("lmem config --test"));
+            println!("    • Switch mode:      {} or {}", Self::violet("lmem remote [url]"), Self::violet("lmem local"));
+            println!("    • All flags:        {}", Self::gold("lmem config --help"));
+            println!();
+        }
         Ok(())
     }
 

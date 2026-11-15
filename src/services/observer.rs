@@ -48,6 +48,25 @@ impl ObservedCandidate {
     }
 }
 
+fn strip_provider_prefix_clean(spec: &str) -> &str {
+    let trimmed = spec.trim();
+    for prefix in &[
+        "openai:",
+        "openrouter:",
+        "gemini:",
+        "groq:",
+        "deepseek:",
+        "mistral:",
+        "ollama:",
+        "llm:",
+    ] {
+        if trimmed.len() > prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return trimmed[prefix.len()..].trim();
+        }
+    }
+    trimmed
+}
+
 pub struct ObserverService;
 
 impl ObserverService {
@@ -76,9 +95,19 @@ impl ObserverService {
             let l = spec.trim().to_lowercase();
             l == "ollama"
                 || l == "openai"
+                || l == "openrouter"
+                || l == "gemini"
+                || l == "groq"
+                || l == "deepseek"
+                || l == "mistral"
                 || l == "llm"
                 || l.starts_with("ollama:")
                 || l.starts_with("openai:")
+                || l.starts_with("openrouter:")
+                || l.starts_with("gemini:")
+                || l.starts_with("groq:")
+                || l.starts_with("deepseek:")
+                || l.starts_with("mistral:")
                 || l.starts_with("llm:")
         };
 
@@ -111,12 +140,7 @@ impl ObserverService {
             let effective_llm_spec = reranker_spec.unwrap_or_else(|| {
                 if let Some(cfg) = config {
                     let r = cfg.reranker.trim();
-                    let lower = r.to_lowercase();
-                    if lower.starts_with("ollama:")
-                        || lower.starts_with("openai:")
-                        || lower.starts_with("llm:")
-                        || lower == "ollama"
-                    {
+                    if is_llm_spec(r) {
                         r
                     } else {
                         "ollama"
@@ -743,16 +767,21 @@ impl ObserverService {
         reranker_spec: &str,
         config: &LightMemConfig,
     ) -> Result<Vec<ObservedCandidate>> {
-        let model_spec = reranker_spec
-            .strip_prefix("ollama:")
-            .or_else(|| reranker_spec.strip_prefix("openai:"))
-            .or_else(|| reranker_spec.strip_prefix("llm:"))
-            .unwrap_or(reranker_spec)
-            .trim();
+        let model_spec = strip_provider_prefix_clean(reranker_spec);
 
         let explicit_model = if matches!(
             model_spec.to_lowercase().as_str(),
-            "ollama" | "openai" | "llm" | "auto" | "default" | ""
+            "ollama"
+                | "openai"
+                | "openrouter"
+                | "gemini"
+                | "groq"
+                | "deepseek"
+                | "mistral"
+                | "llm"
+                | "auto"
+                | "default"
+                | ""
         ) {
             None
         } else {
@@ -1031,12 +1060,11 @@ impl ObserverService {
             !LightMemConfig::offline_requested(),
             "Offline mode blocks LLM attachment extraction"
         );
-        let explicit_model = if let Some(m) = config
-            .entity_extraction
-            .strip_prefix("llm:")
-            .or_else(|| config.entity_extraction.strip_prefix("ollama:"))
+        let explicit_model = if config.entity_extraction != "off"
+            && config.entity_extraction != "llm"
+            && !config.entity_extraction.is_empty()
         {
-            let m = m.trim();
+            let m = strip_provider_prefix_clean(&config.entity_extraction);
             if m.is_empty() {
                 None
             } else {
@@ -1044,17 +1072,17 @@ impl ObserverService {
             }
         } else {
             let raw_spec = reranker_spec.unwrap_or(&config.reranker);
-            let model_spec = raw_spec
-                .strip_prefix("ollama:")
-                .or_else(|| raw_spec.strip_prefix("openai:"))
-                .or_else(|| raw_spec.strip_prefix("llm:"))
-                .unwrap_or(raw_spec)
-                .trim();
+            let model_spec = strip_provider_prefix_clean(raw_spec);
 
             if matches!(
                 model_spec.to_lowercase().as_str(),
                 "ollama"
                     | "openai"
+                    | "openrouter"
+                    | "gemini"
+                    | "groq"
+                    | "deepseek"
+                    | "mistral"
                     | "llm"
                     | "auto"
                     | "default"
@@ -1320,12 +1348,11 @@ impl ObserverService {
             anyhow::bail!("Offline mode active: skipping LLM entity extraction");
         }
 
-        let explicit_model = if let Some(m) = config
-            .entity_extraction
-            .strip_prefix("llm:")
-            .or_else(|| config.entity_extraction.strip_prefix("ollama:"))
+        let explicit_model = if config.entity_extraction != "off"
+            && config.entity_extraction != "llm"
+            && !config.entity_extraction.is_empty()
         {
-            let m = m.trim();
+            let m = strip_provider_prefix_clean(&config.entity_extraction);
             if m.is_empty() {
                 None
             } else {
@@ -1333,17 +1360,17 @@ impl ObserverService {
             }
         } else {
             let raw_spec = reranker_spec.unwrap_or(&config.reranker);
-            let model_spec = raw_spec
-                .strip_prefix("ollama:")
-                .or_else(|| raw_spec.strip_prefix("openai:"))
-                .or_else(|| raw_spec.strip_prefix("llm:"))
-                .unwrap_or(raw_spec)
-                .trim();
+            let model_spec = strip_provider_prefix_clean(raw_spec);
 
             if matches!(
                 model_spec.to_lowercase().as_str(),
                 "ollama"
                     | "openai"
+                    | "openrouter"
+                    | "gemini"
+                    | "groq"
+                    | "deepseek"
+                    | "mistral"
                     | "llm"
                     | "auto"
                     | "default"

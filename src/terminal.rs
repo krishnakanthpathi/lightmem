@@ -54,8 +54,14 @@ pub fn validate(cfg: &LightMemConfig) -> Result<()> {
     ensure!(
         matches!(cfg.entity_extraction.as_str(), "off" | "llm")
             || cfg.entity_extraction.starts_with("llm:")
-            || cfg.entity_extraction.starts_with("ollama:"),
-        "Entity extraction must be off, llm, or llm:<model>."
+            || cfg.entity_extraction.starts_with("ollama:")
+            || cfg.entity_extraction.starts_with("openai:")
+            || cfg.entity_extraction.starts_with("openrouter:")
+            || cfg.entity_extraction.starts_with("gemini:")
+            || cfg.entity_extraction.starts_with("groq:")
+            || cfg.entity_extraction.starts_with("deepseek:")
+            || cfg.entity_extraction.starts_with("mistral:"),
+        "Entity extraction must be off, llm, or <provider>:<model>."
     );
     http_url(&cfg.ollama_url)?;
     if let Some(url) = &cfg.remote_url {
@@ -159,29 +165,40 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
     )? {
         cfg.apply_preset("local")?;
     } else {
-        eprintln!("  1. Local ONNX models\n  2. No-download demo (hash retrieval + best memory)\n  3. LLM answers with local search\n  4. Remote LightMem vault\n  0. Cancel");
-        match line("Choose [1-4]: ")?.as_str() {
+        eprintln!("  1. Local ONNX models (100% offline, zero setup)\n  2. Ollama local LLM (localhost:11434)\n  3. Cloud LLM (OpenAI, OpenRouter, Gemini, Groq)\n  4. No-download demo (hash search)\n  5. Remote LightMem vault\n  0. Cancel");
+        match line("Choose [1-5]: ")?.as_str() {
             "1" => cfg.apply_preset("local")?,
-            "2" => cfg.apply_preset("demo")?,
+            "2" => {
+                cfg.apply_preset("local")?;
+                let model = value("Ollama model name", "qwen2.5-coder:1.5b")?;
+                cfg.reranker = format!("ollama:{model}");
+                cfg.entity_extraction = "llm".into();
+            }
             "3" => {
                 cfg.apply_preset("local")?;
-                cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
-                    "Model service URL",
-                    &cfg.ollama_url,
-                )?);
-                let model = value("Answer model (Ollama name)", "qwen2.5:3b")?;
-                cfg.reranker = format!("ollama:{model}");
-                cfg.entity_extraction = if confirm(
-                    "Also send new memory text to this endpoint for entity extraction?",
-                    false,
-                )? {
-                    "llm"
-                } else {
-                    "off"
+                eprintln!("  Supported providers: openai, openrouter, gemini, groq, deepseek, mistral");
+                let provider = value("Provider", "openai")?.to_lowercase();
+                let default_model = match provider.as_str() {
+                    "openrouter" => "anthropic/claude-3.5-sonnet",
+                    "gemini" => "gemini-1.5-flash",
+                    "groq" => "llama-3.3-70b-versatile",
+                    "deepseek" => "deepseek-chat",
+                    "mistral" => "mistral-small-latest",
+                    _ => "gpt-4o-mini",
+                };
+                let model = value("Model name", default_model)?;
+                cfg.reranker = format!("{provider}:{model}");
+                cfg.entity_extraction = "llm".into();
+                if confirm("Configure API key now?", true)? {
+                    let mut key_opt = None;
+                    credential(&mut key_opt, &provider, false)?;
+                    if let Some(k) = key_opt {
+                        cfg.ollama_api_key = Some(k);
+                    }
                 }
-                .into();
             }
-            "4" => {
+            "4" => cfg.apply_preset("demo")?,
+            "5" => {
                 let url = value(
                     "Remote LightMem URL",
                     cfg.remote_url.as_deref().unwrap_or("http://localhost:8080"),
@@ -278,7 +295,7 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
             }
         }
         "2" => {
-            eprintln!("Choose minilm-squad2, tinyroberta-squad2, top1, ollama, or ollama:<model>.");
+            eprintln!("Choose provider and model (e.g. minilm-squad2, ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>, top1).");
             cfg.reranker = super::parse_reranker_setting(&value("Answer engine", &cfg.reranker)?)?;
             if cfg.reranker.starts_with("ollama") {
                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
@@ -289,7 +306,7 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
         }
         "3" => {
             eprintln!("LLM extraction sends newly saved memory text to {}. Search and answers are separate.", cfg.effective_ollama_url());
-            cfg.entity_extraction = value("Entity extraction: off, llm", &cfg.entity_extraction)?;
+            cfg.entity_extraction = value("Entity extraction: off, llm, or <provider>:<model>", &cfg.entity_extraction)?;
         }
         "4" => {
             eprintln!("This is the memory server, separate from the model service. Environment routing can override saved values.");
@@ -329,8 +346,13 @@ fn env_present(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty())
 }
 
-pub fn render_config(cfg: &LightMemConfig, db: Option<&Path>, global: bool) -> Result<()> {
-    CliView::render_config(cfg, false, false, db, global)
+pub fn render_config(
+    cfg: &LightMemConfig,
+    updated: bool,
+    db: Option<&Path>,
+    global: bool,
+) -> Result<()> {
+    CliView::render_config(cfg, updated, false, db, global)
 }
 
 pub fn completion_hint() {

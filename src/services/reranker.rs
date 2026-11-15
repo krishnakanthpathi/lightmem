@@ -596,11 +596,41 @@ impl OllamaReranker {
                     | "auto"
                     | "ollama"
                     | "openai"
+                    | "openrouter"
+                    | "gemini"
+                    | "groq"
+                    | "deepseek"
+                    | "mistral"
                     | "llm"
                     | "default"
                     | ""
             ) {
+                for prefix in &[
+                    "openai:",
+                    "openrouter:",
+                    "gemini:",
+                    "groq:",
+                    "deepseek:",
+                    "mistral:",
+                    "ollama:",
+                    "llm:",
+                ] {
+                    if explicit.len() > prefix.len()
+                        && explicit[..prefix.len()].eq_ignore_ascii_case(prefix)
+                    {
+                        return explicit[prefix.len()..].trim().to_string();
+                    }
+                }
                 return explicit.clone();
+            }
+            match l.as_str() {
+                "openai" => return "gpt-4o-mini".to_string(),
+                "openrouter" => return "anthropic/claude-3.5-sonnet".to_string(),
+                "gemini" => return "gemini-1.5-flash".to_string(),
+                "groq" => return "llama-3.3-70b-versatile".to_string(),
+                "deepseek" => return "deepseek-chat".to_string(),
+                "mistral" => return "mistral-small-latest".to_string(),
+                _ => {}
             }
         }
 

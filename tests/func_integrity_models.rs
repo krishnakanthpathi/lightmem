@@ -70,7 +70,19 @@ fn func_normalize_reranker() {
     );
     assert_eq!(
         LightMemConfig::normalize_reranker("openai:gpt-4o-mini", None),
-        "ollama:gpt-4o-mini"
+        "openai:gpt-4o-mini"
+    );
+    assert_eq!(
+        LightMemConfig::normalize_reranker("openrouter:anthropic/claude-3.5-sonnet", None),
+        "openrouter:anthropic/claude-3.5-sonnet"
+    );
+    assert_eq!(
+        LightMemConfig::normalize_reranker("gemini:gemini-1.5-flash", None),
+        "gemini:gemini-1.5-flash"
+    );
+    assert_eq!(
+        LightMemConfig::normalize_reranker("groq:llama-3.3-70b-versatile", None),
+        "groq:llama-3.3-70b-versatile"
     );
     assert_eq!(
         LightMemConfig::normalize_reranker("llm:gemma4:31b-cloud", None),
