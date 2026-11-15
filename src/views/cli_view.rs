@@ -1173,27 +1173,63 @@ impl CliView {
             println!("{}", serde_json::to_string_pretty(value)?);
             return Ok(());
         }
-        println!("{}", Self::white_bold("LightMem local context"));
+        println!();
+        println!(
+            "  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("L I G H T M E M  Active Context")
+        );
+        println!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        let mode = if value.get("mode").and_then(serde_json::Value::as_str) == Some("remote") {
+            "Remote"
+        } else {
+            "Local"
+        };
+        println!(
+            "  {} {:<18} {}",
+            Self::slate("◫"),
+            Self::white_bold("Active Mode:"),
+            if mode == "Remote" { mode.cyan().bold() } else { mode.green().bold() }
+        );
+        if let Some(db) = value.get("db_path").and_then(serde_json::Value::as_str) {
+            println!(
+                "  {} {:<18} {}",
+                Self::slate("◈"),
+                Self::white_bold("Database:"),
+                db
+            );
+        }
+        if let Some(r_url) = value.get("remote_url").and_then(serde_json::Value::as_str) {
+            println!(
+                "  {} {:<18} {}",
+                Self::slate("◈"),
+                Self::white_bold("Remote URL:"),
+                r_url.cyan()
+            );
+        }
+        println!();
+        println!("  ╭─ IDENTITY & ROUTING");
         for (key, label) in [
-            ("db_path", "Vault"),
-            ("connection_id", "Connection"),
-            ("scope", "Scope"),
-            ("user_id", "User"),
-            ("agent_id", "Agent"),
-            ("harness_id", "Tool"),
-            ("project_id", "Project"),
-            ("session_id", "Session"),
+            ("connection_id", "Connection ID"),
+            ("scope", "Memory Scope"),
+            ("user_id", "Active User"),
+            ("agent_id", "Agent ID"),
+            ("harness_id", "Harness / Tool"),
+            ("project_id", "Project ID"),
+            ("session_id", "Session ID"),
         ] {
             if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-                println!("  {:<14} {}", label, text);
+                println!("  │  {} {:<16} {}", Self::slate("▸"), label, text.white().bold());
             }
         }
         if value
             .get("connection_id")
             .is_none_or(serde_json::Value::is_null)
         {
-            println!("  Connection     none (explicit/default local vault)");
+            println!("  │  {} {:<16} {}", Self::slate("▸"), "Connection:", Self::slate("none (default/explicit local vault)"));
         }
+        println!("  ╰────────────────────────────────────────────────────────────");
+        println!();
         Ok(())
     }
 
@@ -1206,43 +1242,64 @@ impl CliView {
             println!("{}", serde_json::to_string_pretty(plan)?);
             return Ok(());
         }
+        println!();
         println!(
-            "{}",
-            Self::white_bold("Configuration preview — no changes applied")
+            "  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("L I G H T M E M  Configuration Preview")
         );
-        for (label, text) in [
-            (
-                "Config file",
-                plan["config_file"].as_str().unwrap_or_default().to_string(),
-            ),
-            (
-                "Setting scope",
-                "shared across vaults in this configuration root".into(),
-            ),
-            (
-                "Selected vault",
-                plan["selected_db"].as_str().unwrap_or_default().to_string(),
-            ),
-            ("Search", cfg.active_embedding_summary()),
-            ("Answers", cfg.active_reranker_summary()),
-            (
-                "Entity extraction",
-                if cfg.entity_extraction == "llm" {
-                    format!(
-                        "LLM — sends remembered text to {}",
-                        cfg.effective_ollama_url()
-                    )
-                } else {
-                    "off".into()
-                },
-            ),
-            (
-                "Saved remote",
-                cfg.remote_url.clone().unwrap_or_else(|| "none".into()),
-            ),
-        ] {
-            println!("  {:<20} {}", label, text);
-        }
+        println!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        println!("  {} {}", "⚠️".yellow(), "Preview Mode: No changes were applied to your system.".yellow().bold());
+        println!();
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("◫"),
+            Self::white_bold("Config File:"),
+            plan["config_file"].as_str().unwrap_or_default()
+        );
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("◈"),
+            Self::white_bold("Selected Vault:"),
+            plan["selected_db"].as_str().unwrap_or_default()
+        );
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("✦"),
+            Self::white_bold("Setting Scope:"),
+            "shared across vaults in this root"
+        );
+        println!();
+
+        println!("  ╭─ PROPOSED SETTINGS");
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Search Embedder:",
+            cfg.active_embedding_summary().cyan()
+        );
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Answer Reranker:",
+            cfg.active_reranker_summary().green()
+        );
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Entity Extraction:",
+            if cfg.entity_extraction == "llm" {
+                format!("LLM (@ {})", cfg.effective_ollama_url()).yellow()
+            } else {
+                "off".normal()
+            }
+        );
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Saved Remote:",
+            cfg.remote_url.clone().unwrap_or_else(|| "none".into())
+        );
         let changes = plan["changed_fields"]
             .as_array()
             .map(|items| {
@@ -1254,25 +1311,29 @@ impl CliView {
             })
             .unwrap_or_default();
         println!(
-            "  {:<20} {}",
-            "Changed fields",
-            if changes.is_empty() { "none" } else { &changes }
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Changed Fields:",
+            if changes.is_empty() { "none".dimmed() } else { changes.yellow().bold() }
         );
+        let migration_req = plan["migration_required"] == true;
         println!(
-            "  {:<20} {}",
-            "Selected-vault index",
-            if plan["migration_required"] == true {
-                "reindex required; embedding changes need approval"
+            "  ╰─ {} {:<18} {}",
+            Self::slate("▸"),
+            "Vault Index:",
+            if migration_req {
+                "reindex required (embedding changes need approval)".yellow().bold()
             } else {
-                "no migration required"
+                "no migration required".green()
             }
         );
-        println!("  Other vaults are not reindexed. Check them before using changed embeddings.");
-        if plan["migration_required"] == true && plan["embedding_change"] == false {
-            println!("  This vault already needs migration. Run reindex --yes for this vault.");
+        println!();
+        if migration_req {
+            println!("  💡 To apply changes and reindex: repeat without --dry-run and add --yes.");
+        } else {
+            println!("  💡 To apply changes: repeat the same command without --dry-run.");
         }
-        println!("  No settings saved, models downloaded, or memories written.");
-        println!("  Apply the same command without --dry-run; add --yes to approve migration.");
+        println!();
         Ok(())
     }
 
@@ -1353,180 +1414,188 @@ impl CliView {
         }
 
         if updated {
-            println!(
-                "{} {}",
-                Self::crimson_bold("◈"),
-                Self::emerald_bold("Configuration updated")
-            );
             println!();
+            println!(
+                "  {} {}",
+                Self::emerald_bold("✓"),
+                Self::emerald_bold("Configuration updated successfully")
+            );
         }
 
+        println!();
         println!(
-            "{} {}",
+            "  {} {}",
             Self::crimson_bold("❖"),
-            Self::white_bold("LightMem Configuration")
+            Self::white_bold("L I G H T M E M  Configuration")
         );
-        println!("  Settings are shared across vaults in this configuration root.");
-        println!(
-            "  Entity extraction: {}",
-            if cfg.entity_extraction == "llm" {
-                format!(
-                    "LLM — sends remembered text to {}",
-                    cfg.effective_ollama_url()
-                )
-            } else {
-                "off".into()
-            }
-        );
-        println!(
-            "  Offline policy: {}",
-            if LightMemConfig::offline_requested() {
-                "enabled (LIGHTMEM_OFFLINE)"
-            } else {
-                "not enforced; use LIGHTMEM_OFFLINE=1 for cached local operation"
-            }
-        );
-        println!(
-            "  LLM API key: {}",
-            if cfg.effective_ollama_api_key().is_some() {
-                "configured (secret)"
-            } else {
-                "none"
-            }
-        );
-        if let Some(endpoint) = cfg.effective_remote_url() {
-            println!(
-                "  Remote routing: {} (explicit --db/--global selects local)",
-                endpoint
-            );
-            if std::env::var_os("LIGHTMEM_REMOTE_URL").is_some()
-                || std::env::var_os("LIGHTMEM_URL").is_some()
-            {
-                println!("  Remote URL comes from the environment; --clear-remote only clears saved values.");
-            }
-        }
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Backend Engine"),
-            Self::emerald_bold(&cfg.backend)
-        );
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Active Embedder"),
-            Self::emerald_bold(&cfg.active_embedding_summary())
-        );
-        if cfg.backend == "onnx" || cfg.onnx_model.is_some() {
-            println!(
-                "  {} {:<20} {}",
-                Self::slate("├─"),
-                Self::slate("ONNX Model Spec"),
-                Self::slate(cfg.onnx_model.as_deref().unwrap_or("bge-small"))
-            );
-        }
-        if let Ok(id) = cfg.embedding_identity() {
-            println!(
-                "  {} {:<20} {}",
-                Self::slate("├─"),
-                Self::slate("Embedding Identity"),
-                Self::slate(&id)
-            );
-        }
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Active Reranker"),
-            Self::crimson_bold(&cfg.active_reranker_summary())
-        );
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Configured Reranker"),
-            Self::slate(&cfg.reranker)
-        );
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Ollama Server URL"),
-            Self::slate(&cfg.effective_ollama_url())
-        );
-        println!(
-            "  {} {:<20} {}",
-            Self::slate("├─"),
-            Self::slate("Ollama Embed Model"),
-            Self::slate(&cfg.embedding_model)
-        );
-        if let Some(ref remote) = cfg.remote_url {
-            println!(
-                "  {} {:<20} {}",
-                Self::slate("├─"),
-                Self::slate("Remote Backend URL"),
-                Self::violet_bold(remote)
-            );
-            println!(
-                "  {} {:<20} {}",
-                Self::slate("├─"),
-                Self::slate("Remote API Key"),
-                if cfg.api_key.is_some() {
-                    Self::emerald_bold("Configured (Secret)")
-                } else {
-                    Self::slate("None")
-                }
-            );
-        }
+        println!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+
         let active_db = effective_db
             .map(Path::to_path_buf)
             .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
         let db_mode = if active_db == LightMemConfig::global_db_path() {
-            "(global)"
+            "global vault"
         } else {
-            "(local workspace)"
+            "workspace vault"
         };
+
+        println!(
+            "  {} {:<20} {}",
+            Self::slate("◫"),
+            Self::white_bold("Config Root:"),
+            Self::format_path(&LightMemConfig::config_dir())
+        );
         println!(
             "  {} {:<20} {} {}",
-            Self::slate("├─"),
-            Self::slate("Local Vault DB"),
-            Self::slate(&Self::format_path(&active_db)),
-            Self::slate(db_mode)
+            Self::slate("◈"),
+            Self::white_bold("Active Vault:"),
+            Self::format_path(&active_db),
+            Self::slate(&format!("({})", db_mode))
         );
         println!(
             "  {} {:<20} {}",
-            Self::slate("╰─"),
-            Self::slate("Config File"),
-            Self::slate(&Self::format_path(&LightMemConfig::config_file()))
+            Self::slate("✦"),
+            Self::white_bold("Settings Scope:"),
+            "shared across vaults in this root"
         );
-
         println!();
+
+        println!("  ╭─ ENGINE SPECIFICATIONS");
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Search Embedder:",
+            cfg.active_embedding_summary().cyan()
+        );
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Answer Reranker:",
+            cfg.active_reranker_summary().green()
+        );
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Entity Extraction:",
+            if cfg.entity_extraction == "llm" {
+                format!("llm (@ {})", cfg.effective_ollama_url()).yellow()
+            } else {
+                "off".normal()
+            }
+        );
+        let model_key_disp = if cfg.effective_ollama_api_key().is_some() {
+            "configured (secret)".yellow()
+        } else {
+            "none".dimmed()
+        };
+        println!(
+            "  │  {} {:<18} {} (credential: {})",
+            Self::slate("▸"),
+            "Model Service:",
+            cfg.effective_ollama_url(),
+            model_key_disp
+        );
+        if let Ok(id) = cfg.embedding_identity() {
+            println!(
+                "  │  {} {:<18} {}",
+                Self::slate("▸"),
+                "Vector Identity:",
+                Self::slate(&id)
+            );
+        }
+        println!(
+            "  ╰─ {} {:<18} {}",
+            Self::slate("▸"),
+            "Config File:",
+            Self::format_path(&LightMemConfig::config_file())
+        );
+        println!();
+
+        println!("  ╭─ ROUTING & REMOTE");
+        if let Some(endpoint) = cfg.effective_remote_url() {
+            println!(
+                "  │  {} {:<18} {}",
+                Self::slate("▸"),
+                "Remote Server:",
+                endpoint.cyan().bold()
+            );
+            println!(
+                "  │  {} {:<18} {}",
+                Self::slate("▸"),
+                "Remote Credential:",
+                if cfg.effective_api_key().is_some() {
+                    "configured (secret)".yellow()
+                } else {
+                    "none".dimmed()
+                }
+            );
+        } else {
+            println!(
+                "  │  {} {:<18} {}",
+                Self::slate("▸"),
+                "Remote Server:",
+                Self::slate("not configured (local mode active)")
+            );
+            println!(
+                "  │  {} {:<18} {}",
+                Self::slate("▸"),
+                "Remote Credential:",
+                Self::slate("none (default)")
+            );
+        }
+        println!(
+            "  ╰─ {} {:<18} {}",
+            Self::slate("▸"),
+            "Offline Policy:",
+            if LightMemConfig::offline_requested() {
+                "enabled (forced offline)".yellow().bold()
+            } else {
+                "not enforced (normal network access)".normal()
+            }
+        );
+        println!();
+
         println!(
             "  {} {}",
             Self::crimson_bold("◈"),
             Self::white_bold("Available Setup Presets")
         );
         println!(
-            "    {}  {:<35} {}",
-            Self::emerald_bold("1. local       "),
-            Self::slate("lmem config --preset local"),
-            Self::slate("Local ONNX search + answers; download models first")
+            "    {} {:<14} {:<34} {}",
+            Self::emerald_bold("•"),
+            "local".green().bold(),
+            "lmem config --preset local".cyan(),
+            Self::slate("Offline ONNX search + answers (bge-small + minilm)")
         );
         println!(
-            "    {}  {:<35} {}",
-            Self::emerald_bold("2. ollama-cloud"),
-            Self::slate("lmem config --preset ollama-cloud"),
-            Self::slate("ONNX embeddings + Ollama gemma4:31b-cloud reranker")
+            "    {} {:<14} {:<34} {}",
+            Self::emerald_bold("•"),
+            "ollama-cloud".green().bold(),
+            "lmem config --preset ollama-cloud".cyan(),
+            Self::slate("Local ONNX embeddings + Ollama gemma4:31b-cloud reranker")
         );
         println!(
-            "    {}  {:<35} {}",
-            Self::emerald_bold("3. ollama-local"),
-            Self::slate("lmem config --preset ollama-local"),
-            Self::slate("ONNX embeddings + Ollama localhost LLM reranker (prefers bonsai-2:2b)")
+            "    {} {:<14} {:<34} {}",
+            Self::emerald_bold("•"),
+            "ollama-local".green().bold(),
+            "lmem config --preset ollama-local".cyan(),
+            Self::slate("Local ONNX embeddings + Ollama localhost LLM (bonsai-2:2b)")
         );
-        println!("    demo   lmem setup --preset demo --dry-run  (no-download demo)");
+        println!(
+            "    {} {:<14} {:<34} {}",
+            Self::slate("•"),
+            "demo".dimmed(),
+            "lmem config --preset demo".cyan(),
+            Self::slate("No-download deterministic hash search (test mode)")
+        );
         println!();
-        println!("  Preview:  lmem config --preset local --dry-run");
-        println!("  Test:     lmem config --test");
-        println!("  Entities: lmem config --entity-extraction off");
-        println!("  Scope:    lmem context  |  lmem status");
+        println!("  💡 Quick Actions:");
+        println!("    • Edit settings:    {}", "lmem config --edit".cyan());
+        println!("    • Run diagnostics:  {}", "lmem doctor".cyan());
+        println!("    • Test embeddings:  {}", "lmem config --test".cyan());
+        println!("    • Switch mode:      {} or {}", "lmem remote [url]".cyan(), "lmem local".cyan());
+        println!("    • All flags:        {}", "lmem config --help".yellow());
+        println!();
         Ok(())
     }
 

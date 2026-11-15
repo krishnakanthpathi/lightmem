@@ -1,7 +1,8 @@
 //! Short, line-oriented terminal interactions. Never open a controller for inspection.
 use anyhow::{bail, ensure, Context, Result};
-use lightmem::{LightMemConfig, MemoryContext, MemoryScope};
+use lightmem::{CliView, LightMemConfig, MemoryContext, MemoryScope};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use colored::*;
 use serde_json::json;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -326,79 +327,8 @@ fn env_present(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty())
 }
 
-fn source(saved: bool, environment: &[&str], env_first: bool) -> String {
-    if saved && !env_first {
-        return "saved configuration".into();
-    }
-    for name in environment {
-        if (env_first && std::env::var(name).is_ok()) || env_present(name).is_some() {
-            return format!("environment: {name}");
-        }
-    }
-    if saved {
-        "saved configuration"
-    } else {
-        "default / not configured"
-    }
-    .into()
-}
-
 pub fn render_config(cfg: &LightMemConfig, db: Option<&Path>, global: bool) -> Result<()> {
-    let path = db
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
-    println!(
-        "LightMem configuration · Shared under {}",
-        LightMemConfig::config_dir().display()
-    );
-    println!("Vault: {}", path.display());
-    println!("Search: {}", cfg.active_embedding_summary());
-    println!("Answers: {}", cfg.active_reranker_summary());
-    println!("Entity extraction: {}", cfg.entity_extraction);
-    println!("Model service: {}", cfg.effective_ollama_url());
-    println!(
-        "Model credential: {} ({})",
-        if cfg.effective_ollama_api_key().is_some() {
-            "configured"
-        } else {
-            "none"
-        },
-        source(
-            cfg.ollama_api_key
-                .as_deref()
-                .is_some_and(|v| !v.trim().is_empty() && !v.eq_ignore_ascii_case("none")),
-            &["OLLAMA_API_KEY", "LMEM_OLLAMA_API_KEY"],
-            false
-        )
-    );
-    println!(
-        "Remote LightMem: {} ({})",
-        cfg.effective_remote_url()
-            .as_deref()
-            .unwrap_or("not configured"),
-        source(
-            cfg.remote_url.is_some(),
-            &["LIGHTMEM_REMOTE_URL", "LIGHTMEM_URL"],
-            true
-        )
-    );
-    println!(
-        "Remote credential: {} ({})",
-        if cfg.effective_api_key().is_some() {
-            "configured"
-        } else {
-            "none"
-        },
-        source(
-            cfg.api_key.is_some(),
-            &["LIGHTMEM_API_KEY", "LIGHTMEM_KEY"],
-            true
-        )
-    );
-    println!("Offline override: {}", LightMemConfig::offline_requested());
-    println!("Config file: {}", LightMemConfig::config_file().display());
-    println!("\nChange: lmem config --edit · Inspect: lmem doctor · Flags: lmem config --help");
-    Ok(())
+    CliView::render_config(cfg, false, false, db, global)
 }
 
 pub fn completion_hint() {
@@ -665,20 +595,71 @@ pub fn doctor(
     if machine {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
+        println!();
         println!(
-            "LightMem doctor · {} · {} ({})",
-            report["mode"].as_str().unwrap(),
+            "  {} {}",
+            CliView::crimson_bold("❖"),
+            CliView::white_bold("L I G H T M E M  Doctor Diagnostics")
+        );
+        println!("  {}", CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        println!(
+            "  {} {:<18} {} ({})",
+            CliView::slate("◫"),
+            CliView::white_bold("Target Vault:"),
             report["target"].as_str().unwrap(),
+            report["mode"].as_str().unwrap()
+        );
+        println!(
+            "  {} {:<18} {}",
+            CliView::slate("◈"),
+            CliView::white_bold("Discovery:"),
             selected_source
         );
-        for check in &checks {
+        println!(
+            "  {} {:<18} {}",
+            CliView::slate("✦"),
+            CliView::white_bold("Config File:"),
+            LightMemConfig::config_file().display()
+        );
+        println!();
+
+        println!("  ╭─ SYSTEM HEALTH & READINESS");
+        let last_idx = checks.len().saturating_sub(1);
+        for (i, check) in checks.iter().enumerate() {
+            let status = check["status"].as_str().unwrap_or("unknown");
+            let name = check["check"].as_str().unwrap_or("");
+            let message = check["message"].as_str().unwrap_or("");
+            let (glyph, styled_name) = match status {
+                "ok" => ("✓".green().bold(), name.white().bold()),
+                "info" => ("ℹ".cyan().bold(), name.white()),
+                "error" => ("✗".red().bold(), name.red().bold()),
+                "needs_reindex" => ("⚠️".yellow().bold(), name.yellow().bold()),
+                _ => ("○".dimmed(), name.dimmed()),
+            };
+            let prefix = if i == last_idx { "  ╰─" } else { "  │ " };
             println!(
-                "  [{}] {}: {}",
-                check["status"].as_str().unwrap(),
-                check["check"].as_str().unwrap(),
-                check["message"].as_str().unwrap()
+                "{} {} {:<16} {}",
+                prefix,
+                glyph,
+                styled_name,
+                message
             );
         }
+        println!();
+        if ok {
+            println!(
+                "  {} {}",
+                "✓".green().bold(),
+                "All core system checks passed and vault is healthy.".green().bold()
+            );
+        } else {
+            println!(
+                "  {} {}",
+                "⚠️".yellow().bold(),
+                "One or more diagnostic checks require attention.".yellow().bold()
+            );
+        }
+        println!();
     }
     if !ok {
         std::process::exit(1);

@@ -2782,7 +2782,16 @@ fn main() -> Result<()> {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&result)?);
                 } else {
-                    println!("Embedding test passed: {} dimensions ({}). No memory saved.\nAnswer quality is not tested; use 'lmem answer' with a known fact.", dimensions, cfg.backend);
+                    println!();
+                    println!(
+                        "  {} {} {}",
+                        "✓".green().bold(),
+                        "Embedding Engine Verified:".white().bold(),
+                        format!("{} dimensions ({})", dimensions, cfg.backend).cyan().bold()
+                    );
+                    println!("    {} Status: Online and operational (disposable test; no memory saved).", "◈".dimmed());
+                    println!("    {} Tip:    Test answer reranking with 'lmem answer \"<question>\"'.", "💡".dimmed());
+                    println!();
                 }
                 return Ok(());
             }
