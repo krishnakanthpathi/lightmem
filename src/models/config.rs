@@ -341,6 +341,23 @@ impl LightMemConfig {
         }
     }
 
+    pub fn active_entity_extraction_summary(&self) -> String {
+        let norm = self.entity_extraction.trim();
+        if norm.eq_ignore_ascii_case("off") || norm.is_empty() {
+            return "off".to_string();
+        }
+        let eff_url = self.effective_ollama_url();
+        if let Some(m) = norm.strip_prefix("llm:").or_else(|| norm.strip_prefix("ollama:")) {
+            return format!("llm:{} (@ {})", m.trim(), eff_url);
+        }
+        let r_norm = Self::normalize_reranker(&self.reranker, None);
+        if let Some(model) = r_norm.strip_prefix("ollama:") {
+            format!("llm:{} (@ {})", model, eff_url)
+        } else {
+            format!("llm (@ {})", eff_url)
+        }
+    }
+
     pub fn config_dir() -> PathBuf {
         std::env::var_os("LIGHTMEM_CONFIG_DIR")
             .map(PathBuf::from)
@@ -376,8 +393,10 @@ impl LightMemConfig {
             .with_context(|| format!("Invalid configuration at {}", path.display()))?;
         cfg.reranker = Self::normalize_reranker(&cfg.reranker, legacy_qa);
         anyhow::ensure!(
-            matches!(cfg.entity_extraction.as_str(), "off" | "llm"),
-            "entity_extraction must be off or llm"
+            matches!(cfg.entity_extraction.as_str(), "off" | "llm")
+                || cfg.entity_extraction.starts_with("llm:")
+                || cfg.entity_extraction.starts_with("ollama:"),
+            "entity_extraction must be off, llm, or llm:<model>"
         );
         Ok(cfg)
     }

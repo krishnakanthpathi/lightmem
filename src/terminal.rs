@@ -52,8 +52,10 @@ pub fn validate(cfg: &LightMemConfig) -> Result<()> {
     cfg.embedding_identity()?;
     super::parse_reranker_setting(&cfg.reranker)?;
     ensure!(
-        matches!(cfg.entity_extraction.as_str(), "off" | "llm"),
-        "Entity extraction must be off or llm."
+        matches!(cfg.entity_extraction.as_str(), "off" | "llm")
+            || cfg.entity_extraction.starts_with("llm:")
+            || cfg.entity_extraction.starts_with("ollama:"),
+        "Entity extraction must be off, llm, or llm:<model>."
     );
     http_url(&cfg.ollama_url)?;
     if let Some(url) = &cfg.remote_url {
@@ -630,11 +632,11 @@ pub fn doctor(
             let name = check["check"].as_str().unwrap_or("");
             let message = check["message"].as_str().unwrap_or("");
             let (glyph, styled_name) = match status {
-                "ok" => ("✓".green().bold(), name.white().bold()),
-                "info" => ("ℹ".cyan().bold(), name.white()),
-                "error" => ("✗".red().bold(), name.red().bold()),
-                "needs_reindex" => ("⚠️".yellow().bold(), name.yellow().bold()),
-                _ => ("○".dimmed(), name.dimmed()),
+                "ok" => (CliView::emerald_bold("✓"), CliView::white_bold(name)),
+                "info" => (CliView::violet_bold("ℹ"), CliView::white_bold(name)),
+                "error" => (CliView::crimson_bold("✗"), CliView::crimson_bold(name)),
+                "needs_reindex" => (CliView::gold_bold("⚠️"), CliView::gold_bold(name)),
+                _ => (CliView::slate("○"), CliView::slate(name)),
             };
             let prefix = if i == last_idx { "  ╰─" } else { "  │ " };
             println!(
@@ -649,8 +651,8 @@ pub fn doctor(
         if ok {
             println!(
                 "  {} {}",
-                "✓".green().bold(),
-                "All core system checks passed and vault is healthy.".green().bold()
+                CliView::emerald_bold("✓"),
+                CliView::emerald_bold("All core system checks passed and vault is healthy.")
             );
         } else {
             println!(

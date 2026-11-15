@@ -441,8 +441,8 @@ enum Commands {
         #[arg(long, visible_alias = "answer-model")]
         reranker: Option<String>,
 
-        /// Entity extraction: off (default) or llm (sends remembered text to the configured endpoint)
-        #[arg(long, value_parser = ["off", "llm"])]
+        /// Entity extraction: off (default), llm, or llm:<model>
+        #[arg(long)]
         entity_extraction: Option<String>,
 
         /// Save an LLM endpoint key; use 'none' to remove it (environment keys still apply)
@@ -497,7 +497,7 @@ enum Commands {
         model: Option<String>,
 
         /// Override entity extraction independently of the preset
-        #[arg(long, value_parser = ["off", "llm"])]
+        #[arg(long)]
         entity_extraction: Option<String>,
 
         /// Preview setup without saving, downloading, or reindexing
@@ -2785,12 +2785,12 @@ fn main() -> Result<()> {
                     println!();
                     println!(
                         "  {} {} {}",
-                        "✓".green().bold(),
-                        "Embedding Engine Verified:".white().bold(),
-                        format!("{} dimensions ({})", dimensions, cfg.backend).cyan().bold()
+                        CliView::emerald_bold("✓"),
+                        CliView::white_bold("Embedding Engine Verified:"),
+                        CliView::violet_bold(&format!("{} dimensions ({})", dimensions, cfg.backend))
                     );
-                    println!("    {} Status: Online and operational (disposable test; no memory saved).", "◈".dimmed());
-                    println!("    {} Tip:    Test answer reranking with 'lmem answer \"<question>\"'.", "💡".dimmed());
+                    println!("    {} Status: Online and operational (disposable test; no memory saved).", CliView::crimson("◈"));
+                    println!("    {} Tip:    Test answer reranking with '{}'.", CliView::gold("💡"), CliView::violet("lmem answer \"<question>\""));
                     println!();
                 }
                 return Ok(());
@@ -2851,7 +2851,17 @@ fn main() -> Result<()> {
                 changed = true;
             }
             if let Some(mode) = entity_extraction {
-                cfg.entity_extraction = mode;
+                let trimmed = mode.trim();
+                let normalized = if trimmed.eq_ignore_ascii_case("off") {
+                    "off".to_string()
+                } else if trimmed.eq_ignore_ascii_case("llm") {
+                    "llm".to_string()
+                } else if trimmed.starts_with("llm:") || trimmed.starts_with("ollama:") {
+                    trimmed.to_string()
+                } else {
+                    format!("llm:{}", trimmed)
+                };
+                cfg.entity_extraction = normalized;
                 changed = true;
             }
             if let Some(key) = ollama_api_key {
@@ -2977,7 +2987,17 @@ fn main() -> Result<()> {
                 cfg.reranker = parse_reranker_setting(&model)?;
             }
             if let Some(mode) = entity_extraction {
-                cfg.entity_extraction = mode;
+                let trimmed = mode.trim();
+                let normalized = if trimmed.eq_ignore_ascii_case("off") {
+                    "off".to_string()
+                } else if trimmed.eq_ignore_ascii_case("llm") {
+                    "llm".to_string()
+                } else if trimmed.starts_with("llm:") || trimmed.starts_with("ollama:") {
+                    trimmed.to_string()
+                } else {
+                    format!("llm:{}", trimmed)
+                };
+                cfg.entity_extraction = normalized;
             }
             let path = effective_db
                 .map(Path::to_path_buf)

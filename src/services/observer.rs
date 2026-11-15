@@ -1031,30 +1031,43 @@ impl ObserverService {
             !LightMemConfig::offline_requested(),
             "Offline mode blocks LLM attachment extraction"
         );
-        let raw_spec = reranker_spec.unwrap_or(&config.reranker);
-        let model_spec = raw_spec
-            .strip_prefix("ollama:")
-            .or_else(|| raw_spec.strip_prefix("openai:"))
-            .or_else(|| raw_spec.strip_prefix("llm:"))
-            .unwrap_or(raw_spec)
-            .trim();
-
-        let explicit_model = if matches!(
-            model_spec.to_lowercase().as_str(),
-            "ollama"
-                | "openai"
-                | "llm"
-                | "auto"
-                | "default"
-                | ""
-                | "minilm-squad2"
-                | "tinyroberta-squad2"
-                | "top1"
-                | "none"
-        ) {
-            None
+        let explicit_model = if let Some(m) = config
+            .entity_extraction
+            .strip_prefix("llm:")
+            .or_else(|| config.entity_extraction.strip_prefix("ollama:"))
+        {
+            let m = m.trim();
+            if m.is_empty() {
+                None
+            } else {
+                Some(m.to_string())
+            }
         } else {
-            Some(model_spec.to_string())
+            let raw_spec = reranker_spec.unwrap_or(&config.reranker);
+            let model_spec = raw_spec
+                .strip_prefix("ollama:")
+                .or_else(|| raw_spec.strip_prefix("openai:"))
+                .or_else(|| raw_spec.strip_prefix("llm:"))
+                .unwrap_or(raw_spec)
+                .trim();
+
+            if matches!(
+                model_spec.to_lowercase().as_str(),
+                "ollama"
+                    | "openai"
+                    | "llm"
+                    | "auto"
+                    | "default"
+                    | ""
+                    | "minilm-squad2"
+                    | "tinyroberta-squad2"
+                    | "top1"
+                    | "none"
+            ) {
+                None
+            } else {
+                Some(model_spec.to_string())
+            }
         };
 
         let ollama = OllamaReranker::with_api_key(
@@ -1307,30 +1320,43 @@ impl ObserverService {
             anyhow::bail!("Offline mode active: skipping LLM entity extraction");
         }
 
-        let raw_spec = reranker_spec.unwrap_or(&config.reranker);
-        let model_spec = raw_spec
-            .strip_prefix("ollama:")
-            .or_else(|| raw_spec.strip_prefix("openai:"))
-            .or_else(|| raw_spec.strip_prefix("llm:"))
-            .unwrap_or(raw_spec)
-            .trim();
-
-        let explicit_model = if matches!(
-            model_spec.to_lowercase().as_str(),
-            "ollama"
-                | "openai"
-                | "llm"
-                | "auto"
-                | "default"
-                | ""
-                | "minilm-squad2"
-                | "tinyroberta-squad2"
-                | "top1"
-                | "none"
-        ) {
-            None
+        let explicit_model = if let Some(m) = config
+            .entity_extraction
+            .strip_prefix("llm:")
+            .or_else(|| config.entity_extraction.strip_prefix("ollama:"))
+        {
+            let m = m.trim();
+            if m.is_empty() {
+                None
+            } else {
+                Some(m.to_string())
+            }
         } else {
-            Some(model_spec.to_string())
+            let raw_spec = reranker_spec.unwrap_or(&config.reranker);
+            let model_spec = raw_spec
+                .strip_prefix("ollama:")
+                .or_else(|| raw_spec.strip_prefix("openai:"))
+                .or_else(|| raw_spec.strip_prefix("llm:"))
+                .unwrap_or(raw_spec)
+                .trim();
+
+            if matches!(
+                model_spec.to_lowercase().as_str(),
+                "ollama"
+                    | "openai"
+                    | "llm"
+                    | "auto"
+                    | "default"
+                    | ""
+                    | "minilm-squad2"
+                    | "tinyroberta-squad2"
+                    | "top1"
+                    | "none"
+            ) {
+                None
+            } else {
+                Some(model_spec.to_string())
+            }
         };
 
         let ollama = OllamaReranker::with_api_key(

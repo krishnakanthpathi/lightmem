@@ -849,7 +849,7 @@ impl Storage {
         {
             let mut dst = rusqlite::Connection::open(target_path)?;
             let backup = rusqlite::backup::Backup::new(&conn, &mut dst)?;
-            backup.run_to_completion(5, std::time::Duration::from_millis(250), None)?;
+            backup.run_to_completion(10_000, std::time::Duration::from_millis(0), None)?;
         }
         Ok(())
     }
@@ -865,7 +865,7 @@ impl Storage {
         let mut staged_conn = Connection::open_in_memory()?;
         {
             let backup = rusqlite::backup::Backup::new(&src_conn, &mut staged_conn)?;
-            backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+            backup.run_to_completion(10_000, std::time::Duration::from_millis(0), None)?;
         }
         let staged = Self {
             conn: Arc::new(Mutex::new(staged_conn)),
@@ -892,7 +892,7 @@ impl Storage {
         // SQLite's backup transaction publishes the validated snapshot atomically;
         // an interrupted/failed backup rolls back the destination transaction.
         let backup = rusqlite::backup::Backup::new(&staged_conn, &mut conn)?;
-        backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+        backup.run_to_completion(10_000, std::time::Duration::from_millis(0), None)?;
         Ok(())
     }
 

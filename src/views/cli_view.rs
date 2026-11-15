@@ -59,6 +59,10 @@ impl CliView {
         s.truecolor(251, 191, 36)
     }
 
+    pub fn gold_bold(s: &str) -> ColoredString {
+        s.truecolor(251, 191, 36).bold()
+    }
+
     pub fn white_bold(s: &str) -> ColoredString {
         s.truecolor(248, 250, 252).bold()
     }
@@ -69,6 +73,14 @@ impl CliView {
 
     pub fn emerald_bold(s: &str) -> ColoredString {
         s.truecolor(52, 211, 153).bold()
+    }
+
+    pub fn emerald(s: &str) -> ColoredString {
+        s.truecolor(52, 211, 153)
+    }
+
+    pub fn violet(s: &str) -> ColoredString {
+        s.truecolor(167, 139, 250)
     }
 
     /// Render a single pair of vertical pixel rows from `CLOUD_LOGO_MATRIX` using Unicode half-blocks.
@@ -1271,34 +1283,34 @@ impl CliView {
         );
         println!();
 
-        println!("  ╭─ PROPOSED SETTINGS");
+        println!("  ╭─ {}", Self::crimson_bold("PROPOSED SETTINGS"));
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Search Embedder:",
-            cfg.active_embedding_summary().cyan()
+            Self::emerald_bold(&cfg.active_embedding_summary())
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Answer Reranker:",
-            cfg.active_reranker_summary().green()
+            Self::emerald_bold(&cfg.active_reranker_summary())
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Entity Extraction:",
-            if cfg.entity_extraction == "llm" {
-                format!("LLM (@ {})", cfg.effective_ollama_url()).yellow()
+            if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
+                Self::gold_bold(&cfg.active_entity_extraction_summary())
             } else {
-                "off".normal()
+                Self::slate("off")
             }
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Saved Remote:",
-            cfg.remote_url.clone().unwrap_or_else(|| "none".into())
+            cfg.remote_url.as_deref().map(Self::violet_bold).unwrap_or_else(|| Self::slate("none"))
         );
         let changes = plan["changed_fields"]
             .as_array()
@@ -1314,7 +1326,7 @@ impl CliView {
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Changed Fields:",
-            if changes.is_empty() { "none".dimmed() } else { changes.yellow().bold() }
+            if changes.is_empty() { Self::slate("none") } else { Self::gold_bold(&changes) }
         );
         let migration_req = plan["migration_required"] == true;
         println!(
@@ -1322,16 +1334,16 @@ impl CliView {
             Self::slate("▸"),
             "Vault Index:",
             if migration_req {
-                "reindex required (embedding changes need approval)".yellow().bold()
+                Self::gold_bold("reindex required (embedding changes need approval)")
             } else {
-                "no migration required".green()
+                Self::emerald("no migration required")
             }
         );
         println!();
         if migration_req {
-            println!("  💡 To apply changes and reindex: repeat without --dry-run and add --yes.");
+            println!("  {} To apply changes and reindex: repeat without {} and add {}.", Self::gold("💡"), Self::violet("--dry-run"), Self::violet("--yes"));
         } else {
-            println!("  💡 To apply changes: repeat the same command without --dry-run.");
+            println!("  {} To apply changes: repeat the same command without {}.", Self::gold("💡"), Self::violet("--dry-run"));
         }
         println!();
         Ok(())
@@ -1460,33 +1472,33 @@ impl CliView {
         );
         println!();
 
-        println!("  ╭─ ENGINE SPECIFICATIONS");
+        println!("  ╭─ {}", Self::crimson_bold("ENGINE SPECIFICATIONS"));
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Search Embedder:",
-            cfg.active_embedding_summary().cyan()
+            Self::emerald_bold(&cfg.active_embedding_summary())
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Answer Reranker:",
-            cfg.active_reranker_summary().green()
+            Self::emerald_bold(&cfg.active_reranker_summary())
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Entity Extraction:",
-            if cfg.entity_extraction == "llm" {
-                format!("llm (@ {})", cfg.effective_ollama_url()).yellow()
+            if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
+                Self::gold_bold(&cfg.active_entity_extraction_summary())
             } else {
-                "off".normal()
+                Self::slate("off")
             }
         );
         let model_key_disp = if cfg.effective_ollama_api_key().is_some() {
-            "configured (secret)".yellow()
+            Self::gold("configured (secret)")
         } else {
-            "none".dimmed()
+            Self::slate("none")
         };
         println!(
             "  │  {} {:<18} {} (credential: {})",
@@ -1511,22 +1523,22 @@ impl CliView {
         );
         println!();
 
-        println!("  ╭─ ROUTING & REMOTE");
+        println!("  ╭─ {}", Self::crimson_bold("ROUTING & REMOTE"));
         if let Some(endpoint) = cfg.effective_remote_url() {
             println!(
                 "  │  {} {:<18} {}",
                 Self::slate("▸"),
                 "Remote Server:",
-                endpoint.cyan().bold()
+                Self::violet_bold(&endpoint)
             );
             println!(
                 "  │  {} {:<18} {}",
                 Self::slate("▸"),
                 "Remote Credential:",
                 if cfg.effective_api_key().is_some() {
-                    "configured (secret)".yellow()
+                    Self::gold("configured (secret)")
                 } else {
-                    "none".dimmed()
+                    Self::slate("none")
                 }
             );
         } else {
@@ -1548,9 +1560,9 @@ impl CliView {
             Self::slate("▸"),
             "Offline Policy:",
             if LightMemConfig::offline_requested() {
-                "enabled (forced offline)".yellow().bold()
+                Self::gold_bold("enabled (forced offline)")
             } else {
-                "not enforced (normal network access)".normal()
+                Self::slate("not enforced (normal network access)")
             }
         );
         println!();
@@ -1563,38 +1575,38 @@ impl CliView {
         println!(
             "    {} {:<14} {:<34} {}",
             Self::emerald_bold("•"),
-            "local".green().bold(),
-            "lmem config --preset local".cyan(),
+            Self::emerald_bold("local"),
+            Self::violet("lmem config --preset local"),
             Self::slate("Offline ONNX search + answers (bge-small + minilm)")
         );
         println!(
             "    {} {:<14} {:<34} {}",
             Self::emerald_bold("•"),
-            "ollama-cloud".green().bold(),
-            "lmem config --preset ollama-cloud".cyan(),
+            Self::emerald_bold("ollama-cloud"),
+            Self::violet("lmem config --preset ollama-cloud"),
             Self::slate("Local ONNX embeddings + Ollama gemma4:31b-cloud reranker")
         );
         println!(
             "    {} {:<14} {:<34} {}",
             Self::emerald_bold("•"),
-            "ollama-local".green().bold(),
-            "lmem config --preset ollama-local".cyan(),
+            Self::emerald_bold("ollama-local"),
+            Self::violet("lmem config --preset ollama-local"),
             Self::slate("Local ONNX embeddings + Ollama localhost LLM (bonsai-2:2b)")
         );
         println!(
             "    {} {:<14} {:<34} {}",
             Self::slate("•"),
-            "demo".dimmed(),
-            "lmem config --preset demo".cyan(),
+            Self::slate("demo"),
+            Self::violet("lmem config --preset demo"),
             Self::slate("No-download deterministic hash search (test mode)")
         );
         println!();
-        println!("  💡 Quick Actions:");
-        println!("    • Edit settings:    {}", "lmem config --edit".cyan());
-        println!("    • Run diagnostics:  {}", "lmem doctor".cyan());
-        println!("    • Test embeddings:  {}", "lmem config --test".cyan());
-        println!("    • Switch mode:      {} or {}", "lmem remote [url]".cyan(), "lmem local".cyan());
-        println!("    • All flags:        {}", "lmem config --help".yellow());
+        println!("  {} {}", Self::gold("💡"), Self::white_bold("Quick Actions:"));
+        println!("    • Edit settings:    {}", Self::violet("lmem config --edit"));
+        println!("    • Run diagnostics:  {}", Self::violet("lmem doctor"));
+        println!("    • Test embeddings:  {}", Self::violet("lmem config --test"));
+        println!("    • Switch mode:      {} or {}", Self::violet("lmem remote [url]"), Self::violet("lmem local"));
+        println!("    • All flags:        {}", Self::gold("lmem config --help"));
         println!();
         Ok(())
     }
