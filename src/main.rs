@@ -5,8 +5,8 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use colored::*;
 use lightmem::{
-    encode_base64, parse_ttl_duration, CliView, LightMem, LightMemConfig, MemoryStatus, MemoryType,
-    MultimodalInput,
+    encode_base64, parse_ttl_duration, CliErrorCard, CliView, LightMem, LightMemConfig,
+    MemoryStatus, MemoryType, MultimodalInput,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal, Read, Write};
@@ -1303,7 +1303,52 @@ fn handle_remote_command(
         | Commands::Serve { .. } | Commands::Ui { .. } | Commands::Version { .. } | Commands::Completions { .. }
         | Commands::Connect { mcp: false, .. } | Commands::Uninstall { .. }
         | Commands::Local { .. } | Commands::Remote { .. } => Ok(false),
-        _ => anyhow::bail!("This command is not supported in remote mode. No local vault was opened. Use --db PATH to explicitly select a local vault, or switch to local mode with 'lmem local' (or 'lmem config --clear-remote')."),
+        cmd => {
+            let cmd_name = match cmd {
+                Commands::Bundle { action: BundleCommand::Export { .. }, .. } => "bundle export",
+                Commands::Bundle { action: BundleCommand::Import { .. }, .. } => "bundle import",
+                Commands::Clear { .. } => "clear",
+                Commands::Restore { .. } => "restore",
+                Commands::Inspect { .. } => "inspect",
+                Commands::Import { .. } => "import",
+                Commands::Export { .. } => "export",
+                Commands::Conflicts { .. } => "conflicts",
+                Commands::Autolink { .. } => "autolink",
+                Commands::Connect { mcp: true, .. } => "connect --mcp",
+                _ => "this command",
+            };
+            let reason_msg = format!("This command ('{cmd_name}') is not supported in remote mode. No local vault was opened.");
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "error",
+                        "error": "unsupported_remote_command",
+                        "command": cmd_name,
+                        "remote_url": client.base_url,
+                        "message": reason_msg,
+                        "hint": "Use --db PATH to explicitly select a local vault, or switch to local mode with 'lmem local'."
+                    })
+                );
+            } else {
+                CliView::render_error(
+                    &CliErrorCard {
+                        title: "Command Not Supported in Remote Mode",
+                        reason: &reason_msg,
+                        details: &[
+                            ("Command", cmd_name),
+                            ("Active Mode", &format!("Remote ({})", client.base_url)),
+                        ],
+                        suggestions: &[
+                            ("Switch to local:", "lmem local"),
+                            ("Explicit local vault:", &format!("lmem --db ~/.lightmem/memories.db {cmd_name}")),
+                        ],
+                    },
+                    false,
+                );
+            }
+            std::process::exit(1);
+        }
     }
 }
 
@@ -2518,10 +2563,64 @@ fn main() -> Result<()> {
                 output,
                 json: cmd_json,
             } => {
+                let is_json = json || cmd_json;
                 let lm = open_controller(effective_db, global, connection)?;
-                let exported_path = lm.export_bundle(output.as_deref())?;
+                let mut progress_bar = terminal::TerminalProgress::new("Packaging", 0);
+                if !is_json {
+                    eprintln!();
+                    eprintln!(
+                        "  {} {}",
+                        CliView::crimson_bold("❖"),
+                        CliView::white_bold("L I G H T M E M  Bundle Export")
+                    );
+                    eprintln!("  {}", CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+                    if let Some(out_p) = output.as_deref() {
+                        eprintln!(
+                            "  {} {:<16} {}",
+                            CliView::slate("◫"),
+                            CliView::white_bold("Destination:"),
+                            out_p.display()
+                        );
+                    }
+                    eprintln!(
+                        "  {} {:<16} {}",
+                        CliView::slate("◈"),
+                        CliView::white_bold("Vault:"),
+                        lm.db_path().display()
+                    );
+                    eprintln!();
+                }
+
+                let exported_path = lm.export_bundle_with_progress(output.as_deref(), |prog| {
+                    if is_json {
+                        return;
+                    }
+                    match prog {
+                        lightmem::services::BundleProgress::StageStart { stage, total_stages, title } => {
+                            if stage == 1 || stage == 2 {
+                                eprint!("  \x1b[38;2;113;113;122m▸\x1b[0m [{}/{}] {:<38}", stage, total_stages, title);
+                                let _ = std::io::stderr().flush();
+                            }
+                        }
+                        lightmem::services::BundleProgress::StageDone { stage, summary } => {
+                            if stage == 1 || stage == 2 {
+                                eprintln!(" \x1b[38;2;34;197;94m✓ {}\x1b[0m", summary);
+                            } else if stage == 3 {
+                                progress_bar.finish("Archive finalized");
+                            }
+                        }
+                        lightmem::services::BundleProgress::FileProgress { current, total, filename, .. } => {
+                            progress_bar.set_total(total);
+                            progress_bar.update(current, &filename);
+                        }
+                    }
+                })?;
+
                 let manifest = lm.inspect_bundle(&exported_path)?;
-                CliView::render_bundle_export(&exported_path, &manifest, json || cmd_json)?;
+                if !is_json {
+                    eprintln!();
+                }
+                CliView::render_bundle_export(&exported_path, &manifest, is_json)?;
             }
             BundleCommand::Import {
                 file,
@@ -2529,9 +2628,61 @@ fn main() -> Result<()> {
                 merge,
                 json: cmd_json,
             } => {
+                let is_json = json || cmd_json;
                 let lm = open_controller(effective_db, global, connection)?;
-                let res = lm.import_bundle(&file, replace, merge)?;
-                CliView::render_bundle_import(&res, json || cmd_json)?;
+                let mut progress_bar = terminal::TerminalProgress::new("Extracting", 0);
+                if !is_json {
+                    eprintln!();
+                    eprintln!(
+                        "  {} {}",
+                        CliView::crimson_bold("❖"),
+                        CliView::white_bold("L I G H T M E M  Bundle Import")
+                    );
+                    eprintln!("  {}", CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+                    eprintln!(
+                        "  {} {:<16} {}",
+                        CliView::slate("◫"),
+                        CliView::white_bold("Bundle Archive:"),
+                        file.display()
+                    );
+                    eprintln!(
+                        "  {} {:<16} {}",
+                        CliView::slate("◈"),
+                        CliView::white_bold("Mode:"),
+                        if replace { "Overwrite / Replace active vault (--replace)" } else if merge { "Merge into active vault (--merge)" } else { "Import into empty vault" }
+                    );
+                    eprintln!();
+                }
+
+                let res = lm.import_bundle_with_progress(&file, replace, merge, |prog| {
+                    if is_json {
+                        return;
+                    }
+                    match prog {
+                        lightmem::services::BundleProgress::StageStart { stage, total_stages, title } => {
+                            if stage == 1 || stage == 3 {
+                                eprint!("  \x1b[38;2;113;113;122m▸\x1b[0m [{}/{}] {:<42}", stage, total_stages, title);
+                                let _ = std::io::stderr().flush();
+                            }
+                        }
+                        lightmem::services::BundleProgress::StageDone { stage, summary } => {
+                            if stage == 1 || stage == 3 {
+                                eprintln!(" \x1b[38;2;34;197;94m✓ {}\x1b[0m", summary);
+                            } else if stage == 2 {
+                                progress_bar.finish("All attachments extracted");
+                            }
+                        }
+                        lightmem::services::BundleProgress::FileProgress { current, total, filename, .. } => {
+                            progress_bar.set_total(total);
+                            progress_bar.update(current, &filename);
+                        }
+                    }
+                })?;
+
+                if !is_json {
+                    eprintln!();
+                }
+                CliView::render_bundle_import(&res, is_json)?;
             }
             BundleCommand::Info {
                 file,

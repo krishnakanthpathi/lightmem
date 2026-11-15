@@ -61,6 +61,25 @@ pub struct BundleImportResult {
     pub mode: String, // "restore" or "merged"
 }
 
+#[derive(Debug, Clone)]
+pub enum BundleProgress {
+    StageStart {
+        stage: usize,
+        total_stages: usize,
+        title: String,
+    },
+    StageDone {
+        stage: usize,
+        summary: String,
+    },
+    FileProgress {
+        current: usize,
+        total: usize,
+        filename: String,
+        bytes: u64,
+    },
+}
+
 // Publication uses whole-directory renames: existing files (including symlinks)
 // are moved, never opened for writing. On ordinary errors the original tree is
 // restored. This is not a crash-atomic transaction with SQLite.
@@ -173,6 +192,18 @@ pub struct BundleService;
 impl BundleService {
     /// Export full vault (SQLite DB, all video/photo attachments, graph links, vectors, and manifest) into a single compressed .zip bundle
     pub fn export_bundle(storage: &Storage, output_path: Option<&Path>) -> Result<PathBuf> {
+        Self::export_bundle_with_progress(storage, output_path, |_| {})
+    }
+
+    /// Export full vault with structured progress callbacks
+    pub fn export_bundle_with_progress<F>(
+        storage: &Storage,
+        output_path: Option<&Path>,
+        mut progress: F,
+    ) -> Result<PathBuf>
+    where
+        F: FnMut(BundleProgress),
+    {
         let target_path = if let Some(p) = output_path {
             p.to_path_buf()
         } else {
@@ -190,6 +221,11 @@ impl BundleService {
         }
 
         // 1. Snapshot database cleanly
+        progress(BundleProgress::StageStart {
+            stage: 1,
+            total_stages: 3,
+            title: "Snapshotting SQLite database...".into(),
+        });
         let temp_dir = tempfile::tempdir()?;
         let temp_db_path = temp_dir.path().join("memories.db");
         storage.backup_to_file(&temp_db_path)?;
@@ -197,8 +233,17 @@ impl BundleService {
         let db_bytes = std::fs::read(&temp_db_path)?;
         let db_sha256 = compute_sha256_hex(&db_bytes);
         let db_size_bytes = db_bytes.len() as u64;
+        progress(BundleProgress::StageDone {
+            stage: 1,
+            summary: format!("{:.1} MB", db_size_bytes as f64 / 1_048_576.0),
+        });
 
         // 2. Query statistics & metadata
+        progress(BundleProgress::StageStart {
+            stage: 2,
+            total_stages: 3,
+            title: "Collecting attachments & manifest...".into(),
+        });
         let total_memories = storage.count_memories(None, None, None)?;
         let total_links = storage.all_links().unwrap_or_default().len();
         let embedding_identity = storage.embedding_identity()?;
@@ -274,7 +319,21 @@ impl BundleService {
             attachments: bundle_entries,
         };
 
+        progress(BundleProgress::StageDone {
+            stage: 2,
+            summary: format!(
+                "{} files ({:.1} MB)",
+                attachments.len(),
+                total_attachment_bytes as f64 / 1_048_576.0
+            ),
+        });
+
         // 4. Create the ZIP archive
+        progress(BundleProgress::StageStart {
+            stage: 3,
+            total_stages: 3,
+            title: "Compressing & packaging bundle...".into(),
+        });
         let parent = target_path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -283,6 +342,8 @@ impl BundleService {
         let mut zip = ZipWriter::new(staged_export.as_file_mut());
         let options_deflate =
             SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let options_store =
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
         // Write manifest.json
         zip.start_file("manifest.json", options_deflate)?;
@@ -294,8 +355,20 @@ impl BundleService {
         zip.write_all(&db_bytes)?;
 
         // Write each video, photo, document attachment
-        for (entry, (_, data)) in manifest.attachments.iter().zip(attachments.iter()) {
-            zip.start_file(&entry.entry_path, options_deflate)?;
+        let total_files = manifest.attachments.len();
+        for (idx, (entry, (meta, data))) in manifest.attachments.iter().zip(attachments.iter()).enumerate() {
+            progress(BundleProgress::FileProgress {
+                current: idx + 1,
+                total: total_files,
+                filename: entry.filename.clone(),
+                bytes: data.len() as u64,
+            });
+            let opt = if meta.media_kind == "video" || meta.media_kind == "image" || meta.media_kind == "audio" {
+                options_store
+            } else {
+                options_deflate
+            };
+            zip.start_file(&entry.entry_path, opt)?;
             zip.write_all(data)?;
         }
 
@@ -304,6 +377,10 @@ impl BundleService {
         staged_export
             .persist(&target_path)
             .with_context(|| format!("Failed to publish bundle at {:?}", target_path))?;
+        progress(BundleProgress::StageDone {
+            stage: 3,
+            summary: "Bundle package finalized".into(),
+        });
         Ok(target_path)
     }
 
@@ -340,6 +417,25 @@ impl BundleService {
         replace: bool,
         merge: bool,
     ) -> Result<BundleImportResult> {
+        Self::import_bundle_with_progress(storage, bundle_path, replace, merge, |_| {})
+    }
+
+    /// Import a bundle with structured progress reporting
+    pub fn import_bundle_with_progress<F>(
+        storage: &Storage,
+        bundle_path: &Path,
+        replace: bool,
+        merge: bool,
+        mut progress: F,
+    ) -> Result<BundleImportResult>
+    where
+        F: FnMut(BundleProgress),
+    {
+        progress(BundleProgress::StageStart {
+            stage: 1,
+            total_stages: 3,
+            title: "Inspecting bundle manifest & verifying integrity...".into(),
+        });
         let existing_count = storage.count_memories(None, None, None)?;
         anyhow::ensure!(merge || replace || existing_count == 0,
             "Target database already contains {} memories. Pass --replace to completely overwrite the vault with this transfer bundle, or --merge to combine them.", existing_count);
@@ -388,15 +484,28 @@ impl BundleService {
             db_bytes.len() as u64 == manifest.db_size_bytes && db_bytes.len() as u64 <= MAX_DB_SIZE,
             "Database decompressed size does not match manifest"
         );
+        progress(BundleProgress::StageDone {
+            stage: 1,
+            summary: format!(
+                "Database verified ({:.1} MB)",
+                db_bytes.len() as f64 / 1_048_576.0
+            ),
+        });
 
         // Validate every declared member in a private directory. Nothing under
         // the live attachments root is opened during extraction.
+        progress(BundleProgress::StageStart {
+            stage: 2,
+            total_stages: 3,
+            title: "Extracting & validating attachments...".into(),
+        });
         let incoming = temp_dir.path().join("incoming");
         std::fs::create_dir(&incoming)?;
         let mut extracted_count = 0;
         let mut total_extracted_bytes = 0u64;
         let mut destinations = HashSet::new();
-        for att in &manifest.attachments {
+        let total_att = manifest.attachments.len();
+        for (idx, att) in manifest.attachments.iter().enumerate() {
             let filename = att
                 .entry_path
                 .strip_prefix("attachments/")
@@ -450,10 +559,33 @@ impl BundleService {
             file.persist(incoming.join(filename))?;
             extracted_count += 1;
             total_extracted_bytes += data.len() as u64;
+            progress(BundleProgress::FileProgress {
+                current: idx + 1,
+                total: total_att,
+                filename: att.filename.clone(),
+                bytes: data.len() as u64,
+            });
         }
+        progress(BundleProgress::StageDone {
+            stage: 2,
+            summary: format!(
+                "{} files ({:.1} MB)",
+                extracted_count,
+                total_extracted_bytes as f64 / 1_048_576.0
+            ),
+        });
 
         // Opening/migrating the private database rejects incompatible schemas
         // before any live filesystem publication (restore also validates itself).
+        progress(BundleProgress::StageStart {
+            stage: 3,
+            total_stages: 3,
+            title: if merge {
+                "Merging memories into active vault...".into()
+            } else {
+                "Restoring active vault database...".into()
+            },
+        });
         let temp_storage = Storage::open(&temp_db_path)?;
         let restored_count = temp_storage.count_memories(None, None, None)?;
         let mut attachment_swap = AttachmentSwap::publish(temp_dir, &attachments_dir, merge)?;
@@ -476,6 +608,10 @@ impl BundleService {
             }
         };
         attachment_swap.committed = true;
+        progress(BundleProgress::StageDone {
+            stage: 3,
+            summary: format!("{} memories committed", memories_imported),
+        });
 
         Ok(BundleImportResult {
             bundle_file: bundle_path.to_path_buf(),

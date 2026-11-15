@@ -750,3 +750,90 @@ pub fn complete_connections(shell: clap_complete::Shell, script: String) -> Stri
         _ => script,
     }
 }
+
+/// Smooth, branded terminal progress bar using LightMem's Unicode block characters (`▰` / `▱`).
+pub struct TerminalProgress {
+    prefix: String,
+    total: usize,
+    width: usize,
+    is_tty: bool,
+    start_time: std::time::Instant,
+}
+
+impl TerminalProgress {
+    pub fn new(prefix: impl Into<String>, total: usize) -> Self {
+        let is_tty = io::stderr().is_terminal();
+        Self {
+            prefix: prefix.into(),
+            total,
+            width: 20,
+            is_tty,
+            start_time: std::time::Instant::now(),
+        }
+    }
+
+    pub fn set_total(&mut self, total: usize) {
+        self.total = total;
+    }
+
+    pub fn update(&self, current: usize, message: &str) {
+        if !self.is_tty {
+            return;
+        }
+        let pct = if self.total == 0 {
+            100
+        } else {
+            (current * 100) / self.total
+        };
+        let filled = if self.total == 0 {
+            self.width
+        } else {
+            (current * self.width) / self.total
+        };
+        let unfilled = self.width.saturating_sub(filled);
+        let bar_filled: String = "▰".repeat(filled);
+        let bar_unfilled: String = "▱".repeat(unfilled);
+
+        let max_msg_len = 32;
+        let display_msg = if message.chars().count() > max_msg_len {
+            let mut s = message.chars().take(max_msg_len.saturating_sub(3)).collect::<String>();
+            s.push_str("...");
+            s
+        } else {
+            message.to_string()
+        };
+
+        eprint!(
+            "\r  \x1b[38;2;113;113;122m▸\x1b[0m {:<14} \x1b[38;2;220;38;38m{}\x1b[38;2;63;63;70m{}\x1b[0m {:>3}% ({}/{})  \x1b[38;2;161;161;170m{}\x1b[0m\x1b[K",
+            self.prefix,
+            bar_filled,
+            bar_unfilled,
+            pct,
+            current,
+            self.total,
+            display_msg
+        );
+        let _ = io::stderr().flush();
+    }
+
+    pub fn finish(&self, message: &str) {
+        if self.is_tty {
+            let bar_filled: String = "▰".repeat(self.width);
+            let elapsed = self.start_time.elapsed();
+            let elapsed_str = if elapsed.as_secs() > 0 {
+                format!("{:.1}s", elapsed.as_secs_f32())
+            } else {
+                format!("{}ms", elapsed.as_millis())
+            };
+            eprintln!(
+                "\r  \x1b[38;2;113;113;122m▸\x1b[0m {:<14} \x1b[38;2;34;197;94m{}\x1b[0m 100% ({}/{})  \x1b[38;2;34;197;94m{} ({})\x1b[0m\x1b[K",
+                self.prefix,
+                bar_filled,
+                self.total,
+                self.total,
+                message,
+                elapsed_str
+            );
+        }
+    }
+}

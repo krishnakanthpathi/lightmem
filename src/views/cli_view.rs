@@ -2193,4 +2193,72 @@ impl CliView {
         println!();
         Ok(())
     }
+
+    /// Render a standardized, branded LightMem error card with reasons and actionable suggestions.
+    pub fn render_error(err: &CliErrorCard, json: bool) {
+        if json {
+            let details_map: serde_json::Map<String, serde_json::Value> = err
+                .details
+                .iter()
+                .map(|(k, v)| (k.to_lowercase().replace(' ', "_"), serde_json::Value::String(v.to_string())))
+                .collect();
+            let mut payload = serde_json::json!({
+                "status": "error",
+                "title": err.title,
+                "reason": err.reason,
+                "suggestions": err.suggestions.iter().map(|(l, c)| serde_json::json!({"action": l, "command": c})).collect::<Vec<_>>(),
+            });
+            if let Some(obj) = payload.as_object_mut() {
+                for (k, v) in details_map {
+                    obj.insert(k, v);
+                }
+            }
+            eprintln!("{}", payload);
+            return;
+        }
+
+        eprintln!();
+        eprintln!(
+            "  {} {}",
+            Self::crimson_bold("⚠️ "),
+            Self::crimson_bold(err.title)
+        );
+        eprintln!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        eprintln!(
+            "  {} {:<16} {}",
+            Self::slate("◈"),
+            Self::white_bold("Reason:"),
+            err.reason
+        );
+        for (label, val) in err.details {
+            eprintln!(
+                "  {} {:<16} {}",
+                Self::slate("◈"),
+                Self::white_bold(&format!("{}:", label)),
+                val
+            );
+        }
+        if !err.suggestions.is_empty() {
+            eprintln!();
+            eprintln!("  {} {}", Self::gold("💡"), Self::white_bold("How to fix:"));
+            for (action, cmd) in err.suggestions {
+                eprintln!(
+                    "    {} {:<18} {}",
+                    Self::slate("•"),
+                    action,
+                    cmd.cyan()
+                );
+            }
+        }
+        eprintln!();
+    }
+}
+
+/// Standardized CLI Error description for `CliView::render_error`.
+#[derive(Debug, Clone)]
+pub struct CliErrorCard<'a> {
+    pub title: &'a str,
+    pub reason: &'a str,
+    pub details: &'a [(&'a str, &'a str)],
+    pub suggestions: &'a [(&'a str, &'a str)],
 }

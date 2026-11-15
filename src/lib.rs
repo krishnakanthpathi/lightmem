@@ -36,4 +36,4 @@ pub use services::{
     Top1Reranker, UnlinkRequest,
 };
 
-pub use views::CliView;
+pub use views::{CliErrorCard, CliView};

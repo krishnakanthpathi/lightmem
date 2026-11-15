@@ -19,7 +19,8 @@ pub use api_server::{
     RecallRequest, RememberRequest, ServerOptions, UnlinkRequest,
 };
 pub use bundle::{
-    BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService, BundleStats,
+    BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleProgress, BundleService,
+    BundleStats,
 };
 pub use connect::{ConnectResult, ConnectService, PlatformInfo};
 pub use docs_server::{serve_docs, DocsOptions};

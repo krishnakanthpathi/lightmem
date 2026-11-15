@@ -1373,6 +1373,19 @@ impl LightMem {
         crate::services::BundleService::export_bundle(&self.storage, target_path)
     }
 
+    /// Export transfer bundle with structured progress reporting
+    pub fn export_bundle_with_progress(
+        &self,
+        target_path: Option<&Path>,
+        progress: impl FnMut(crate::services::BundleProgress),
+    ) -> Result<PathBuf> {
+        crate::services::BundleService::export_bundle_with_progress(
+            &self.storage,
+            target_path,
+            progress,
+        )
+    }
+
     /// Read and inspect a transfer bundle's manifest without unpacking
     pub fn inspect_bundle(&self, bundle_path: &Path) -> Result<crate::services::BundleManifest> {
         crate::services::BundleService::inspect_bundle(bundle_path)
@@ -1386,6 +1399,23 @@ impl LightMem {
         merge: bool,
     ) -> Result<crate::services::BundleImportResult> {
         crate::services::BundleService::import_bundle(&self.storage, bundle_path, replace, merge)
+    }
+
+    /// Import a transfer bundle with structured progress reporting
+    pub fn import_bundle_with_progress(
+        &self,
+        bundle_path: &Path,
+        replace: bool,
+        merge: bool,
+        progress: impl FnMut(crate::services::BundleProgress),
+    ) -> Result<crate::services::BundleImportResult> {
+        crate::services::BundleService::import_bundle_with_progress(
+            &self.storage,
+            bundle_path,
+            replace,
+            merge,
+            progress,
+        )
     }
 
     /// Import memories from an external file (.json, .jsonl, or .md/.okf) or an OKF bundle directory
