@@ -1561,11 +1561,7 @@ fn is_valid_qa_span(
     // Reject medium-margin spans (< 10.0) that echo question words
     // (e.g. "4 passport-sized photos" echoing "passport" on "what is my passport number")
     let echo_limit = if has_token_type_ids { 10.0 } else { 6.0 };
-    if margin < echo_limit && s_tokens.iter().any(|t| q_tokens.contains(t)) {
-        return false;
-    }
-
-    true
+    !(margin < echo_limit && s_tokens.iter().any(|t| q_tokens.contains(t)))
 }
 
 fn grounded(answer: &str, content: &str) -> bool {
