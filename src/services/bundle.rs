@@ -356,14 +356,22 @@ impl BundleService {
 
         // Write each video, photo, document attachment
         let total_files = manifest.attachments.len();
-        for (idx, (entry, (meta, data))) in manifest.attachments.iter().zip(attachments.iter()).enumerate() {
+        for (idx, (entry, (meta, data))) in manifest
+            .attachments
+            .iter()
+            .zip(attachments.iter())
+            .enumerate()
+        {
             progress(BundleProgress::FileProgress {
                 current: idx + 1,
                 total: total_files,
                 filename: entry.filename.clone(),
                 bytes: data.len() as u64,
             });
-            let opt = if meta.media_kind == "video" || meta.media_kind == "image" || meta.media_kind == "audio" {
+            let opt = if meta.media_kind == "video"
+                || meta.media_kind == "image"
+                || meta.media_kind == "audio"
+            {
                 options_store
             } else {
                 options_deflate

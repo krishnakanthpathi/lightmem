@@ -1019,7 +1019,9 @@ fn handle_remote_command(
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 CliView::render_remembered(&response.memory, Path::new(&client.base_url), false)?;
-                for warning in response.warnings { eprintln!("Warning: {}", warning); }
+                for warning in response.warnings {
+                    eprintln!("Warning: {}", warning);
+                }
             }
             Ok(true)
         }
@@ -1043,7 +1045,14 @@ fn handle_remote_command(
             anyhow::ensure!(image.is_none() && save_to.is_none() && !path && !open, "Remote recall does not support --image, --save-to, --path, or --open. Use local mode to download attachments.");
             if *precision {
                 anyhow::ensure!(media.is_none() && !multi_hop && min_similarity.is_none(), "Precision recall returns an answer; media, multi-hop, and similarity filters are not supported. Use recall without --precision for filtered results.");
-                let answer = client.answer(&lightmem::AnswerRequest { question: query.clone(), category: *category, as_of: *as_of, date: *date, limit: *limit, ..Default::default() })?;
+                let answer = client.answer(&lightmem::AnswerRequest {
+                    question: query.clone(),
+                    category: *category,
+                    as_of: *as_of,
+                    date: *date,
+                    limit: *limit,
+                    ..Default::default()
+                })?;
                 CliView::render_answer(&answer, *cmd_json || json)?;
                 return Ok(true);
             }
@@ -1136,13 +1145,27 @@ fn handle_remote_command(
             for term in terms {
                 if let Some(record) = client.get(term)? {
                     let links = client.links(&record.id)?;
-                    if as_json { inspected.push(serde_json::json!({"memory":record,"links":links})); }
-                    else { CliView::render_inspect(&record, &links, Path::new(&client.base_url), false)?; }
+                    if as_json {
+                        inspected.push(serde_json::json!({"memory":record,"links":links}));
+                    } else {
+                        CliView::render_inspect(
+                            &record,
+                            &links,
+                            Path::new(&client.base_url),
+                            false,
+                        )?;
+                    }
                 }
             }
             if as_json {
-                let value = if terms.len() > 1 { serde_json::json!(inspected) }
-                    else { inspected.into_iter().next().unwrap_or(serde_json::Value::Null) };
+                let value = if terms.len() > 1 {
+                    serde_json::json!(inspected)
+                } else {
+                    inspected
+                        .into_iter()
+                        .next()
+                        .unwrap_or(serde_json::Value::Null)
+                };
                 println!("{}", serde_json::to_string_pretty(&value)?);
             }
 
@@ -1290,15 +1313,30 @@ fn handle_remote_command(
             Ok(true)
         }
 
-        Commands::Config { .. } | Commands::Setup { .. } | Commands::Docs { .. }
-        | Commands::Bundle { action: BundleCommand::Info { .. }, .. }
-        | Commands::Serve { .. } | Commands::Version { .. } | Commands::Completions { .. }
-        | Commands::Connect { mcp: false, .. } | Commands::Uninstall { .. }
-        | Commands::Local { .. } | Commands::Remote { .. } => Ok(false),
+        Commands::Config { .. }
+        | Commands::Setup { .. }
+        | Commands::Docs { .. }
+        | Commands::Bundle {
+            action: BundleCommand::Info { .. },
+            ..
+        }
+        | Commands::Serve { .. }
+        | Commands::Version { .. }
+        | Commands::Completions { .. }
+        | Commands::Connect { mcp: false, .. }
+        | Commands::Uninstall { .. }
+        | Commands::Local { .. }
+        | Commands::Remote { .. } => Ok(false),
         cmd => {
             let cmd_name = match cmd {
-                Commands::Bundle { action: BundleCommand::Export { .. }, .. } => "bundle export",
-                Commands::Bundle { action: BundleCommand::Import { .. }, .. } => "bundle import",
+                Commands::Bundle {
+                    action: BundleCommand::Export { .. },
+                    ..
+                } => "bundle export",
+                Commands::Bundle {
+                    action: BundleCommand::Import { .. },
+                    ..
+                } => "bundle import",
                 Commands::Clear { .. } => "clear",
                 Commands::Restore { .. } => "restore",
                 Commands::Inspect { .. } => "inspect",
@@ -1333,7 +1371,10 @@ fn handle_remote_command(
                         ],
                         suggestions: &[
                             ("Switch to local:", "lmem local"),
-                            ("Explicit local vault:", &format!("lmem --db ~/.lightmem/memories.db {cmd_name}")),
+                            (
+                                "Explicit local vault:",
+                                &format!("lmem --db ~/.lightmem/memories.db {cmd_name}"),
+                            ),
                         ],
                     },
                     false,
@@ -1409,7 +1450,9 @@ fn handle_remote_network_error(remote_url: &str, err: &anyhow::Error, json: bool
         eprintln!(
             "\n{} {}",
             "⚠️".yellow(),
-            format!("Authentication failed (401 Unauthorized) at {remote_url}").red().bold()
+            format!("Authentication failed (401 Unauthorized) at {remote_url}")
+                .red()
+                .bold()
         );
         eprintln!(
             "  {} {:<12} The remote server requires a valid API key.",
@@ -1441,7 +1484,9 @@ fn handle_remote_network_error(remote_url: &str, err: &anyhow::Error, json: bool
         eprintln!(
             "\n{} {}",
             "⚠️".yellow(),
-            format!("Cannot connect to remote server at {remote_url}").yellow().bold()
+            format!("Cannot connect to remote server at {remote_url}")
+                .yellow()
+                .bold()
         );
         eprintln!(
             "  {} {:<12} Remote server is offline or unreachable.",
@@ -1721,7 +1766,8 @@ fn main() -> Result<()> {
                 "Vault".dimmed(),
                 CliView::format_path(&default_vault).bold()
             );
-            if std::env::var("LIGHTMEM_REMOTE_URL").is_ok() || std::env::var("LIGHTMEM_URL").is_ok() {
+            if std::env::var("LIGHTMEM_REMOTE_URL").is_ok() || std::env::var("LIGHTMEM_URL").is_ok()
+            {
                 println!(
                     "  {} Note: Environment variable LIGHTMEM_REMOTE_URL/LIGHTMEM_URL is active.",
                     "⚠️".yellow()
@@ -1740,10 +1786,14 @@ fn main() -> Result<()> {
             }
             None => {
                 if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-                    let (u, k) = terminal::prompt_remote(cfg.remote_url.as_deref(), cfg.api_key.as_deref())?;
+                    let (u, k) =
+                        terminal::prompt_remote(cfg.remote_url.as_deref(), cfg.api_key.as_deref())?;
                     (u, api_key.clone().or(k))
                 } else {
-                    let default_u = cfg.remote_url.clone().unwrap_or_else(|| "http://localhost:8080".to_string());
+                    let default_u = cfg
+                        .remote_url
+                        .clone()
+                        .unwrap_or_else(|| "http://localhost:8080".to_string());
                     let clean = terminal::normalize_http_url(&default_u)?;
                     (clean, api_key.clone().or_else(|| cfg.api_key.clone()))
                 }
@@ -1760,7 +1810,8 @@ fn main() -> Result<()> {
         }
         cfg.save()?;
 
-        let client = lightmem::RemoteClient::new(&target_url, cfg.effective_api_key()).with_timeout(std::time::Duration::from_millis(1200));
+        let client = lightmem::RemoteClient::new(&target_url, cfg.effective_api_key())
+            .with_timeout(std::time::Duration::from_millis(1200));
         let probe_res = client.stats();
         let is_connected = probe_res.is_ok();
 
@@ -1826,10 +1877,9 @@ fn main() -> Result<()> {
             }
             if cfg.api_key.is_some() {
                 println!(
-                    "  {} {:<10} {}",
+                    "  {} {:<10} API key configured",
                     "✦".dimmed(),
-                    "Auth".dimmed(),
-                    "API key configured"
+                    "Auth".dimmed()
                 );
             }
         }
@@ -2581,7 +2631,12 @@ fn main() -> Result<()> {
                         CliView::crimson_bold("❖"),
                         CliView::white_bold("L I G H T M E M  Bundle Export")
                     );
-                    eprintln!("  {}", CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+                    eprintln!(
+                        "  {}",
+                        CliView::crimson(
+                            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                    );
                     if let Some(out_p) = output.as_deref() {
                         eprintln!(
                             "  {} {:<16} {}",
@@ -2604,9 +2659,16 @@ fn main() -> Result<()> {
                         return;
                     }
                     match prog {
-                        lightmem::services::BundleProgress::StageStart { stage, total_stages, title } => {
+                        lightmem::services::BundleProgress::StageStart {
+                            stage,
+                            total_stages,
+                            title,
+                        } => {
                             if stage == 1 || stage == 2 {
-                                eprint!("  \x1b[38;2;113;113;122m▸\x1b[0m [{}/{}] {:<38}", stage, total_stages, title);
+                                eprint!(
+                                    "  \x1b[38;2;113;113;122m▸\x1b[0m [{}/{}] {:<38}",
+                                    stage, total_stages, title
+                                );
                                 let _ = std::io::stderr().flush();
                             }
                         }
@@ -2617,7 +2679,12 @@ fn main() -> Result<()> {
                                 progress_bar.finish("Archive finalized");
                             }
                         }
-                        lightmem::services::BundleProgress::FileProgress { current, total, filename, .. } => {
+                        lightmem::services::BundleProgress::FileProgress {
+                            current,
+                            total,
+                            filename,
+                            ..
+                        } => {
                             progress_bar.set_total(total);
                             progress_bar.update(current, &filename);
                         }
@@ -2646,7 +2713,12 @@ fn main() -> Result<()> {
                         CliView::crimson_bold("❖"),
                         CliView::white_bold("L I G H T M E M  Bundle Import")
                     );
-                    eprintln!("  {}", CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+                    eprintln!(
+                        "  {}",
+                        CliView::crimson(
+                            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                    );
                     eprintln!(
                         "  {} {:<16} {}",
                         CliView::slate("◫"),
@@ -2657,7 +2729,13 @@ fn main() -> Result<()> {
                         "  {} {:<16} {}",
                         CliView::slate("◈"),
                         CliView::white_bold("Mode:"),
-                        if replace { "Overwrite / Replace active vault (--replace)" } else if merge { "Merge into active vault (--merge)" } else { "Import into empty vault" }
+                        if replace {
+                            "Overwrite / Replace active vault (--replace)"
+                        } else if merge {
+                            "Merge into active vault (--merge)"
+                        } else {
+                            "Import into empty vault"
+                        }
                     );
                     eprintln!();
                 }
@@ -2667,9 +2745,16 @@ fn main() -> Result<()> {
                         return;
                     }
                     match prog {
-                        lightmem::services::BundleProgress::StageStart { stage, total_stages, title } => {
+                        lightmem::services::BundleProgress::StageStart {
+                            stage,
+                            total_stages,
+                            title,
+                        } => {
                             if stage == 1 || stage == 3 {
-                                eprint!("  \x1b[38;2;113;113;122m▸\x1b[0m [{}/{}] {:<42}", stage, total_stages, title);
+                                eprint!(
+                                    "  \x1b[38;2;113;113;122m▸\x1b[0m [{}/{}] {:<42}",
+                                    stage, total_stages, title
+                                );
                                 let _ = std::io::stderr().flush();
                             }
                         }
@@ -2680,7 +2765,12 @@ fn main() -> Result<()> {
                                 progress_bar.finish("All attachments extracted");
                             }
                         }
-                        lightmem::services::BundleProgress::FileProgress { current, total, filename, .. } => {
+                        lightmem::services::BundleProgress::FileProgress {
+                            current,
+                            total,
+                            filename,
+                            ..
+                        } => {
                             progress_bar.set_total(total);
                             progress_bar.update(current, &filename);
                         }
@@ -2795,10 +2885,20 @@ fn main() -> Result<()> {
                         "  {} {} {}",
                         CliView::emerald_bold("✓"),
                         CliView::white_bold("Embedding Engine Verified:"),
-                        CliView::violet_bold(&format!("{} dimensions ({})", dimensions, cfg.backend))
+                        CliView::violet_bold(&format!(
+                            "{} dimensions ({})",
+                            dimensions, cfg.backend
+                        ))
                     );
-                    println!("    {} Status: Online and operational (disposable test; no memory saved).", CliView::crimson("◈"));
-                    println!("    {} Tip:    Test answer reranking with '{}'.", CliView::gold("💡"), CliView::violet("lmem answer \"<question>\""));
+                    println!(
+                        "    {} Status: Online and operational (disposable test; no memory saved).",
+                        CliView::crimson("◈")
+                    );
+                    println!(
+                        "    {} Tip:    Test answer reranking with '{}'.",
+                        CliView::gold("💡"),
+                        CliView::violet("lmem answer \"<question>\"")
+                    );
                     println!();
                 }
                 return Ok(());
@@ -3645,7 +3745,10 @@ fn handle_serve(
                     "\x1b[38;2;234;179;8m(Starting...)\x1b[0m"
                 }
             );
-            println!("  \x1b[38;2;113;113;122m▸\x1b[0m Process PID:       {}", pid);
+            println!(
+                "  \x1b[38;2;113;113;122m▸\x1b[0m Process PID:       {}",
+                pid
+            );
             if host_str == "0.0.0.0" {
                 println!(
                     "  \x1b[38;2;113;113;122m▸\x1b[0m Listening:         0.0.0.0:{} (all interfaces)",
@@ -3818,7 +3921,9 @@ fn handle_serve(
                 eprintln!(
                     "\n{} {}",
                     "⚠️".yellow(),
-                    format!("Cannot start daemon on {}:{}", host, port).yellow().bold()
+                    format!("Cannot start daemon on {}:{}", host, port)
+                        .yellow()
+                        .bold()
                 );
                 eprintln!(
                     "  {} {:<12} Port {} is already in use by another process.",
@@ -3948,7 +4053,9 @@ fn handle_serve(
             eprintln!(
                 "\n{} {}",
                 "⚠️".yellow(),
-                format!("Cannot start server on {}:{}", host, port).yellow().bold()
+                format!("Cannot start server on {}:{}", host, port)
+                    .yellow()
+                    .bold()
             );
             eprintln!(
                 "  {} {:<12} Port {} is already in use by another process.",

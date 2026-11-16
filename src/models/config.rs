@@ -76,8 +76,7 @@ impl LightMemConfig {
             "ollama:",
             "llm:",
         ] {
-            if trimmed.len() > prefix.len()
-                && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
+            if trimmed.len() > prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
             {
                 let clean_p = if prefix.eq_ignore_ascii_case("llm:") {
                     "ollama:"
@@ -94,7 +93,8 @@ impl LightMemConfig {
             return Self::normalize_reranker(onnx_m, None);
         }
         match lower.as_str() {
-            "ollama" | "openai" | "openrouter" | "gemini" | "groq" | "deepseek" | "mistral" | "llm" => {
+            "ollama" | "openai" | "openrouter" | "gemini" | "groq" | "deepseek" | "mistral"
+            | "llm" => {
                 if let Some(qm) = legacy_qa.map(str::trim).filter(|m| {
                     !m.is_empty() && !matches!(*m, "minilm-squad2" | "tinyroberta-squad2")
                 }) {
@@ -242,7 +242,11 @@ impl LightMemConfig {
         } else if lower.starts_with("groq:") || lower == "groq" {
             ("groq", "https://api.groq.com/openai", Some("GROQ_API_KEY"))
         } else if lower.starts_with("deepseek:") || lower == "deepseek" {
-            ("deepseek", "https://api.deepseek.com", Some("DEEPSEEK_API_KEY"))
+            (
+                "deepseek",
+                "https://api.deepseek.com",
+                Some("DEEPSEEK_API_KEY"),
+            )
         } else if lower.starts_with("mistral:") || lower == "mistral" {
             ("mistral", "https://api.mistral.ai", Some("MISTRAL_API_KEY"))
         } else if lower == "top1" {
@@ -368,14 +372,22 @@ impl LightMemConfig {
     pub fn active_provider_summary(&self) -> (&'static str, String) {
         let (prov, _def_url, key_env) = self.active_provider();
         let eff_url = self.effective_ollama_url();
-        if prov == "onnx" && (self.entity_extraction.eq_ignore_ascii_case("off") || !self.has_active_llm()) {
+        if prov == "onnx"
+            && (self.entity_extraction.eq_ignore_ascii_case("off") || !self.has_active_llm())
+        {
             return (
                 "Local",
-                format!("{} (local ONNX Extractive QA, offline @ {})", self.reranker, eff_url),
+                format!(
+                    "{} (local ONNX Extractive QA, offline @ {})",
+                    self.reranker, eff_url
+                ),
             );
         }
         if prov == "top1" && self.entity_extraction.eq_ignore_ascii_case("off") {
-            return ("Top-1", "top1 (direct rank-1 selection; no generative model)".to_string());
+            return (
+                "Top-1",
+                "top1 (direct rank-1 selection; no generative model)".to_string(),
+            );
         }
         let eff_url = self.effective_ollama_url();
         let cred_disp = if self

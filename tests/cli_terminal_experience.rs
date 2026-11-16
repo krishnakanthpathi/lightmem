@@ -326,7 +326,13 @@ fn local_and_remote_commands_workflow() {
     f.demo();
 
     // Configure remote with lmem remote
-    let out = f.json(&["remote", "http://127.0.0.1:8080", "--api-key", "test-key", "--json"]);
+    let out = f.json(&[
+        "remote",
+        "http://127.0.0.1:8080",
+        "--api-key",
+        "test-key",
+        "--json",
+    ]);
     assert_eq!(out["mode"], "remote");
     assert_eq!(out["remote_url"], "http://127.0.0.1:8080");
     assert_eq!(out["has_api_key"], true);
@@ -344,4 +350,3 @@ fn local_and_remote_commands_workflow() {
     let cfg = f.json(&["config", "--json"]);
     assert!(cfg["remote_url"].is_null());
 }
-

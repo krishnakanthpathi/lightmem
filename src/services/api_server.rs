@@ -1007,28 +1007,27 @@ pub fn discover_host_endpoints() -> Vec<NetworkEndpoint> {
                 if !lower_name.starts_with("docker")
                     && !lower_name.starts_with("br-")
                     && !lower_name.starts_with("veth")
+                    && seen_ips.insert(ip)
                 {
-                    if seen_ips.insert(ip) {
-                        let octets = ip.octets();
-                        let is_tailscale = (octets[0] == 100 && (64..=127).contains(&octets[1]))
-                            || lower_name.contains("tailscale");
+                    let octets = ip.octets();
+                    let is_tailscale = (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                        || lower_name.contains("tailscale");
 
-                        let label = if ip.is_loopback() {
-                            "Localhost"
-                        } else if is_tailscale {
-                            "Tailscale"
-                        } else if ip.is_private() {
-                            "Local LAN"
-                        } else {
-                            "Public / WAN"
-                        };
+                    let label = if ip.is_loopback() {
+                        "Localhost"
+                    } else if is_tailscale {
+                        "Tailscale"
+                    } else if ip.is_private() {
+                        "Local LAN"
+                    } else {
+                        "Public / WAN"
+                    };
 
-                        endpoints.push(NetworkEndpoint {
-                            label,
-                            ip,
-                            if_name: name,
-                        });
-                    }
+                    endpoints.push(NetworkEndpoint {
+                        label,
+                        ip,
+                        if_name: name,
+                    });
                 }
             }
             curr = ifa.ifa_next;

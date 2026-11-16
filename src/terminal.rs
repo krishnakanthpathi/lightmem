@@ -1,8 +1,8 @@
 //! Short, line-oriented terminal interactions. Never open a controller for inspection.
 use anyhow::{bail, ensure, Context, Result};
+use colored::*;
 use lightmem::{CliView, LightMemConfig, MemoryContext, MemoryScope};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use colored::*;
 use serde_json::json;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -176,7 +176,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
             }
             "3" => {
                 cfg.apply_preset("local")?;
-                eprintln!("  Supported providers: openai, openrouter, gemini, groq, deepseek, mistral");
+                eprintln!(
+                    "  Supported providers: openai, openrouter, gemini, groq, deepseek, mistral"
+                );
                 let provider = value("Provider", "openai")?.to_lowercase();
                 let default_model = match provider.as_str() {
                     "openrouter" => "anthropic/claude-3.5-sonnet",
@@ -306,7 +308,10 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
         }
         "3" => {
             eprintln!("LLM extraction sends newly saved memory text to {}. Search and answers are separate.", cfg.effective_ollama_url());
-            cfg.entity_extraction = value("Entity extraction: off, llm, or <provider>:<model>", &cfg.entity_extraction)?;
+            cfg.entity_extraction = value(
+                "Entity extraction: off, llm, or <provider>:<model>",
+                &cfg.entity_extraction,
+            )?;
         }
         "4" => {
             eprintln!("This is the memory server, separate from the model service. Environment routing can override saved values.");
@@ -625,7 +630,10 @@ pub fn doctor(
             CliView::crimson_bold("❖"),
             CliView::white_bold("L I G H T M E M  Doctor Diagnostics")
         );
-        println!("  {}", CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        println!(
+            "  {}",
+            CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
         println!(
             "  {} {:<18} {} ({})",
             CliView::slate("◫"),
@@ -661,13 +669,7 @@ pub fn doctor(
                 _ => (CliView::slate("○"), CliView::slate(name)),
             };
             let prefix = if i == last_idx { "  ╰─" } else { "  │ " };
-            println!(
-                "{} {} {:<16} {}",
-                prefix,
-                glyph,
-                styled_name,
-                message
-            );
+            println!("{} {} {:<16} {}", prefix, glyph, styled_name, message);
         }
         println!();
         if ok {
@@ -680,7 +682,9 @@ pub fn doctor(
             println!(
                 "  {} {}",
                 "⚠️".yellow().bold(),
-                "One or more diagnostic checks require attention.".yellow().bold()
+                "One or more diagnostic checks require attention."
+                    .yellow()
+                    .bold()
             );
         }
         println!();
@@ -785,23 +789,20 @@ impl TerminalProgress {
         if !self.is_tty {
             return;
         }
-        let pct = if self.total == 0 {
-            100
-        } else {
-            (current * 100) / self.total
-        };
-        let filled = if self.total == 0 {
-            self.width
-        } else {
-            (current * self.width) / self.total
-        };
+        let pct = (current * 100).checked_div(self.total).unwrap_or(100);
+        let filled = (current * self.width)
+            .checked_div(self.total)
+            .unwrap_or(self.width);
         let unfilled = self.width.saturating_sub(filled);
         let bar_filled: String = "▰".repeat(filled);
         let bar_unfilled: String = "▱".repeat(unfilled);
 
         let max_msg_len = 32;
         let display_msg = if message.chars().count() > max_msg_len {
-            let mut s = message.chars().take(max_msg_len.saturating_sub(3)).collect::<String>();
+            let mut s = message
+                .chars()
+                .take(max_msg_len.saturating_sub(3))
+                .collect::<String>();
             s.push_str("...");
             s
         } else {

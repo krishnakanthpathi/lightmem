@@ -263,16 +263,8 @@ impl CliView {
                 "lmem answer \"<question>\"",
                 "Extractive QA via ONNX or Ollama",
             ),
-            (
-                "│",
-                "lmem remote [url]",
-                "Connect to remote backend server",
-            ),
-            (
-                "│",
-                "lmem local",
-                "Switch back to local vault (disconnect)",
-            ),
+            ("│", "lmem remote [url]", "Connect to remote backend server"),
+            ("│", "lmem local", "Switch back to local vault (disconnect)"),
             ("│", "lmem graph", "Terminal network tree & connection map"),
             (
                 "│",
@@ -284,11 +276,7 @@ impl CliView {
                 "lmem list --page 1 --limit 20",
                 "Paginated chronological index",
             ),
-            (
-                "│",
-                "lmem doctor",
-                "Inspect system readiness & diagnostics",
-            ),
+            ("│", "lmem doctor", "Inspect system readiness & diagnostics"),
             (
                 "│",
                 "lmem connect <agent>",
@@ -1191,7 +1179,10 @@ impl CliView {
             Self::crimson_bold("❖"),
             Self::white_bold("L I G H T M E M  Active Context")
         );
-        println!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
         let mode = if value.get("mode").and_then(serde_json::Value::as_str) == Some("remote") {
             "Remote"
         } else {
@@ -1201,7 +1192,11 @@ impl CliView {
             "  {} {:<18} {}",
             Self::slate("◫"),
             Self::white_bold("Active Mode:"),
-            if mode == "Remote" { mode.cyan().bold() } else { mode.green().bold() }
+            if mode == "Remote" {
+                mode.cyan().bold()
+            } else {
+                mode.green().bold()
+            }
         );
         if let Some(db) = value.get("db_path").and_then(serde_json::Value::as_str) {
             println!(
@@ -1231,14 +1226,24 @@ impl CliView {
             ("session_id", "Session ID"),
         ] {
             if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-                println!("  │  {} {:<16} {}", Self::slate("▸"), label, text.white().bold());
+                println!(
+                    "  │  {} {:<16} {}",
+                    Self::slate("▸"),
+                    label,
+                    text.white().bold()
+                );
             }
         }
         if value
             .get("connection_id")
             .is_none_or(serde_json::Value::is_null)
         {
-            println!("  │  {} {:<16} {}", Self::slate("▸"), "Connection:", Self::slate("none (default/explicit local vault)"));
+            println!(
+                "  │  {} {:<16} {}",
+                Self::slate("▸"),
+                "Connection:",
+                Self::slate("none (default/explicit local vault)")
+            );
         }
         println!("  ╰────────────────────────────────────────────────────────────");
         println!();
@@ -1260,8 +1265,17 @@ impl CliView {
             Self::crimson_bold("❖"),
             Self::white_bold("L I G H T M E M  Configuration Preview")
         );
-        println!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-        println!("  {} {}", "⚠️".yellow(), "Preview Mode: No changes were applied to your system.".yellow().bold());
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
+        println!(
+            "  {} {}",
+            "⚠️".yellow(),
+            "Preview Mode: No changes were applied to your system."
+                .yellow()
+                .bold()
+        );
         println!();
         println!(
             "  {} {:<20} {}",
@@ -1276,10 +1290,9 @@ impl CliView {
             plan["selected_db"].as_str().unwrap_or_default()
         );
         println!(
-            "  {} {:<20} {}",
+            "  {} {:<20} shared across vaults in this root",
             Self::slate("✦"),
-            Self::white_bold("Setting Scope:"),
-            "shared across vaults in this root"
+            Self::white_bold("Setting Scope:")
         );
         println!();
 
@@ -1313,7 +1326,10 @@ impl CliView {
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Saved Remote:",
-            cfg.remote_url.as_deref().map(Self::violet_bold).unwrap_or_else(|| Self::slate("none"))
+            cfg.remote_url
+                .as_deref()
+                .map(Self::violet_bold)
+                .unwrap_or_else(|| Self::slate("none"))
         );
         let changes = plan["changed_fields"]
             .as_array()
@@ -1329,7 +1345,11 @@ impl CliView {
             "  │  {} {:<18} {}",
             Self::slate("▸"),
             "Changed Fields:",
-            if changes.is_empty() { Self::slate("none") } else { Self::gold_bold(&changes) }
+            if changes.is_empty() {
+                Self::slate("none")
+            } else {
+                Self::gold_bold(&changes)
+            }
         );
         let migration_req = plan["migration_required"] == true;
         println!(
@@ -1344,9 +1364,18 @@ impl CliView {
         );
         println!();
         if migration_req {
-            println!("  {} To apply changes and reindex: repeat without {} and add {}.", Self::gold("💡"), Self::violet("--dry-run"), Self::violet("--yes"));
+            println!(
+                "  {} To apply changes and reindex: repeat without {} and add {}.",
+                Self::gold("💡"),
+                Self::violet("--dry-run"),
+                Self::violet("--yes")
+            );
         } else {
-            println!("  {} To apply changes: repeat the same command without {}.", Self::gold("💡"), Self::violet("--dry-run"));
+            println!(
+                "  {} To apply changes: repeat the same command without {}.",
+                Self::gold("💡"),
+                Self::violet("--dry-run")
+            );
         }
         println!();
         Ok(())
@@ -1443,7 +1472,10 @@ impl CliView {
             Self::crimson_bold("❖"),
             Self::white_bold("L I G H T M E M  Configuration")
         );
-        println!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
 
         let active_db = effective_db
             .map(Path::to_path_buf)
@@ -1468,10 +1500,9 @@ impl CliView {
             Self::slate(&format!("({})", db_mode))
         );
         println!(
-            "  {} {:<20} {}",
+            "  {} {:<20} shared across vaults in this root",
             Self::slate("✦"),
-            Self::white_bold("Settings Scope:"),
-            "shared across vaults in this root"
+            Self::white_bold("Settings Scope:")
         );
         println!();
 
@@ -1610,14 +1641,34 @@ impl CliView {
                 Self::slate("No-download deterministic hash search (test mode)")
             );
             println!();
-            println!("  {} {}", Self::gold("💡"), Self::white_bold("Quick Actions:"));
+            println!(
+                "  {} {}",
+                Self::gold("💡"),
+                Self::white_bold("Quick Actions:")
+            );
             println!("    • Easy setup:       {}", Self::violet("lmem setup"));
-            println!("    • Change model:     {}", Self::violet("lmem config --model <provider>:<model>"));
-            println!("    • Set API key:      {}", Self::violet("lmem config --api-key <key>"));
+            println!(
+                "    • Change model:     {}",
+                Self::violet("lmem config --model <provider>:<model>")
+            );
+            println!(
+                "    • Set API key:      {}",
+                Self::violet("lmem config --api-key <key>")
+            );
             println!("    • Run diagnostics:  {}", Self::violet("lmem doctor"));
-            println!("    • Test embeddings:  {}", Self::violet("lmem config --test"));
-            println!("    • Switch mode:      {} or {}", Self::violet("lmem remote [url]"), Self::violet("lmem local"));
-            println!("    • All flags:        {}", Self::gold("lmem config --help"));
+            println!(
+                "    • Test embeddings:  {}",
+                Self::violet("lmem config --test")
+            );
+            println!(
+                "    • Switch mode:      {} or {}",
+                Self::violet("lmem remote [url]"),
+                Self::violet("lmem local")
+            );
+            println!(
+                "    • All flags:        {}",
+                Self::gold("lmem config --help")
+            );
             println!();
         }
         Ok(())
@@ -2293,7 +2344,12 @@ impl CliView {
             let details_map: serde_json::Map<String, serde_json::Value> = err
                 .details
                 .iter()
-                .map(|(k, v)| (k.to_lowercase().replace(' ', "_"), serde_json::Value::String(v.to_string())))
+                .map(|(k, v)| {
+                    (
+                        k.to_lowercase().replace(' ', "_"),
+                        serde_json::Value::String(v.to_string()),
+                    )
+                })
                 .collect();
             let mut payload = serde_json::json!({
                 "status": "error",
@@ -2316,7 +2372,10 @@ impl CliView {
             Self::crimson_bold("⚠️ "),
             Self::crimson_bold(err.title)
         );
-        eprintln!("  {}", Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+        eprintln!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
         eprintln!(
             "  {} {:<16} {}",
             Self::slate("◈"),
@@ -2335,12 +2394,7 @@ impl CliView {
             eprintln!();
             eprintln!("  {} {}", Self::gold("💡"), Self::white_bold("How to fix:"));
             for (action, cmd) in err.suggestions {
-                eprintln!(
-                    "    {} {:<18} {}",
-                    Self::slate("•"),
-                    action,
-                    cmd.cyan()
-                );
+                eprintln!("    {} {:<18} {}", Self::slate("•"), action, cmd.cyan());
             }
         }
         eprintln!();
