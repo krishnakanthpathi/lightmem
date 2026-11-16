@@ -13,7 +13,7 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 
 LLM entity extraction is off by default. Enable it explicitly through `lmem config --entity-extraction llm`. Configuration changes can require per-vault reindexing. Remote commands reject unsupported operations and attachment flags instead of silently falling back to local data. API keys in `config --json` are redacted.
 
-Native executable auto-downloads verify the release’s `SHA256SUMS` before safe extraction. Linux wheels use a generic `linux_x86_64` tag and an Ubuntu 22.04 build baseline; compatibility with older Linux distributions is not promised. The SDK remains a typed subprocess bridge; latency includes a native CLI launch for each method.
+Native executable auto-downloads verify the release’s `SHA256SUMS` before safe extraction. Linux wheels use standard `manylinux2014_x86_64` tags; compatibility with older Linux distributions is not promised. The SDK remains a typed subprocess bridge; latency includes a native CLI launch for each method.
 
 ## ⚡ Quickstart
 

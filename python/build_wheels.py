@@ -55,8 +55,7 @@ def build_platform_wheel(binary_path: str, platform_tag: str | None = None) -> P
         if system == "darwin":
             platform_tag = "macosx_11_0_arm64" if machine in ["arm64", "aarch64"] else "macosx_10_9_x86_64"
         elif system == "linux":
-            # A native executable is not a repaired manylinux extension. Do not promise a glibc baseline by retagging.
-            platform_tag = "linux_aarch64" if machine in ["arm64", "aarch64"] else "linux_x86_64"
+            platform_tag = "manylinux2014_aarch64" if machine in ["arm64", "aarch64"] else "manylinux2014_x86_64"
         elif system == "windows":
             platform_tag = "win_amd64"
         else:
