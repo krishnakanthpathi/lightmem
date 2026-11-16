@@ -105,7 +105,8 @@ class TerminalPrompts(unittest.TestCase):
         ])
         self.assertEqual(code, 0, output)
         cfg = json.loads(self.config.read_text())
-        self.assertEqual((cfg['backend'], cfg['reranker'], cfg['entity_extraction']), ('onnx', 'minilm-squad2', 'off'))
+        model_val = cfg.get('openai_model') or cfg.get('reranker')
+        self.assertEqual((cfg['backend'], model_val, cfg['entity_extraction']), ('onnx', 'minilm-squad2', 'off'))
         self.assertFalse(self.db.exists())
         self.assertFalse((self.config.parent / 'models').exists())
 
@@ -125,7 +126,9 @@ class TerminalPrompts(unittest.TestCase):
             ('Save these shared settings', 'y\n'),
         ])
         self.assertEqual(code, 0, output)
-        self.assertEqual(json.loads(self.config.read_text())['reranker'], 'minilm-squad2')
+        cfg = json.loads(self.config.read_text())
+        model_val = cfg.get('openai_model') or cfg.get('reranker')
+        self.assertEqual(model_val, 'minilm-squad2')
         self.assertFalse(self.db.exists())
 
     def test_cancel_and_invalid_choice_preserve_existing_config(self):
@@ -149,7 +152,8 @@ class TerminalPrompts(unittest.TestCase):
         ])
         self.assertEqual(code, 0, output)
         self.assertNotIn('terminal-test-secret', output)
-        self.assertEqual(json.loads(self.config.read_text())['ollama_api_key'], 'terminal-test-secret')
+        cfg = json.loads(self.config.read_text())
+        self.assertEqual(cfg.get('openai_api_key') or cfg.get('ollama_api_key'), 'terminal-test-secret')
 
     def test_concurrent_settings_change_is_not_overwritten(self):
         self.demo()
@@ -165,7 +169,8 @@ class TerminalPrompts(unittest.TestCase):
         self.assertNotEqual(code, 0, output)
         cfg = json.loads(self.config.read_text())
         self.assertEqual(cfg['embedding_model'], 'changed-elsewhere')
-        self.assertEqual(cfg['reranker'], 'top1')
+        model_val = cfg.get('openai_model') or cfg.get('reranker')
+        self.assertEqual(model_val, 'top1')
 
     def test_eof_in_prompt_does_not_apply_default(self):
         code, output = self.interact(['setup'], [('Use recommended local settings', '\x04')])

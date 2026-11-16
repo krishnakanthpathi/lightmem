@@ -5,41 +5,28 @@ description: Ultra-fast local AI agent persistent memory engine (`lmem`). Use th
 
 # LightMem (`lmem`) Skill
 
-Complete operational reference for using the `lmem` CLI to persist, retrieve, query, attach binary media/files, and maintain long-term agent memories across sessions.
+Operational reference for using the `lmem` CLI to persist, retrieve, query, attach media/files, and maintain agent memories across sessions.
 
 ---
 
-## Prerequisites & Installation
-
-If `lmem` is not installed or not found on PATH (`which lmem` fails), install it before running memory commands:
+## Quick Installation
 
 ```bash
-# Option 1: macOS & Linux (curl shell installer)
+# macOS & Linux
 curl -fsSL https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.sh | sh
 
-# Option 2: Windows PowerShell
-irm https://raw.githubusercontent.com/krishnakanthpathi/lightmem/main/install.ps1 | iex
-
-# Option 3: Python pip (bundles or auto-downloads binary to ~/.lightmem/bin)
+# Python pip
 pip install -U lmem
-
-# Option 4: Cargo (build from source)
-cargo install --git https://github.com/krishnakanthpathi/lightmem.git
-```
-
-Verify binary availability:
-```bash
-lmem --version
 ```
 
 ---
 
-## 1. Quick Command Reference
+## 1. Core CLI Commands
 
-Always execute `lmem` via shell commands. Never simulate memory storage or rely solely on ephemeral conversation history for long-term facts, preferences, or architectural decisions.
+Execute `lmem` via shell commands. Never simulate memory storage.
 
 ```bash
-# 1. Store a memory (auto-infers category if -t is omitted; auto-deduplicates exact matches; extracts entities only when explicitly enabled)
+# 1. Store a memory
 lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" \
   -t fact \
   --title "PostgreSQL Primary Config" \
@@ -47,293 +34,91 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
   --confidence 0.95 \
   --provenance validated \
   --supersede
-lmem remember "Ephemeral scratch note" --no-entities # Skip automatic LLM entity extraction
 
-# 1a. Store Files, Images, Audio & Documents (Isolated SQLite BLOBs + Metadata Indexing)
-lmem remember "Kubernetes ingress diagram" -f ./ingress.png       # Metadata-only default (filename, MIME, 1920x1080, SHA-256)
-lmem remember -f ./standup_note.wav -f ./spec.pdf                 # Attach multiple files (caption auto-generated if omitted)
-lmem remember "Architecture diagram" -f ./diagram.png --extract   # Opt-in: extract text/description via single configured LLM
-lmem inspect <MEMORY_ID> --save-to ./exported_files/              # Export SHA-256 verified binary attachment(s) back to disk
-lmem inspect <MEMORY_ID> --path                                   # Materialize verified attachment(s) and print ONLY absolute path(s) (alias: --paths, -p)
-lmem inspect <ID1> <ID2> --paths                                  # Print verified file paths across multiple memories (one path per line)
-lmem inspect <MEMORY_ID> --open                                   # Materialize and open attachment(s) immediately in default OS app
+# 2. Store Files, Images, Audio & Documents (0600 BLOB vault)
+lmem remember "Kubernetes ingress diagram" -f ./ingress.png
+lmem remember -f ./standup_note.wav -f ./spec.pdf
+lmem inspect <MEMORY_ID> --path                                 # Print absolute path of attachment
+lmem inspect <ID1> <ID2> --paths                                # Print absolute paths across memories
+lmem inspect <MEMORY_ID> --open                                 # Open attachment in default OS app
 
-# 1b. Conversational Ingestion & Observation (Extract candidate memories with confirmation)
-lmem observe "User: I prefer dark mode and JetBrains Mono.\nAssistant: Noted!" # Interactive review [y/n/a/q]
-lmem observe transcript.txt                            # Ingest transcript file with interactive review
-cat dialogue.jsonl | lmem observe                      # Pipe conversation via stdin
-lmem observe "User: PostgreSQL runs on port 5433" --yes # Confirm & persist all candidates immediately
-lmem observe chat.txt --dry-run                        # Preview candidate memories without saving
-lmem observe chat.txt --dry-run --json                 # Export candidates as JSON for agent inspection
-lmem observe chat.txt -r ollama:qwen2.5:3b             # Use LLM-assisted semantic extraction (aliases: observed, extract)
-
-# 2. Hybrid Search & Similarity Filtering (SQLite FTS5 BM25 + Vector Cosine RRF + Acronym Boost)
-
+# 3. Hybrid Search & Similarity Filtering
 lmem recall "postgres port" -l 5
-lmem recall "ingress.png" --media image                # Filter recall by attachment media kind (image|audio|video|document|code|any)
-lmem recall --image ./query.png                        # Visual image-to-memory search (native multimodal embeddings e.g. embeddinggemma-2)
-lmem recall "itachi sharingan" -m video -l 1 --path    # Recall and print ONLY the verified file path(s) on disk
-lmem recall "itachi sharingan" -l 1 --open             # Recall attachment(s) and open immediately in system default app
-lmem list --media video --paths                        # List all video attachments and print ONLY their absolute file paths
-lmem list --media audio                                # List memories with audio attachments
-lmem recall "postgres port" -t fact --min-similarity 0.5 --json
-lmem recall "new architectural idea" --min-similarity 0.70 -l 50 --json # Count & find semantically similar existing memories
-lmem recall "service gateway" --multi-hop          # Expands recall hits with 1-hop graph neighbors
+lmem recall "ingress.png" --media image                         # Filter by media kind (image|audio|video|document|code|any)
+lmem recall "diagram" -m image -l 1 --path                      # Print file path of top match
+lmem recall "service gateway" --multi-hop                       # Expand recall hits with 1-hop graph neighbors
 
-# 3. Knowledge Graph, Intentional Linking & Multi-Hop Traversal
-lmem remember "API Gateway routes to [[PostgreSQL DB]]" # Auto-links via [[wikilinks]]
-lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0  # Explicit directional relation
-lmem unlink <SRC_ID> <DST_ID>                       # Remove link
-lmem related <MEMORY_ID> -n 1 --json               # List & count direct 1-hop connected memories
-lmem related <MEMORY_ID> --hops 2                  # Multi-hop graph traversal with hop-decay scoring
-lmem graph                                         # ASCII/Unicode network tree in terminal
-lmem graph --focus <MEMORY_ID> --hops 2            # Neighborhood subgraph view
-lmem graph --focus <MEMORY_ID> -n 1 --json         # Focused neighborhood node & edge counts as JSON
-lmem graph --json                                  # Export graph nodes and edges as JSON
-lmem inspect <MEMORY_ID>                           # Inspect record, wikilinks, attachments, and extracted entities
+# 4. Knowledge Graph & Multi-Hop Traversal
+lmem remember "API Gateway routes to [[PostgreSQL DB]]"         # Auto-links via [[wikilinks]]
+lmem link <SRC_ID> <DST_ID> -r "depends_on" -w 1.0              # Explicit directional relation
+lmem unlink <SRC_ID> <DST_ID>                                   # Remove link
+lmem related <MEMORY_ID> --hops 2                               # Multi-hop graph traversal
+lmem graph --focus <MEMORY_ID> --hops 2                         # Visual subgraph view in terminal
 
-# 4. Extractive QA & Entity Answering (exact span from candidates or entity index)
-lmem answer "what is my pincode"                   # Exact entity answer without invoking the QA model
-lmem answer "what port does postgresql use"
-lmem answer "what is my pan card no" --json
-lmem answer "who is kk" -r ollama:qwen2.5:3b
+# 5. Neural Extractive QA & Grounded Answers
+lmem answer "what port does postgresql use"                     # Pinpoint fact extraction from memory index
+lmem answer "what is my pincode" --json
 
-# 5. Temporal & Single-Day Filtering (--as-of vs --date)
-lmem recall "deployment" --as-of 2026-10-01        # Cumulative state at that point in time
-lmem recall "deployment" --date 2026-10-05         # Memories created/updated on that exact UTC day
-lmem list --date 2026-10-05 -l 20                  # Chronological list for a single day
-lmem answer "what changed today" --date 2026-10-05
+# 6. Conflict & Duplicate Resolution
+lmem conflicts                                                  # Interactive review
+lmem conflicts --yes                                            # Auto-merge detected conflicts via model
+lmem conflicts --min-similarity 0.80 --json
 
-# 6. Paginated Chronological Listing
-lmem list --page 1 -l 20 -t decision --status active --json
-
-# 6. Nearest-Neighbor Conflict & Duplicate Resolution
-lmem conflicts                                     # Interactive [y]es / [n]o / [a]ll / [q]uit review
-lmem conflicts --yes                               # Auto-merge all detected conflicts via active reranker
-lmem conflicts --min-similarity 0.80 --json        # Inspect conflict pairs as JSON without merging
-
-# 7. Lifecycle & Expiration
-lmem remember "Staging deploy freeze until Friday" -t commitment --ttl 48h
+# 7. Lifecycle & Deletion
 lmem get <MEMORY_ID> --json
-lmem forget <MEMORY_ID>                            # Soft-retire (status -> expired, keeps audit trail)
-lmem forget <MEMORY_ID> --hard                     # Permanently purge row + vector + FTS index
+lmem forget <MEMORY_ID>                                         # Soft-retire (status -> expired)
+lmem forget <MEMORY_ID> --hard                                  # Permanently purge row + vector + FTS
 
-# 8. Import / Export & DB Transfer Bundles (.zip, OKF v2, JSONL, Mem0, LangChain, Letta, MCP Graph)
-lmem bundle export -o ./vault_backup.zip        # Single-file compressed DB transfer bundle (DB, all videos, photos, docs & vectors)
-lmem bundle info ./vault_backup.zip            # Inspect bundle manifest, counts, and attached video/photo summary
-lmem bundle import ./vault_backup.zip          # Restore entire vault + extract all videos/photos into destination attachments/
-lmem bundle import ./vault_backup.zip --merge  # Merge memories and media into existing vault without wiping
-lmem export -o ./memory_bundle                    # Export human-readable OKF v2 Markdown tree
-lmem export --json -o ./backup.json               # Full lossless JSON backup envelope
-lmem import ./backup.json --enrich             # Transactional import with heuristic enrichment
+# 8. Import / Export & DB Transfer Bundles
+lmem bundle export -o ./vault_backup.zip                        # Full vault backup (.zip with DB & all media)
+lmem bundle info ./vault_backup.zip                             # Inspect bundle manifest and media counts
+lmem bundle import ./vault_backup.zip                           # Restore entire vault
+lmem bundle import ./vault_backup.zip --merge                   # Merge into existing vault
 
-# 9. Engine, Reranker & Setup Wizard
-lmem setup                                         # Interactive CLI wizard: Local Ollama, Ollama Cloud, Custom, or Offline
-lmem setup --preset ollama-local                   # Configure Local Ollama LLM backend
-lmem setup --preset local                          # Configure local ONNX models; choose vault routing separately (bge-small + minilm-squad2)
-lmem config                                        # View active settings & available setup presets
-lmem config --json                                 # Machine-readable JSON configuration
-lmem config --entity-extraction off                # Keep entity extraction disabled
-lmem config --preset local                         # Preset 1: local ONNX models; entity extraction off
-lmem config --preset ollama-cloud                  # Preset 2: Local ONNX embeddings + Ollama gemma4:31b-cloud reranker
-lmem config --preset ollama-local                  # Preset 3: Local ONNX embeddings + Ollama localhost LLM reranker
-lmem config --download all                         # Pre-cache ONNX embedding + QA models for offline use
-lmem answer "test question" -r minilm-squad2       # Per-query ONNX reranker override
-lmem answer "test question" -r ollama:gemma4:31b-cloud # Per-query Ollama override
+# 9. Engine Configuration
+lmem setup                                                      # Interactive setup wizard
+lmem config                                                     # View active settings
+lmem config --backend onnx|ollama|hash                          # Set embedding backend
+lmem config --embedding-model <model>                           # Set vector embedding model
+lmem config --openai-model <model>                              # Set chat/QA model (e.g. gpt-4o-mini, ollama:qwen2.5:0.5b)
+lmem config --entity-extraction on|off                          # Toggle entity extraction
+lmem config --endpoint <url>                                    # Set OpenAI/LLM endpoint URL
+lmem config --api-key <key>                                     # Set API key for model service
+lmem config reload                                              # Reload settings from ~/.lightmem/config.json
+lmem doctor                                                     # Run system diagnostics
 
-# 10. AI Agent Platform Connection & Model Context Protocol (MCP)
-lmem connect                                       # Auto-detect all installed agent platforms and deploy skill
-lmem connect --mcp                                 # Auto-configure Model Context Protocol (MCP) in Claude, Cursor, Antigravity
-lmem connect claude --mcp                          # Configure MCP in Claude Desktop only
-lmem connect antigravity                           # Deploy to Google Antigravity (~/.gemini/config/skills/lightmem/SKILL.md)
-lmem connect codex                                 # Deploy to OpenAI Codex (~/.codex/skills/lightmem/SKILL.md)
-lmem connect hermes                                # Deploy to Hermes Agent (~/.hermes/skills/productivity/lightmem/SKILL.md)
-lmem connect cursor                                # Deploy to Cursor (.cursor/rules/lightmem.mdc)
-lmem connect all                                   # Deploy to all supported agent platforms
-lmem connect --list                                # Inspect detected agent platforms on the system
-lmem mcp                                           # Launch native MCP stdio server (tools: remember, recall, answer, graph_related, conflicts, config, forget, stats)
-
-# 11. Vault Dashboard, Identity Topology, Remote Backend Server & Embedded Docs
-lmem status                                        # Visual dashboard of all managed vaults, active connections, and storage
-lmem vaults                                        # Alias for lmem status (or lmem identity status)
-lmem status --json                                 # Machine-readable vault and connection topology
-lmem context                                       # Show active vault or remote connection status
-lmem serve --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server in foreground
-lmem serve -d --host 0.0.0.0 --port 8080 --api-key "secret" # Run backend server as background daemon
-lmem serve --status                                    # Check background daemon health and status
-lmem serve --stop                                      # Stop background daemon server cleanly
-lmem remote http://server:8080 --api-key "secret" # Connect client to remote backend (or interactive `lmem remote`)
-lmem local                                          # Revert back to local embedded SQLite mode (alias: disconnect)
-lmem config --remote http://server:8080 --api-key "secret" # Configure client via config command
-lmem config --clear-remote                         # Revert back to local embedded SQLite mode
-lmem docs                                         # Launch offline embedded docs HTTP server in foreground (aliases: doc, web, --port 8085)
+# 10. Remote Server & Client Routing
+lmem serve --host 0.0.0.0 --port 8080 --api-key "secret"        # Run server in foreground
+lmem serve -d --host 0.0.0.0 --port 8080 --api-key "secret"     # Run as background daemon
+lmem remote http://server:8080 --api-key "secret"               # Connect to remote LightMem
+lmem local                                                      # Disconnect and return to local mode
 ```
 
 ---
 
-## 2. The 14 Memory Categories (`-t` / `--type`)
+## 2. Memory Categories (`-t` / `--type`)
 
-If `--type` (`-t`) is omitted on `lmem remember`, LightMem automatically infers the category from explicit prefixes (`Decision:`, `Error:`, `TODO:`) or content heuristics. Passing `-t` explicitly is recommended for agent precision:
-
-| Category | When to Use | Recommended Confidence | Typical Provenance | Example |
-| :--- | :--- | :--- | :--- | :--- |
-| `fact` | Verified system facts, IDs, ports, URLs, personal/identity details | `0.90 - 1.00` | `validated` / `explicit_statement` | `"PAN ID is HAQPP8118D"` |
-| `decision` | Architectural choices, stack selections, design trade-offs | `0.90 - 1.00` | `explicit_statement` / `inferred` | `"Use SQLite WAL mode with FTS5 for local storage"` |
-| `instruction` | Standing user rules, coding conventions, mandatory constraints | `0.95 - 1.00` | `explicit_statement` | `"Never use hardcoded vendor token regexes in inference"` |
-| `preference` | User workflow, UI/UX, editor, or communication preferences | `0.85 - 1.00` | `explicit_statement` / `observed` | `"Deliver direct punchy answers with zero fluff"` |
-| `learning` | Post-debugging insights, non-obvious workarounds, root causes | `0.85 - 0.95` | `observed` / `corrected` | `"PowerShell ErrorActionPreference=Stop aborts on stderr progress bars"` |
-| `goal` | Project milestones, OKRs, long-term targets | `0.85 - 1.00` | `explicit_statement` | `"Achieve sub-10ms local extractive QA on CPU"` |
-| `commitment` | Action items, TODOs, promised deliverables | `0.90 - 1.00` | `explicit_statement` | `"Add Windows MSVC release artifact to v0.2.0"` |
-| `artifact` | File paths, generated reports, schemas, build outputs | `0.90 - 1.00` | `observed` | `"Release binaries are published via .github/workflows/release.yml"` |
-| `event` | Incidents, deployments, migrations, dated occurrences | `0.85 - 0.95` | `observed` | `"Migrated kk-Linux vault to v0.2.0 on 2026-10-05"` |
-| `relationship` | Ownership, team mapping, service-to-service dependencies | `0.85 - 0.95` | `explicit_statement` | `"API Gateway routes /v1/auth to Keycloak cluster"` |
-| `observation` | Empirical runtime measurements, benchmark findings | `0.75 - 0.90` | `observed` | `"minilm-squad2 ONNX latency averages 6.1ms per query on CPU"` |
-| `error` | Crash signatures, stack traces, regression postmortems | `0.90 - 1.00` | `observed` / `corrected` | `"Fastly IPv6 node 2a04:4e42:5a::649 returns HTTP 503 on kk-Linux"` |
-| `context` | Current workspace state, active branch, session handoff notes | `0.80 - 0.95` | `observed` | `"Active branch is main"` |
-| `password` | Credentials, DSNs with embedded auth, secret references | `0.95 - 1.00` | `explicit_statement` | `"Internal staging DB URI uses basic auth on port 5432"` |
+| Category | When to Use | Recommended Confidence | Typical Provenance |
+| :--- | :--- | :--- | :--- |
+| `fact` | Verified system facts, ports, URLs, personal/identity details | `0.90 - 1.00` | `validated` / `explicit_statement` |
+| `decision` | Architectural choices, stack selections, design trade-offs | `0.90 - 1.00` | `explicit_statement` |
+| `instruction` | Standing user rules, coding conventions, mandatory constraints | `0.95 - 1.00` | `explicit_statement` |
+| `preference` | User workflow, UI/UX, editor, or communication preferences | `0.85 - 1.00` | `explicit_statement` |
+| `learning` | Post-debugging insights, workarounds, root causes | `0.85 - 0.95` | `validated` / `corrected` |
+| `goal` | Project milestones, OKRs, long-term targets | `0.85 - 1.00` | `explicit_statement` |
+| `commitment` | Action items, TODOs, deliverables | `0.90 - 1.00` | `explicit_statement` |
+| `artifact` | File paths, schemas, build outputs | `0.90 - 1.00` | `validated` |
+| `event` | Incidents, deployments, migrations | `0.85 - 0.95` | `validated` |
+| `relationship` | Ownership, team mapping, service dependencies | `0.85 - 0.95` | `explicit_statement` |
+| `error` | Crash signatures, stack traces, regression postmortems | `0.90 - 1.00` | `validated` / `corrected` |
+| `context` | Current workspace state, active branch, session notes | `0.80 - 0.95` | `validated` |
+| `password` | Credentials, DSNs with embedded auth, secret references | `0.95 - 1.00` | `explicit_statement` |
 
 ---
 
-## 3. Provenance & Confidence Guidelines
+## 3. Best Practices for AI Agents
 
-### Provenance (`--provenance`)
-- `explicit_statement` *(default)*: Directly stated by the user.
-- `validated`: Verified against live code, tests, or command output.
-- `observed`: Witnessed during command execution, benchmarks, or logs.
-- `corrected`: Recorded after fixing a bug or user correction.
-- `inferred`: Derived logically from codebase patterns.
-- `imported`: Ingested from external files (`lmem import`).
-- `attachment_metadata`: Automatically assigned when storing file attachments (`-f`) using metadata-only indexing.
-- `attachment_llm_extracted`: Automatically assigned when storing file attachments (`-f`) with explicit LLM extraction (`--extract` / `-e`).
-
-### Confidence (`--confidence <0.0-1.0>`)
-- `1.0`: Explicit user rule, identity fact, or verified test assertion.
-- `0.9 - 0.95`: Validated architecture decision or reproducible technical fact.
-- `0.8 - 0.85`: Strong observation or preference.
-- `< 0.6`: Do not store unverified guesses as permanent memories; use `--ttl` if storing temporary working state.
-
----
-
-## 4. Knowledge Graph, Wikilinks & Interactive Graph View
-
-LightMem features a native SQLite graph layer (`memory_links`) with $O(1)$ indexing, foreign key cascading, and zero external dependencies:
-
-1. **Obsidian-Grade Wikilinks**:
-   - Wrap any memory title or ID in `[[...]]` inside content (e.g. `[[PostgreSQL DB]]` or `[[db-primary|Main Database]]`).
-   - LightMem automatically parses and binds bidirectional links on `lmem remember`.
-2. **Explicit Directional Linking**:
-   - `lmem link <src> <dst> -r <relation> [-w <weight>]`
-   - Common relations: `relates_to`, `depends_on`, `references`, `implements`, `causes`, `bypasses`.
-   - Weights scale hop-decay scores ($1.0 / \text{hop} \times \text{weight}$).
-   - Remove connections with `lmem unlink <src> <dst> [-r <relation>]`.
-3. **Multi-Hop Traversal (`lmem related`)**:
-   - Breadth-first graph search up to $N$ hops (`lmem related <id> --hops 2`).
-   - Cycle-safe with hop-distance attenuation scoring ($1.0 / \text{hop}$).
-   - `lmem recall "<query>" --multi-hop` expands semantic recall hits with 1-hop connected neighbors.
-4. **Knowledge Graph & Topology (`lmem graph`)**:
-   - Terminal network tree or JSON export.
-   - CLI flags: `lmem graph` (terminal Unicode tree), `lmem graph --focus <id> --hops 2` (neighborhood subgraph), `lmem graph --json` (export nodes and edges array).
-5. **Graph Similarity Search & Counting Connected Memories**:
-   - **Pre-Insert / Query Similarity Count**:
-     Use `lmem recall "<query_or_text>" --min-similarity <0.1-1.0> -l <N> --json` to inspect and count existing memories with high cosine similarity before deciding whether to store, link via `[[wikilinks]]` / `lmem link`, or supersede.
-   - **Counting Connected Neighbors for an Existing Node**:
-     - `lmem related <ID> -n 1 --json` outputs all direct 1-hop connected memories, their relation types (`depends_on`, `references`, `implements`, etc.), and edge weights.
-     - `lmem graph --focus <ID> -n 1 --json` returns the exact subgraph `{ nodes: [...], edges: [...] }` to inspect neighborhood cluster size.
-   - **Graph-Expanded Recall (`--multi-hop`)**:
-     `lmem recall "<query>" --multi-hop` executes hybrid search and automatically traverses graph edges to pull in connected neighbors.
-
----
-
-## 4b. Multimodal File, Image, Audio & Video Attachments
-
-LightMem stores raw files directly inside an isolated SQLite `memory_attachments` table (Schema v4) with strict integrity and access guarantees:
-
-1. **Isolated Immutable BLOB Vault**:
-   - Raw bytes are stored in `memory_attachments` (never bloating the `memories` table), protected by a `BEFORE UPDATE` SQLite trigger (`trg_attachments_immutable`) that blocks in-place tampering, verified by SHA-256 on every read/export, and enforced with `0600` owner-only file permissions.
-   - Deleting a memory via `lmem forget <ID> --hard` cascades and purges its attachment BLOBs and materialized cache files automatically.
-2. **Metadata-First by Default, Native Multimodal Embeddings & Opt-In LLM Extraction (`--extract` / `-e`)**:
-   - By default (`lmem remember "caption" -f <file>`), no LLM is called: LightMem parses magic bytes, MIME type, media kind (`image`, `audio`, `video`, `document`, `code`, `archive`, `binary`), image/MP4 dimensions (`WxH`), WAV/MP4 duration (`s`), byte size, and SHA-256, auto-tags both media kind (`#image`, `#video`) and lowercase extension (`#png`, `#mp4`), warns on duplicate SHA-256 blobs in batch/vault, and indexes everything into FTS5 BM25 + vector embeddings. When configured with a multimodal embedding model (`embeddinggemma-2`), images, video keyframes (via `ffmpeg`), and audio (>=0.5s) are embedded natively for visual/cross-modal `lmem recall --image <path>` search.
-   - Only when `--extract` (`-e`) is explicitly passed (`lmem remember -f <file> --extract`), LightMem sends the attachment (or an automatically extracted JPEG keyframe for `.mp4`/`.mov`/`.mkv` videos via `ffmpeg`) to the single configured main LLM (`ollama:<model>` / OpenAI `/v1/chat/completions`) and appends the extracted description to the memory.
-3. **Printing Verified File Paths (`--path` / `-p`) & Direct Opening (`--open`)**:
-   - Pass `--path` or `--paths` (`-p`) to `lmem inspect`, `lmem recall`, or `lmem list` to materialize SHA-256-verified attachment(s) into `~/.lightmem/attachments/` (or custom `-o <dir>`) and print **only** the absolute file path(s) (one per line, or JSON array with `--json`) — ideal for command substitution (`wallpaper "$(lmem -g recall 'itachi' -m video -l 1 --path)"`). Pass `--open` to `lmem recall` or `lmem inspect` to launch verified attachments directly in the system default application.
-
----
-
-## 5. Choosing Between `recall`, `answer`, `inspect`, `related`, and `conflicts`
-
-| Command | Output | When to Use |
-| :--- | :--- | :--- |
-| `lmem recall "<query>"` | Top-$K$ full memory cards with RRF score (`BM25 + Vector + Acronym Boost`), ID, category, and tags | When gathering broad context before planning, coding, or debugging |
-| `lmem recall "<query>" -m <kind>` | Top-$K$ memories filtered by attachment media kind (`image`, `audio`, `video`, `document`, `code`, `any`) | When searching specifically for stored wallpapers, diagrams, audio notes, or documents |
-| `lmem recall "<query>" -l 1 --path` | Raw absolute path(s) of verified attachment(s) on disk (one per line) | When piping a recalled media/file path directly into another CLI or script (`--paths` for multiple) |
-| `lmem inspect <id...> --paths` | Raw absolute path(s) of all attachments for one or more memory IDs | When resolving memory ID(s) directly to verified file paths on disk |
-| `lmem recall "<query>" --min-similarity 0.70` | Top-$K$ memories filtered by minimum cosine similarity threshold | When checking how many existing memories are semantically similar to a new query or statement |
-| `lmem recall "<query>" --multi-hop` | Recall results expanded with 1-hop connected graph neighbors | When context requires knowing dependencies and adjacent architectural relationships |
-| `lmem link <src> <dst> -r <rel>` | Directional link confirmation between two memories | When explicitly connecting related concepts, dependencies, or causal chains |
-| `lmem related "<id>" -n 1` | Direct 1-hop connected neighbors, relation types, and similarity weights | When counting or inspecting memories directly linked/similar to a specific node |
-| `lmem related "<id>" --hops 2` | Breadth-first connected memories along relation paths with hop-decay scores | When investigating causal chains, dependencies, or downstream impacts of a specific memory |
-| `lmem graph --focus <id> -n 1` | Focused network tree or JSON subgraph for a node's immediate neighborhood | When inspecting node/edge cluster counts and topology around a concept |
-| `lmem answer "<question>"` | Exact extracted span (via ONNX `minilm-squad2` / `tinyroberta-squad2` or `ollama:<model>`), confidence `%`, and source memory ID | When answering a specific factual question (`"what port..."`, `"what is my..."`, `"who is..."`) |
-| `lmem conflicts` | Pairs of semantically similar + lexically overlapping memories with `[OLDER · UTC]` and `[NEWER · UTC]` timestamps | When cleaning up duplicate memories or merging updated facts into a single canonical record |
-| `lmem bundle export -o <file.zip>` | Single compressed `.zip` containing SQLite DB, all video/photo files, and SHA-256 manifest | When transferring or backing up a vault with all attached media to another machine |
-| `lmem bundle info <file.zip>` | Manifest inspection, memory counts, video/photo media breakdown, and SHA-256 hashes | When checking archive contents and file sizes before extracting |
-| `lmem bundle import <file.zip>` | Restores SQLite DB and unpacks video/photo files into `attachments/` without re-indexing | When importing or merging (`--merge`) a vault transfer bundle anywhere |
-
----
-
-## 6. Best Practices for AI Agents
-
-1. **Write Atomic, Declarative Facts**:
-   - **Bad**: `"User asked me to fix the Windows installer and I found out stderr caused an error"`
-   - **Good**: `"Windows PowerShell $ErrorActionPreference='Stop' treats native command stderr progress bars as terminating errors; wrap stderr-emitting CLI calls with 'Continue'."`
-2. **Use `--supersede` When Updating a Fact**:
-   - Passing `--supersede` on `lmem remember` automatically checks for conflicting active memories and retires the outdated record in the same transaction.
-3. **Pass `--json` or `--path` for Programmatic Parsing**:
-   - `lmem recall`, `lmem answer`, `lmem list`, `lmem inspect`, `lmem stats`, and `lmem conflicts` all support `--json` with clean, deterministic schemas, and `inspect`/`recall`/`list` support `--path` (`--paths`) for raw file path output.
-4. **Scope Project vs Global Memories**:
-   - By default, `lmem` uses `./.lightmem.db` if present in the current directory or git root, falling back to `~/.lightmem/memories.db`. Pass `-g` (`--global`) to force the global vault or `--db <PATH>` for an isolated vault.
-
-
-## Registered identities and scopes (v0.4.0)
-
-When a harness supplies a registered connection, pass `--connection <id>` on every memory command (or set `LIGHTMEM_CONNECTION`). Inspect `lmem --connection <id> context --json` before writing. Use the selected user/project scope for shared decisions, `--scope user` for personal preferences, and `--scope agent` for dedicated agent context. Each command uses one vault; query other scopes explicitly when their context is needed. Use `--session <id>` when the harness supplies a session ID. Never combine a connection with `--db`, `LIGHTMEM_DB`, or `--global`.
-
-Register users with `lmem identity user-add <id>`, agents with `lmem identity agent-add <id> --user <user>`, and connections with `lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project> --memory-scope project`. Custom harnesses use `lmem identity harness-add <id> --path <skills-directory>`. Install bound instructions with `lmem --connection <id> connect`. Use `lmem identity list connections --json` or `lmem status` (`lmem vaults`, `lmem identity status`) to inspect bindings and vault storage telemetry. Source context is returned in memory JSON and survives export/import. Installation does not automatically capture conversations; invoke `remember` or `observe` explicitly.
-
----
-
-## Single-File DB Transfer Bundles (.zip) & Full Export/Import (v0.5.0)
-
-When migrating, sharing, or transferring a memory vault between machines, use **single-file transfer bundles**:
-
-1. **Why Transfer Bundles Over Raw JSON/DB Copies**:
-   - `export --json` base64-encodes media (33% size inflation) and forces the receiving machine to re-run neural embedding models across all memories from scratch.
-   - Raw database file copies can miss active WAL transactions (`-wal`/`-shm`) or leave orphaned attachments.
-   - `lmem bundle export` uses SQLite's atomic `VACUUM INTO` to create a pristine, zero-WAL database and packages it alongside all raw physical video (`.mp4`, `.mov`), image, audio, and document files into a single `.zip` file with SHA-256 manifest verification.
-
-2. **CLI Commands & `--help` Discovery**:
-   - `lmem --help`: Top-level CLI overview including `bundle`, `export`, and `import`.
-   - `lmem bundle --help`: Overview of bundle export, import, and inspection commands.
-   - `lmem bundle export --help` (or `lmem export --help`): Complete options for exporting bundles (`-o <path.zip>`, `--bundle`, `--json`).
-   - `lmem bundle import --help` (or `lmem import --help`): Complete options for importing bundles (`--replace`, `--merge`, `--json`).
-   - `lmem bundle info --help`: Options for inspecting bundle manifest without unpacking.
-
-3. **Core Command Syntax**:
-   ```bash
-   # Export complete vault (DB + all video, photo, audio & doc files) into a portable .zip bundle
-   lmem bundle export -o ./my_vault_backup.zip
-   # Alternative shorthand:
-   lmem export --bundle -o my_vault_backup.zip
-
-   # Inspect bundle contents (manifest, memory count, video resolutions, audio durations, byte sizes) without extracting
-   lmem bundle info ./my_vault_backup.zip
-   lmem bundle info ./my_vault_backup.zip --json
-
-   # Restore bundle on a new machine (replaces vault and extracts all video/photo files into attachments/)
-   lmem bundle import ./my_vault_backup.zip
-   # Or using standard import (auto-detects .zip):
-   lmem import ./my_vault_backup.zip
-
-   # Merge bundle into an existing database without overwriting existing memories
-   lmem bundle import my_vault_backup.zip --merge
-   ```
+1. **Write Atomic, Declarative Facts**: Store self-contained, specific statements rather than vague notes.
+2. **Use `--supersede` When Updating Facts**: Retires outdated conflicting records automatically.
+3. **Pass `--json` or `--path` for Scripts**: Clean, deterministic JSON output or raw file paths for tools.
+4. **Scope Project vs Global Memories**: Local `./.lightmem.db` takes precedence. Use `-g` (`--global`) for global memories.

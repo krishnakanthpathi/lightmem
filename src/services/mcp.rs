@@ -815,11 +815,17 @@ impl McpServer {
                     updated = true;
                 }
                 if let Some(mode) = args.get("entity_extraction").and_then(|v| v.as_str()) {
+                    let mode_clean = mode.trim().to_lowercase();
                     anyhow::ensure!(
-                        matches!(mode, "off" | "llm"),
-                        "Entity extraction must be off or llm"
+                        matches!(mode_clean.as_str(), "off" | "on" | "llm" | "true" | "false"),
+                        "Entity extraction must be on or off"
                     );
-                    cfg.entity_extraction = mode.to_string();
+                    let normalized = if matches!(mode_clean.as_str(), "on" | "llm" | "true") {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    cfg.entity_extraction = normalized.to_string();
                     updated = true;
                 }
 

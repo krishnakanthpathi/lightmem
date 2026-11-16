@@ -240,10 +240,12 @@ fn test_config_permissions_and_secret_redaction() {
     // Verify secret redaction in JSON serialization
     let mut val = serde_json::to_value(&cfg).unwrap();
     if let Some(obj) = val.as_object_mut() {
-        if let Some(key_val) = obj.get_mut("ollama_api_key") {
-            if let Some(key_str) = key_val.as_str() {
-                if !key_str.is_empty() {
-                    *key_val = serde_json::Value::String("[REDACTED]".into());
+        for key in ["ollama_api_key", "openai_api_key"] {
+            if let Some(key_val) = obj.get_mut(key) {
+                if let Some(key_str) = key_val.as_str() {
+                    if !key_str.is_empty() {
+                        *key_val = serde_json::Value::String("[REDACTED]".into());
+                    }
                 }
             }
         }

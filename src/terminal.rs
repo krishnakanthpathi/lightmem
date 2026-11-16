@@ -51,17 +51,20 @@ pub fn confirm(prompt: &str, default: bool) -> Result<bool> {
 pub fn validate(cfg: &LightMemConfig) -> Result<()> {
     cfg.embedding_identity()?;
     super::parse_reranker_setting(&cfg.reranker)?;
+    let entity_clean = cfg.entity_extraction.trim().to_lowercase();
     ensure!(
-        matches!(cfg.entity_extraction.as_str(), "off" | "llm")
-            || cfg.entity_extraction.starts_with("llm:")
-            || cfg.entity_extraction.starts_with("ollama:")
-            || cfg.entity_extraction.starts_with("openai:")
-            || cfg.entity_extraction.starts_with("openrouter:")
-            || cfg.entity_extraction.starts_with("gemini:")
-            || cfg.entity_extraction.starts_with("groq:")
-            || cfg.entity_extraction.starts_with("deepseek:")
-            || cfg.entity_extraction.starts_with("mistral:"),
-        "Entity extraction must be off, llm, or <provider>:<model>."
+        matches!(
+            entity_clean.as_str(),
+            "off" | "on" | "llm" | "true" | "false"
+        ) || entity_clean.starts_with("llm:")
+            || entity_clean.starts_with("ollama:")
+            || entity_clean.starts_with("openai:")
+            || entity_clean.starts_with("openrouter:")
+            || entity_clean.starts_with("gemini:")
+            || entity_clean.starts_with("groq:")
+            || entity_clean.starts_with("deepseek:")
+            || entity_clean.starts_with("mistral:"),
+        "Entity extraction must be on, off, or <provider>:<model>."
     );
     http_url(&cfg.ollama_url)?;
     if let Some(url) = &cfg.remote_url {
@@ -172,7 +175,7 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
                 cfg.apply_preset("local")?;
                 let model = value("Ollama model name", "qwen2.5-coder:1.5b")?;
                 cfg.reranker = format!("ollama:{model}");
-                cfg.entity_extraction = "llm".into();
+                cfg.entity_extraction = "on".into();
             }
             "3" => {
                 cfg.apply_preset("local")?;
@@ -190,7 +193,7 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
                 };
                 let model = value("Model name", default_model)?;
                 cfg.reranker = format!("{provider}:{model}");
-                cfg.entity_extraction = "llm".into();
+                cfg.entity_extraction = "on".into();
                 if confirm("Configure API key now?", true)? {
                     let mut key_opt = None;
                     credential(&mut key_opt, &provider, false)?;
@@ -307,9 +310,9 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
             }
         }
         "3" => {
-            eprintln!("LLM extraction sends newly saved memory text to {}. Search and answers are separate.", cfg.effective_ollama_url());
+            eprintln!("Entity extraction sends newly saved memory text to {}. Search and answers are separate.", cfg.effective_ollama_url());
             cfg.entity_extraction = value(
-                "Entity extraction: off, llm, or <provider>:<model>",
+                "Entity extraction: on, off, or <provider>:<model>",
                 &cfg.entity_extraction,
             )?;
         }

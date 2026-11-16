@@ -635,11 +635,7 @@ impl LightMem {
                     && self.config.effective_ollama_url() != "http://localhost:11434"));
 
         if should_extract_entities {
-            match ObserverService::extract_entities_via_llm(
-                &final_content,
-                reranker_override,
-                &self.config,
-            ) {
+            match ObserverService::extract_entities_via_llm(&final_content, &self.config) {
                 Ok(extracted_ents) => {
                     memory.entities = extracted_ents;
                 }

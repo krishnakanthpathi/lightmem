@@ -1306,10 +1306,33 @@ impl CliView {
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "Model:",
-            Self::emerald_bold(&cfg.active_reranker_summary())
+            "OpenAI Model:",
+            Self::emerald_bold(&cfg.reranker)
         );
-        let extraction_summary = if !cfg.has_active_llm() && !cfg.has_explicit_entity_llm() {
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "OpenAI Endpoint:",
+            Self::emerald(&cfg.ollama_url)
+        );
+        let key_disp = if cfg
+            .ollama_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+            .is_some()
+        {
+            Self::gold("configured (secret)")
+        } else {
+            Self::slate("empty (none)")
+        };
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "OpenAI API Key:",
+            key_disp
+        );
+        let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
         } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
             Self::gold_bold(&cfg.active_entity_extraction_summary())
@@ -1442,13 +1465,15 @@ impl CliView {
                         "demo": "Deterministic hash search + top memory answer; no downloads; entity extraction off.",
                         "local": "Local ONNX embeddings + QA; entity extraction off. Vault routing is selected separately.",
                         "ollama-cloud": "Local ONNX embeddings + Ollama gemma4:31b-cloud reranker (via localhost:11434)",
-                        "ollama-local": "Local ONNX embeddings + Ollama localhost LLM reranker (prefers bonsai-2:2b)"
+                        "ollama-local": "Local ONNX embeddings + Ollama LLM reranker (localhost:11434)"
                     }),
                 );
-                if let Some(key_val) = obj.get_mut("ollama_api_key") {
-                    if let Some(key_str) = key_val.as_str() {
-                        if !key_str.is_empty() {
-                            *key_val = serde_json::Value::String("[REDACTED]".into());
+                for key_name in ["ollama_api_key", "openai_api_key"] {
+                    if let Some(key_val) = obj.get_mut(key_name) {
+                        if let Some(key_str) = key_val.as_str() {
+                            if !key_str.is_empty() {
+                                *key_val = serde_json::Value::String("[REDACTED]".into());
+                            }
                         }
                     }
                 }
@@ -1513,14 +1538,36 @@ impl CliView {
             "Search Embedder:",
             Self::emerald_bold(&cfg.active_embedding_summary())
         );
-        let (_prov_name, prov_desc) = cfg.active_provider_summary();
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "Model:",
-            Self::emerald_bold(&prov_desc)
+            "OpenAI Model:",
+            Self::emerald_bold(&cfg.reranker)
         );
-        let extraction_summary = if !cfg.has_active_llm() && !cfg.has_explicit_entity_llm() {
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "OpenAI Endpoint:",
+            Self::emerald(&cfg.ollama_url)
+        );
+        let key_disp = if cfg
+            .ollama_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+            .is_some()
+        {
+            Self::gold("configured (secret)")
+        } else {
+            Self::slate("empty (none)")
+        };
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "OpenAI API Key:",
+            key_disp
+        );
+        let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
         } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
             Self::gold_bold(&cfg.active_entity_extraction_summary())
@@ -1646,14 +1693,34 @@ impl CliView {
                 Self::gold("💡"),
                 Self::white_bold("Quick Actions:")
             );
-            println!("    • Easy setup:       {}", Self::violet("lmem setup"));
+            println!("    • Easy setup:        {}", Self::violet("lmem setup"));
             println!(
-                "    • Change model:     {}",
-                Self::violet("lmem config --model <provider>:<model>")
+                "    • Search backend:    {}",
+                Self::violet("lmem config --backend onnx|ollama|hash")
             );
             println!(
-                "    • Set API key:      {}",
+                "    • Embedding model:   {}",
+                Self::violet("lmem config --embedding-model <model>")
+            );
+            println!(
+                "    • OpenAI model:      {}",
+                Self::violet("lmem config --openai-model <model>")
+            );
+            println!(
+                "    • Entity extraction: {}",
+                Self::violet("lmem config --entity-extraction on|off")
+            );
+            println!(
+                "    • Set endpoint:      {}",
+                Self::violet("lmem config --endpoint <url>")
+            );
+            println!(
+                "    • Set API key:       {}",
                 Self::violet("lmem config --api-key <key>")
+            );
+            println!(
+                "    • Reload settings:   {}",
+                Self::violet("lmem config reload")
             );
             println!("    • Run diagnostics:  {}", Self::violet("lmem doctor"));
             println!(

@@ -893,6 +893,25 @@ impl OllamaReranker {
     }
 }
 
+/// Compact prompt form for LLM answer extraction and synthesis (minimal token footprint)
+pub fn build_answer_prompt(
+    memories_block: &str,
+    question: &str,
+    synthesis: bool,
+) -> (&'static str, String) {
+    let system_prompt = if synthesis {
+        "Synthesize answer from memories as JSON: {\"answer\": string|null, \"memory_index\": int|null, \"confidence\": float}. If unsupported, answer=null."
+    } else {
+        "Answer question using memories as JSON: {\"answer\": string|null, \"memory_index\": int|null, \"confidence\": float}. If unsupported, answer=null."
+    };
+    let user_prompt = format!(
+        "Memories:\n{}\nQuestion: {}",
+        memories_block.trim(),
+        question.trim()
+    );
+    (system_prompt, user_prompt)
+}
+
 impl Reranker for OllamaReranker {
     fn name(&self) -> &str {
         "ollama"
@@ -928,29 +947,9 @@ impl Reranker for OllamaReranker {
             }
         }
 
-        let (system_prompt, max_tokens) = if synthesis {
-            (
-                "You are a grounded memory synthesis engine. Summarize or list information using ONLY the provided memory records.\n\
-                 Rules:\n\
-                 1. Synthesize a concise, factual answer combining details from ALL relevant provided memories that match EVERY topic and qualifier in the question (for example, if asked about \"sprint goals\" and no memory mentions sprint, return null).\n\
-                 2. Cite zero ungrounded facts: include only facts explicitly present in the provided memories.\n\
-                 3. If the provided memories do NOT contain relevant records matching the question's specific topic/qualifiers, return null for \"answer\" and null for \"memory_index\".\n\
-                 4. Respond with valid JSON matching: {\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1} where \"memory_index\" is the 0-based index of the primary supporting memory.",
-                512,
-            )
-        } else {
-            (
-                "You are a strict extractive question-answering engine. Answer the question using ONLY the provided memory records.\n\
-                 Rules:\n\
-                 1. Extract the exact concise factual value (e.g. name, ID, account number, roll number, port, OS, URL, college name, score) from the single best matching memory.\n\
-                 2. Do NOT include labels or full sentences — return ONLY the extracted value itself.\n\
-                 3. If none of the memories contain the answer, or if a memory states the information is not recorded, return null for \"answer\" and null for \"memory_index\".\n\
-                 4. Respond with valid JSON matching: {\"answer\": string_or_null, \"memory_index\": integer_or_null, \"confidence\": number_between_0_and_1}",
-                256,
-            )
-        };
-
-        let user_prompt = format!("Memories:\n{}\nQuestion: {}", memories_block, question);
+        let (system_prompt, user_prompt) =
+            build_answer_prompt(&memories_block, question, synthesis);
+        let max_tokens = if synthesis { 512 } else { 256 };
         let raw_response =
             self.request_json_completion(&model_name, system_prompt, &user_prompt, max_tokens)?;
 

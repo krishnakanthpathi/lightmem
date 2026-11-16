@@ -151,10 +151,12 @@ struct ConfigPatch {
     preset: Option<String>,
     backend: Option<String>,
     onnx_model: Option<String>,
+    #[serde(alias = "endpoint", alias = "openai_endpoint")]
     ollama_url: Option<String>,
     embedding_model: Option<String>,
     reranker: Option<String>,
     entity_extraction: Option<String>,
+    #[serde(alias = "openai_api_key", alias = "model_api_key")]
     ollama_api_key: Option<String>,
     #[serde(default)]
     clear_ollama_key: bool,
@@ -209,11 +211,17 @@ fn candidate_config(controller: &LightMem, patch: &ConfigPatch) -> Result<LightM
         cfg.reranker = v.clone();
     }
     if let Some(v) = &patch.entity_extraction {
+        let v_clean = v.trim().to_lowercase();
         anyhow::ensure!(
-            matches!(v.as_str(), "off" | "llm"),
-            "Entity extraction must be off or llm"
+            matches!(v_clean.as_str(), "off" | "on" | "llm" | "true" | "false"),
+            "Entity extraction must be on or off"
         );
-        cfg.entity_extraction = v.clone();
+        let normalized = if matches!(v_clean.as_str(), "on" | "llm" | "true") {
+            "on"
+        } else {
+            "off"
+        };
+        cfg.entity_extraction = normalized.to_string();
     }
     if let Some(key) = &patch.ollama_api_key {
         anyhow::ensure!(
@@ -323,6 +331,33 @@ fn dispatch(req: &HttpRequest, state: &Arc<WorkspaceState>) -> Result<Value> {
     );
     let controller = state.controller()?;
     match req.path.as_str() {
+        "/v1/workspace/config/reload" => {
+            let reloaded = LightMemConfig::try_load()?;
+            let new_controller = controller.reconfigured(reloaded.clone())?;
+            let bytes = match std::fs::read(LightMemConfig::config_file()) {
+                Ok(b) => Some(b),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
+            *state
+                .base_config
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Configuration state unavailable"))? = bytes;
+            *state
+                .controller
+                .write()
+                .map_err(|_| anyhow::anyhow!("Workspace state unavailable"))? =
+                Arc::new(new_controller);
+            *state
+                .model_test
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Test state unavailable"))? = None;
+            Ok(json!({
+                "status": "ok",
+                "message": "Configuration reloaded from disk",
+                "config": reloaded.redacted_json()?,
+            }))
+        }
         "/v1/workspace/config/preview" | "/v1/workspace/config" => {
             state.ensure_configuration_current()?;
             let patch: ConfigPatch = body(req)?;

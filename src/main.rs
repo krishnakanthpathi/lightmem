@@ -410,8 +410,16 @@ enum Commands {
 
     /// View shared settings, preview changes, or test the saved embedding backend
     Config {
+        /// Reload configuration from disk and display updated settings
+        #[arg(long, visible_alias = "refresh")]
+        reload: bool,
+
+        /// Optional sub-action such as 'reload' or 'refresh'
+        #[arg(index = 1)]
+        action: Option<String>,
+
         /// Change a setting using short terminal prompts; no full-screen interface
-        #[arg(long, conflicts_with_all = ["json", "yes", "preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "test", "remote", "api_key", "clear_remote", "dry_run"])]
+        #[arg(long, conflicts_with_all = ["json", "yes", "preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "test", "remote", "api_key", "clear_remote", "dry_run", "reload"])]
         edit: bool,
         /// Set backend engine: 'onnx', 'ollama', or 'hash'
         #[arg(long, value_parser = ["onnx", "ollama", "hash"])]
@@ -425,8 +433,8 @@ enum Commands {
         #[arg(long)]
         download: Option<String>,
 
-        /// Ollama server URL (e.g. http://localhost:11434)
-        #[arg(long)]
+        /// OpenAI-compatible server URL or endpoint (e.g. http://localhost:11434, https://api.openai.com)
+        #[arg(long, visible_alias = "endpoint")]
         url: Option<String>,
 
         /// Setup preset: demo (no downloads), local (ONNX), ollama-cloud, or ollama-local
@@ -437,16 +445,25 @@ enum Commands {
         #[arg(long, visible_alias = "embedding-model")]
         model: Option<String>,
 
-        /// Answer engine (alias: --answer-model); reranker model/engine ('minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama', 'ollama:<model>', or 'top1')
-        #[arg(long, visible_alias = "answer-model")]
+        /// OpenAI-compatible chat model for answers and entity extraction (e.g. 'qwen2.5-coder:1.5b', 'gpt-4o-mini', 'ollama:qwen2.5:3b')
+        #[arg(
+            long,
+            visible_alias = "answer-model",
+            visible_alias = "openai-model",
+            visible_alias = "chat-model"
+        )]
         reranker: Option<String>,
 
-        /// Entity extraction: off (default), llm, or llm:<model>
+        /// Toggle entity extraction ('on' or 'off') using the configured generative model
         #[arg(long)]
         entity_extraction: Option<String>,
 
-        /// Save an LLM endpoint key; use 'none' to remove it (environment keys still apply)
-        #[arg(long, visible_alias = "model-api-key")]
+        /// Save an OpenAI / LLM endpoint key; use 'none' to remove it (environment keys still apply)
+        #[arg(
+            long,
+            visible_alias = "model-api-key",
+            visible_alias = "openai-api-key"
+        )]
         ollama_api_key: Option<String>,
 
         /// Preview proposed settings and migration requirements without writes or downloads
@@ -454,11 +471,11 @@ enum Commands {
         dry_run: bool,
 
         /// Test saved embeddings with disposable text; no memory is saved (may download ONNX assets)
-        #[arg(long, conflicts_with_all = ["preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "remote", "api_key", "clear_remote"])]
+        #[arg(long, conflicts_with_all = ["preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "remote", "api_key", "clear_remote", "reload"])]
         test: bool,
 
         /// Permanently delete the selected local vault; requires --yes
-        #[arg(long, requires = "yes", conflicts_with_all = ["preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "remote", "api_key", "clear_remote"])]
+        #[arg(long, requires = "yes", conflicts_with_all = ["preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "remote", "api_key", "clear_remote", "reload"])]
         reset_db: bool,
 
         /// Approve migration of the selected database when the embedding model changes
@@ -488,15 +505,15 @@ enum Commands {
         #[arg(long)]
         preset: Option<String>,
 
-        /// Ollama / OpenAI server URL (e.g. http://localhost:11434)
-        #[arg(long)]
+        /// OpenAI / Ollama server URL (e.g. http://localhost:11434)
+        #[arg(long, visible_alias = "endpoint")]
         url: Option<String>,
 
         /// Answer engine spec (e.g. ollama:qwen2.5:3b, minilm-squad2, or top1)
         #[arg(long, visible_alias = "answer-model")]
         model: Option<String>,
 
-        /// Override entity extraction independently of the preset
+        /// Override entity extraction toggle ('on' or 'off') independently of the preset
         #[arg(long)]
         entity_extraction: Option<String>,
 
@@ -1593,11 +1610,27 @@ fn configuration_plan(
         .keys()
         .chain(after.as_object().context("Invalid configuration")?.keys())
         .collect();
-    let changes: Vec<_> = keys
+    let mut changes: Vec<_> = keys
         .into_iter()
         .filter(|key| before.get(*key) != after.get(*key))
         .cloned()
         .collect();
+    if changes.iter().any(|k| k == "openai_api_key")
+        && !changes.iter().any(|k| k == "ollama_api_key")
+    {
+        changes.push("ollama_api_key".to_string());
+    }
+    if changes.iter().any(|k| k == "openai_endpoint") && !changes.iter().any(|k| k == "ollama_url")
+    {
+        changes.push("ollama_url".to_string());
+    }
+    if changes.iter().any(|k| k == "openai_model") && !changes.iter().any(|k| k == "reranker") {
+        changes.push("reranker".to_string());
+    }
+    if changes.iter().any(|k| k == "reranker") && !changes.iter().any(|k| k == "openai_model") {
+        changes.push("openai_model".to_string());
+    }
+    changes.sort();
     Ok(serde_json::json!({
         "dry_run": true,
         "config_scope": "shared across vaults in this configuration root",
@@ -2821,6 +2854,8 @@ fn main() -> Result<()> {
         }
 
         Commands::Config {
+            reload,
+            action,
             edit,
             preset,
             backend,
@@ -2840,6 +2875,27 @@ fn main() -> Result<()> {
             clear_remote,
             json,
         } => {
+            let is_reload = reload
+                || action
+                    .as_deref()
+                    .map(|s| s.eq_ignore_ascii_case("reload") || s.eq_ignore_ascii_case("refresh"))
+                    .unwrap_or(false);
+            if is_reload {
+                let reloaded = LightMemConfig::try_load()?;
+                if json {
+                    CliView::render_config(&reloaded, false, true, effective_db, global)?;
+                } else {
+                    println!(
+                        "\n  {} Configuration reloaded from disk.",
+                        CliView::emerald_bold("✓")
+                    );
+                    terminal::render_config(&reloaded, false, effective_db, global)?;
+                }
+                return Ok(());
+            }
+            if let Some(act) = action.as_deref() {
+                anyhow::bail!("Unknown action '{}'. Did you mean 'lmem config reload' or 'lmem config --help'?", act);
+            }
             let path = effective_db
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
@@ -2960,22 +3016,12 @@ fn main() -> Result<()> {
             }
             if let Some(mode) = entity_extraction {
                 let trimmed = mode.trim();
-                let normalized = if trimmed.eq_ignore_ascii_case("off") {
-                    "off".to_string()
-                } else if trimmed.eq_ignore_ascii_case("llm") {
-                    "llm".to_string()
-                } else if trimmed.starts_with("llm:")
-                    || trimmed.starts_with("ollama:")
-                    || trimmed.starts_with("openai:")
-                    || trimmed.starts_with("openrouter:")
-                    || trimmed.starts_with("gemini:")
-                    || trimmed.starts_with("groq:")
-                    || trimmed.starts_with("deepseek:")
-                    || trimmed.starts_with("mistral:")
+                let normalized = if trimmed.eq_ignore_ascii_case("off")
+                    || trimmed.eq_ignore_ascii_case("false")
                 {
-                    trimmed.to_string()
+                    "off".to_string()
                 } else {
-                    format!("ollama:{}", trimmed)
+                    "on".to_string()
                 };
                 cfg.entity_extraction = normalized;
                 changed = true;
@@ -3050,7 +3096,7 @@ fn main() -> Result<()> {
                 {
                     cfg.reranker = parse_reranker_setting(&m)?;
                     if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
-                        cfg.entity_extraction = cfg.reranker.clone();
+                        cfg.entity_extraction = "on".to_string();
                     }
                     changed = true;
                 } else {
@@ -3137,22 +3183,12 @@ fn main() -> Result<()> {
             }
             if let Some(mode) = entity_extraction {
                 let trimmed = mode.trim();
-                let normalized = if trimmed.eq_ignore_ascii_case("off") {
-                    "off".to_string()
-                } else if trimmed.eq_ignore_ascii_case("llm") {
-                    "llm".to_string()
-                } else if trimmed.starts_with("llm:")
-                    || trimmed.starts_with("ollama:")
-                    || trimmed.starts_with("openai:")
-                    || trimmed.starts_with("openrouter:")
-                    || trimmed.starts_with("gemini:")
-                    || trimmed.starts_with("groq:")
-                    || trimmed.starts_with("deepseek:")
-                    || trimmed.starts_with("mistral:")
+                let normalized = if trimmed.eq_ignore_ascii_case("off")
+                    || trimmed.eq_ignore_ascii_case("false")
                 {
-                    trimmed.to_string()
+                    "off".to_string()
                 } else {
-                    format!("ollama:{}", trimmed)
+                    "on".to_string()
                 };
                 cfg.entity_extraction = normalized;
             }

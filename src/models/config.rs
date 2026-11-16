@@ -15,12 +15,34 @@ pub fn format_auth_header(api_key: &str) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightMemConfig {
     pub backend: String,
-    pub onnx_model: Option<String>,
-    pub ollama_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onnx_model: Option<String>,
+    #[serde(
+        rename = "openai_endpoint",
+        alias = "ollama_url",
+        alias = "endpoint",
+        alias = "url",
+        alias = "openai_url"
+    )]
+    pub ollama_url: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "openai_api_key",
+        alias = "ollama_api_key",
+        alias = "model_api_key",
+        alias = "openai_key"
+    )]
     pub ollama_api_key: Option<String>,
     pub embedding_model: String,
-    #[serde(default = "default_reranker")]
+    #[serde(
+        default = "default_reranker",
+        rename = "openai_model",
+        alias = "reranker",
+        alias = "model",
+        alias = "answer_model",
+        alias = "chat_model"
+    )]
     pub reranker: String,
     /// Explicit opt-in for sending remembered text to the configured LLM.
     #[serde(default = "default_entity_extraction")]
@@ -135,53 +157,60 @@ impl LightMemConfig {
                 self.entity_extraction = "off".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "minilm-squad2".to_string();
                 Ok(())
             }
             "ollama-cloud" | "cloud" => {
-                self.entity_extraction = "llm".to_string();
+                self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "ollama:gemma4:31b-cloud".to_string();
                 self.ollama_url = "http://localhost:11434".to_string();
                 Ok(())
             }
             "ollama-local" | "ollama" => {
-                self.entity_extraction = "llm".to_string();
+                self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "ollama".to_string();
                 self.ollama_url = "http://localhost:11434".to_string();
                 Ok(())
             }
             "openai" => {
-                self.entity_extraction = "llm".to_string();
+                self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "openai:gpt-4o-mini".to_string();
                 self.ollama_url = "https://api.openai.com".to_string();
                 Ok(())
             }
             "openrouter" => {
-                self.entity_extraction = "llm".to_string();
+                self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "openrouter:anthropic/claude-3.5-sonnet".to_string();
                 self.ollama_url = "https://openrouter.ai/api".to_string();
                 Ok(())
             }
             "gemini" => {
-                self.entity_extraction = "llm".to_string();
+                self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "gemini:gemini-1.5-flash".to_string();
                 self.ollama_url = "https://generativelanguage.googleapis.com/v1beta/openai".to_string();
                 Ok(())
             }
             "groq" => {
-                self.entity_extraction = "llm".to_string();
+                self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
                 self.reranker = "groq:llama-3.3-70b-versatile".to_string();
                 self.ollama_url = "https://api.groq.com/openai".to_string();
                 Ok(())
@@ -271,6 +300,8 @@ impl LightMemConfig {
         }
         if let Some(env_url) = std::env::var("LIGHTMEM_MODEL_URL")
             .ok()
+            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+            .or_else(|| std::env::var("OPENAI_ENDPOINT").ok())
             .or_else(|| std::env::var("OLLAMA_URL").ok())
             .or_else(|| std::env::var("OLLAMA_HOST").ok())
             .filter(|s| !s.trim().is_empty())
@@ -317,10 +348,16 @@ impl LightMemConfig {
         }
 
         // Generic / legacy fallbacks
-        std::env::var("OLLAMA_API_KEY")
+        std::env::var("OPENAI_API_KEY")
             .ok()
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
+            .or_else(|| {
+                std::env::var("OLLAMA_API_KEY")
+                    .ok()
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+            })
             .or_else(|| {
                 std::env::var("LMEM_OLLAMA_API_KEY")
                     .ok()
@@ -352,20 +389,9 @@ impl LightMemConfig {
         prov != "onnx" && prov != "top1"
     }
 
-    /// Returns true if entity extraction has an explicit LLM provider or model configured.
+    /// Entity extraction now always uses the unified configured model; returns false.
     pub fn has_explicit_entity_llm(&self) -> bool {
-        let norm = self.entity_extraction.trim().to_lowercase();
-        if norm == "off" || norm.is_empty() {
-            return false;
-        }
-        norm.starts_with("openai:")
-            || norm.starts_with("openrouter:")
-            || norm.starts_with("gemini:")
-            || norm.starts_with("groq:")
-            || norm.starts_with("deepseek:")
-            || norm.starts_with("mistral:")
-            || norm.starts_with("ollama:")
-            || norm.starts_with("llm:")
+        false
     }
 
     /// Returns a human-friendly provider descriptor for CLI display
@@ -439,7 +465,7 @@ impl LightMemConfig {
             _ => "Ollama",
         };
         let model_display = if self.reranker == "ollama" {
-            format!("ollama:auto (prefers bonsai-2:2b @ {})", eff_url)
+            format!("ollama (@ {})", eff_url)
         } else {
             format!("{} (@ {})", self.reranker, eff_url)
         };
@@ -475,6 +501,12 @@ impl LightMemConfig {
         } else {
             Some(trimmed.to_string())
         }
+    }
+
+    pub fn effective_onnx_model(&self) -> String {
+        self.onnx_model
+            .clone()
+            .unwrap_or_else(|| self.embedding_model.clone())
     }
 
     /// Stable embedding-space identity, including card preprocessing and engine version.
@@ -601,7 +633,7 @@ impl LightMemConfig {
         match norm.as_str() {
             "tinyroberta-squad2" => "tinyroberta-squad2 (local ONNX Extractive QA)".to_string(),
             "minilm-squad2" => "minilm-squad2 (local ONNX Extractive QA)".to_string(),
-            "ollama" => format!("ollama:auto (prefers bonsai-2:2b @ {})", eff_url),
+            "ollama" => format!("ollama (@ {})", eff_url),
             "openai" => format!("OpenAI:gpt-4o-mini (@ {})", eff_url),
             "openrouter" => format!("OpenRouter:claude-3.5-sonnet (@ {})", eff_url),
             "gemini" => format!("Gemini:gemini-1.5-flash (@ {})", eff_url),
@@ -613,63 +645,17 @@ impl LightMemConfig {
 
     pub fn active_entity_extraction_summary(&self) -> String {
         let norm = self.entity_extraction.trim();
-        if norm.eq_ignore_ascii_case("off") || norm.is_empty() {
-            if !self.has_active_llm() && !self.has_explicit_entity_llm() {
+        if norm.eq_ignore_ascii_case("off") || norm.eq_ignore_ascii_case("false") || norm.is_empty()
+        {
+            if !self.has_active_llm() {
                 return "skipped (requires LLM)".to_string();
             }
             return "off".to_string();
         }
-        if !self.has_active_llm() && !self.has_explicit_entity_llm() {
+        if !self.has_active_llm() {
             return "skipped (requires LLM)".to_string();
         }
-        let eff_url = self.effective_ollama_url();
-        for prefix in &[
-            "openai:",
-            "openrouter:",
-            "gemini:",
-            "groq:",
-            "deepseek:",
-            "mistral:",
-            "ollama:",
-            "llm:",
-        ] {
-            if let Some(m) = norm.strip_prefix(prefix) {
-                let prov = match *prefix {
-                    "openai:" => "OpenAI",
-                    "openrouter:" => "OpenRouter",
-                    "gemini:" => "Gemini",
-                    "groq:" => "Groq",
-                    "deepseek:" => "DeepSeek",
-                    "mistral:" => "Mistral",
-                    _ => "llm",
-                };
-                return format!("{}:{} (@ {})", prov, m.trim(), eff_url);
-            }
-        }
-        let r_norm = Self::normalize_reranker(&self.reranker, None);
-        for prefix in &[
-            "openai:",
-            "openrouter:",
-            "gemini:",
-            "groq:",
-            "deepseek:",
-            "mistral:",
-            "ollama:",
-        ] {
-            if let Some(model) = r_norm.strip_prefix(prefix) {
-                let prov = match *prefix {
-                    "openai:" => "OpenAI",
-                    "openrouter:" => "OpenRouter",
-                    "gemini:" => "Gemini",
-                    "groq:" => "Groq",
-                    "deepseek:" => "DeepSeek",
-                    "mistral:" => "Mistral",
-                    _ => "llm",
-                };
-                return format!("{}:{} (@ {})", prov, model, eff_url);
-            }
-        }
-        format!("llm (@ {})", eff_url)
+        "on".to_string()
     }
 
     pub fn config_dir() -> PathBuf {
@@ -706,30 +692,66 @@ impl LightMemConfig {
         let mut cfg: Self = serde_json::from_value(raw_val.clone())
             .with_context(|| format!("Invalid configuration at {}", path.display()))?;
         cfg.reranker = Self::normalize_reranker(&cfg.reranker, legacy_qa);
-        anyhow::ensure!(
-            matches!(cfg.entity_extraction.as_str(), "off" | "llm")
-                || cfg.entity_extraction.starts_with("llm:")
-                || cfg.entity_extraction.starts_with("ollama:")
-                || cfg.entity_extraction.starts_with("openai:")
-                || cfg.entity_extraction.starts_with("openrouter:")
-                || cfg.entity_extraction.starts_with("gemini:")
-                || cfg.entity_extraction.starts_with("groq:")
-                || cfg.entity_extraction.starts_with("deepseek:")
-                || cfg.entity_extraction.starts_with("mistral:"),
-            "entity_extraction must be off, llm, or <provider>:<model>"
-        );
+        if cfg.backend == "onnx" {
+            let emb = cfg.embedding_model.trim().to_lowercase();
+            let is_chat = emb.contains("qwen")
+                || emb.contains("llama")
+                || emb.contains("mistral")
+                || emb.contains("gemma")
+                || emb.contains("coder")
+                || emb.contains("chat");
+            if is_chat {
+                if cfg.reranker == "ollama" || cfg.reranker.is_empty() {
+                    cfg.reranker = format!("ollama:{}", cfg.embedding_model);
+                }
+                cfg.embedding_model = cfg
+                    .onnx_model
+                    .clone()
+                    .unwrap_or_else(|| "bge-small".to_string());
+            }
+            if cfg.onnx_model.is_none() && !cfg.embedding_model.is_empty() {
+                cfg.onnx_model = Some(cfg.embedding_model.clone());
+            }
+        }
+        let mode = cfg.entity_extraction.trim().to_lowercase();
+        cfg.entity_extraction = if mode == "off" || mode == "false" || mode.is_empty() {
+            "off".to_string()
+        } else {
+            "on".to_string()
+        };
         Ok(cfg)
     }
 
     pub fn redacted_json(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
-        for field in ["api_key", "ollama_api_key"] {
+        for field in ["api_key", "ollama_api_key", "openai_api_key"] {
             if value.get(field).is_some() {
                 value[field] = serde_json::json!("[REDACTED]");
             }
         }
+        if let Some(ref k) = self.ollama_api_key {
+            if !k.trim().is_empty() {
+                value["ollama_api_key"] = serde_json::json!("[REDACTED]");
+                value["openai_api_key"] = serde_json::json!("[REDACTED]");
+            }
+        }
+        value["ollama_url"] = serde_json::json!(self.ollama_url);
+        value["openai_endpoint"] = serde_json::json!(self.ollama_url);
+        value["reranker"] = serde_json::json!(self.reranker);
+        value["openai_model"] = serde_json::json!(self.reranker);
+        let norm_entity = if self.entity_extraction != "off" && !self.entity_extraction.is_empty() {
+            "on"
+        } else {
+            "off"
+        };
+        value["entity_extraction"] = serde_json::json!(norm_entity);
+        if self.backend == "onnx" {
+            value["onnx_model"] = serde_json::json!(self.effective_onnx_model());
+        }
         value["api_key_configured"] = serde_json::json!(self.effective_api_key().is_some());
         value["ollama_api_key_configured"] =
+            serde_json::json!(self.effective_ollama_api_key().is_some());
+        value["openai_api_key_configured"] =
             serde_json::json!(self.effective_ollama_api_key().is_some());
         Ok(value)
     }
@@ -744,7 +766,19 @@ impl LightMemConfig {
             let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
         }
 
-        let json = serde_json::to_string_pretty(self)?;
+        let mut to_save = self.clone();
+        if to_save.backend == "onnx" {
+            to_save.onnx_model = None;
+        }
+        let norm_entity =
+            if to_save.entity_extraction != "off" && !to_save.entity_extraction.is_empty() {
+                "on"
+            } else {
+                "off"
+            };
+        to_save.entity_extraction = norm_entity.to_string();
+
+        let json = serde_json::to_string_pretty(&to_save)?;
         let temp = dir.join(format!("config-{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&temp, json).with_context(|| "Failed to write config file")?;
         #[cfg(unix)]

@@ -1060,42 +1060,31 @@ impl ObserverService {
             !LightMemConfig::offline_requested(),
             "Offline mode blocks LLM attachment extraction"
         );
-        let explicit_model = if config.entity_extraction != "off"
-            && config.entity_extraction != "llm"
-            && !config.entity_extraction.is_empty()
-        {
-            let m = strip_provider_prefix_clean(&config.entity_extraction);
-            if m.is_empty() {
-                None
-            } else {
-                Some(m.to_string())
-            }
-        } else {
-            let raw_spec = reranker_spec.unwrap_or(&config.reranker);
-            let model_spec = strip_provider_prefix_clean(raw_spec);
+        // Attachment extraction uses the unified model (same as answers and entity extraction)
+        let raw_spec = reranker_spec.unwrap_or(&config.reranker);
+        let model_spec = strip_provider_prefix_clean(raw_spec);
 
-            if matches!(
-                model_spec.to_lowercase().as_str(),
-                "ollama"
-                    | "openai"
-                    | "openrouter"
-                    | "gemini"
-                    | "groq"
-                    | "deepseek"
-                    | "mistral"
-                    | "llm"
-                    | "auto"
-                    | "default"
-                    | ""
-                    | "minilm-squad2"
-                    | "tinyroberta-squad2"
-                    | "top1"
-                    | "none"
-            ) {
-                None
-            } else {
-                Some(model_spec.to_string())
-            }
+        let explicit_model = if matches!(
+            model_spec.to_lowercase().as_str(),
+            "ollama"
+                | "openai"
+                | "openrouter"
+                | "gemini"
+                | "groq"
+                | "deepseek"
+                | "mistral"
+                | "llm"
+                | "auto"
+                | "default"
+                | ""
+                | "minilm-squad2"
+                | "tinyroberta-squad2"
+                | "top1"
+                | "none"
+        ) {
+            None
+        } else {
+            Some(model_spec.to_string())
         };
 
         let ollama = OllamaReranker::with_api_key(
@@ -1332,9 +1321,17 @@ impl ObserverService {
 
     /// Extracts structured key-value entities (e.g. pincode, address, phone, email, names, IDs)
     /// from memory content using the configured LLM.
+    /// Compact prompt form for LLM entity extraction (minimal token footprint)
+    pub fn build_entity_extraction_prompt(text: &str) -> (&'static str, String) {
+        let system_prompt = "Extract factual attributes as JSON: [{\"name\":\"snake_case\",\"val\":\"value\"}]. If none, return [].";
+        let user_prompt = text.trim().to_string();
+        (system_prompt, user_prompt)
+    }
+
+    /// Extracts structured key-value entities (e.g. pincode, address, phone, email, names, IDs)
+    /// from memory content using the configured Ollama LLM.
     pub fn extract_entities_via_llm(
         text: &str,
-        reranker_spec: Option<&str>,
         config: &LightMemConfig,
     ) -> Result<Vec<EntityRecord>> {
         let trimmed = text.trim();
@@ -1348,42 +1345,28 @@ impl ObserverService {
             anyhow::bail!("Offline mode active: skipping LLM entity extraction");
         }
 
-        let explicit_model = if config.entity_extraction != "off"
-            && config.entity_extraction != "llm"
-            && !config.entity_extraction.is_empty()
-        {
-            let m = strip_provider_prefix_clean(&config.entity_extraction);
-            if m.is_empty() {
-                None
-            } else {
-                Some(m.to_string())
-            }
+        let model_spec = strip_provider_prefix_clean(&config.reranker);
+        let explicit_model = if matches!(
+            model_spec.to_lowercase().as_str(),
+            "ollama"
+                | "openai"
+                | "openrouter"
+                | "gemini"
+                | "groq"
+                | "deepseek"
+                | "mistral"
+                | "llm"
+                | "auto"
+                | "default"
+                | ""
+                | "minilm-squad2"
+                | "tinyroberta-squad2"
+                | "top1"
+                | "none"
+        ) {
+            None
         } else {
-            let raw_spec = reranker_spec.unwrap_or(&config.reranker);
-            let model_spec = strip_provider_prefix_clean(raw_spec);
-
-            if matches!(
-                model_spec.to_lowercase().as_str(),
-                "ollama"
-                    | "openai"
-                    | "openrouter"
-                    | "gemini"
-                    | "groq"
-                    | "deepseek"
-                    | "mistral"
-                    | "llm"
-                    | "auto"
-                    | "default"
-                    | ""
-                    | "minilm-squad2"
-                    | "tinyroberta-squad2"
-                    | "top1"
-                    | "none"
-            ) {
-                None
-            } else {
-                Some(model_spec.to_string())
-            }
+            Some(model_spec.to_string())
         };
 
         let ollama = OllamaReranker::with_api_key(
@@ -1393,25 +1376,17 @@ impl ObserverService {
         );
         let resolved_model = ollama.resolve_model();
 
-        let system_prompt = "You are a precise entity and slot extraction engine. Extract all key factual attribute-value pairs and identifiers from the provided text (such as pincode, postal_code, address, city, country, phone, email, full_name, user_id, organization, port, role, etc.). Only emit pairs where val is a distinct factual value, not a mere repeat of name.\n\
-            Return ONLY a valid JSON array of objects matching schema:\n\
-            [\n\
-              {\n\
-                \"name\": \"entity_name_in_lowercase_snake_case\",\n\
-                \"val\": \"exact_extracted_value\"\n\
-              }\n\
-            ]\n\
-            If no specific entities or attributes are present, return [].";
+        let (system_prompt, user_prompt) = Self::build_entity_extraction_prompt(trimmed);
 
         let chat_url = format!("{}/v1/chat/completions", config.effective_ollama_url());
         let payload = serde_json::json!({
             "model": resolved_model,
             "messages": [
                 { "role": "system", "content": system_prompt },
-                { "role": "user", "content": text }
+                { "role": "user", "content": user_prompt }
             ],
             "temperature": 0.0,
-            "max_tokens": 1024,
+            "max_tokens": 512,
             "reasoning_effort": "none"
         });
 
@@ -1432,10 +1407,10 @@ impl ObserverService {
                     "model": resolved_model,
                     "messages": [
                         { "role": "system", "content": system_prompt },
-                        { "role": "user", "content": text }
+                        { "role": "user", "content": user_prompt }
                     ],
                     "temperature": 0.0,
-                    "max_tokens": 1024
+                    "max_tokens": 512
                 }))
             }
             other => other,
@@ -1453,6 +1428,7 @@ impl ObserverService {
             .and_then(|choice| choice.get("message"))
             .and_then(|m| m.get("content"))
             .and_then(|v| v.as_str())
+            .or_else(|| json_resp.get("response").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
 
@@ -1469,6 +1445,7 @@ impl ObserverService {
 
         let arr = parsed
             .as_array()
+            .or_else(|| parsed.get("entities").and_then(|v| v.as_array()))
             .ok_or_else(|| anyhow::anyhow!("LLM entities response is not a JSON array"))?;
 
         let mut results = Vec::new();
