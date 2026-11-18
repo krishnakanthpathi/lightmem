@@ -48,6 +48,7 @@ pub struct McpServer {
     global: bool,
     db_path: Option<PathBuf>,
     connection: Option<crate::models::ResolvedConnection>,
+    config_override: Option<LightMemConfig>,
 }
 
 impl McpServer {
@@ -56,6 +57,7 @@ impl McpServer {
             global,
             db_path,
             connection: None,
+            config_override: None,
         }
     }
 
@@ -67,12 +69,21 @@ impl McpServer {
         self
     }
 
+    #[cfg(test)]
+    pub fn with_config(mut self, config: LightMemConfig) -> Self {
+        self.config_override = Some(config);
+        self
+    }
+
     fn open_controller(&self) -> Result<LightMem> {
         if let Some(ref connection) = self.connection {
             return LightMem::open_resolved(connection);
         }
         if let Some(ref path) = self.db_path {
-            let config = LightMemConfig::try_load().unwrap_or_default();
+            let config = self
+                .config_override
+                .clone()
+                .unwrap_or_else(|| LightMemConfig::try_load().unwrap_or_default());
             LightMem::open_at(path, config)
         } else {
             LightMem::open_default(self.global)
@@ -1006,7 +1017,13 @@ mod tests {
     #[test]
     fn test_mcp_remember_session_without_connection() {
         let temp_db = tempfile::NamedTempFile::new().unwrap();
-        let server = McpServer::new(false, Some(temp_db.path().to_path_buf()));
+        let cfg = LightMemConfig {
+            backend: "hash".to_string(),
+            reranker: "top1".to_string(),
+            entity_extraction: "off".to_string(),
+            ..LightMemConfig::default()
+        };
+        let server = McpServer::new(false, Some(temp_db.path().to_path_buf())).with_config(cfg);
         let res = server
             .call_tool(
                 "remember",

@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandHistoryEntry {
@@ -23,15 +23,18 @@ impl HistoryService {
     }
 
     pub fn open_conn() -> Result<Connection> {
-        let path = Self::db_path();
+        Self::open_conn_at(&Self::db_path())
+    }
+
+    pub fn open_conn_at(path: &Path) -> Result<Connection> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open(path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         }
         let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -67,17 +70,25 @@ impl HistoryService {
         {
             return;
         }
-        let _ = Self::record_internal(command, subcommand, status, duration_ms, error_message);
+        let _ = Self::record_at(
+            &Self::db_path(),
+            command,
+            subcommand,
+            status,
+            duration_ms,
+            error_message,
+        );
     }
 
-    fn record_internal(
+    fn record_at(
+        path: &Path,
         command: &str,
         subcommand: &str,
         status: &str,
         duration_ms: u64,
         error_message: Option<&str>,
     ) -> Result<()> {
-        let conn = Self::open_conn()?;
+        let conn = Self::open_conn_at(path)?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO command_history (command, subcommand, status, duration_ms, error_message, created_at)
@@ -106,11 +117,19 @@ impl HistoryService {
         status: Option<&str>,
         limit: usize,
     ) -> Result<(Vec<CommandHistoryEntry>, usize)> {
-        let path = Self::db_path();
+        Self::list_at(&Self::db_path(), query, status, limit)
+    }
+
+    fn list_at(
+        path: &Path,
+        query: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<CommandHistoryEntry>, usize)> {
         if !path.exists() {
             return Ok((Vec::new(), 0));
         }
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open(path)?;
         let _ = conn.busy_timeout(std::time::Duration::from_secs(3));
 
         let table_exists: bool = conn
@@ -184,11 +203,14 @@ impl HistoryService {
 
     /// Clear all command history.
     pub fn clear() -> Result<usize> {
-        let path = Self::db_path();
+        Self::clear_at(&Self::db_path())
+    }
+
+    fn clear_at(path: &Path) -> Result<usize> {
         if !path.exists() {
             return Ok(0);
         }
-        let conn = Connection::open(&path)?;
+        let conn = Connection::open(path)?;
         let deleted = conn.execute("DELETE FROM command_history", [])?;
         let _ = conn.execute("VACUUM", []);
         Ok(deleted)
@@ -282,31 +304,48 @@ mod tests {
     #[test]
     fn test_record_list_filter_and_clear() {
         let temp_dir = tempfile::tempdir().unwrap();
-        std::env::set_var("LIGHTMEM_CONFIG_DIR", temp_dir.path());
+        let db_path = temp_dir.path().join("history.db");
 
-        HistoryService::record("lmem remember test", "remember", "success", 12, None);
-        HistoryService::record("lmem recall test", "recall", "success", 8, None);
-        HistoryService::record("lmem answer test", "answer", "error", 200, Some("Failed"));
+        HistoryService::record_at(
+            &db_path,
+            "lmem remember test",
+            "remember",
+            "success",
+            12,
+            None,
+        )
+        .unwrap();
+        HistoryService::record_at(&db_path, "lmem recall test", "recall", "success", 8, None)
+            .unwrap();
+        HistoryService::record_at(
+            &db_path,
+            "lmem answer test",
+            "answer",
+            "error",
+            200,
+            Some("Failed"),
+        )
+        .unwrap();
 
-        let (all, total) = HistoryService::list(None, None, 10).unwrap();
+        let (all, total) = HistoryService::list_at(&db_path, None, None, 10).unwrap();
         assert_eq!(total, 3);
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].subcommand, "answer");
         assert_eq!(all[0].status, "error");
 
-        let (recalls, r_tot) = HistoryService::list(Some("recall"), None, 10).unwrap();
+        let (recalls, r_tot) = HistoryService::list_at(&db_path, Some("recall"), None, 10).unwrap();
         assert_eq!(r_tot, 3);
         assert_eq!(recalls.len(), 1);
         assert_eq!(recalls[0].subcommand, "recall");
 
-        let (errs, _) = HistoryService::list(None, Some("error"), 10).unwrap();
+        let (errs, _) = HistoryService::list_at(&db_path, None, Some("error"), 10).unwrap();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].subcommand, "answer");
 
-        let cleared = HistoryService::clear().unwrap();
+        let cleared = HistoryService::clear_at(&db_path).unwrap();
         assert_eq!(cleared, 3);
 
-        let (empty, total_after) = HistoryService::list(None, None, 10).unwrap();
+        let (empty, total_after) = HistoryService::list_at(&db_path, None, None, 10).unwrap();
         assert_eq!(total_after, 0);
         assert!(empty.is_empty());
     }

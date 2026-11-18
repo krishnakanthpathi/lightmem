@@ -272,12 +272,21 @@ fn request_limits_authentication_and_browser_origin_are_enforced() {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    write!(
+    // The server rejects headers > 8192 bytes with 400 and closes the connection immediately,
+    // so writing 9000+ bytes may legitimately hit BrokenPipe / ConnectionReset before completion.
+    if let Err(err) = write!(
         stream,
         "GET /v1/stats HTTP/1.1\r\nHost: {address}\r\nX-Big: {}\r\n\r\n",
         "x".repeat(9000)
-    )
-    .unwrap();
+    ) {
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "Unexpected write error for oversized headers: {err}"
+        );
+    }
     let mut response = String::new();
     let _ = stream.read_to_string(&mut response);
     assert!(response.starts_with("HTTP/1.1 400"));
