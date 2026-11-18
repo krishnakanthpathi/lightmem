@@ -75,7 +75,13 @@ lmem bundle info ./vault_backup.zip                             # Inspect bundle
 lmem bundle import ./vault_backup.zip                           # Restore entire vault
 lmem bundle import ./vault_backup.zip --merge                   # Merge into existing vault
 
-# 9. Engine Configuration
+# 9. Command History & Audit Trail
+lmem history                                                    # View recent command execution history
+lmem history "answer"                                           # Search history for commands matching query
+lmem history --status error -n 10                               # Filter by status (success|error) with limit
+lmem history --clear                                            # Clear command execution history
+
+# 10. Engine Configuration
 lmem setup                                                      # Interactive setup wizard
 lmem config                                                     # View active settings
 lmem config --backend onnx|ollama|hash                          # Set embedding backend
@@ -87,7 +93,7 @@ lmem config --api-key <key>                                     # Set API key fo
 lmem config reload                                              # Reload settings from ~/.lightmem/config.json
 lmem doctor                                                     # Run system diagnostics
 
-# 10. Remote Server & Client Routing
+# 11. Remote Server & Client Routing
 lmem serve --host 0.0.0.0 --port 8080 --api-key "secret"        # Run server in foreground
 lmem serve -d --host 0.0.0.0 --port 8080 --api-key "secret"     # Run as background daemon
 lmem remote http://server:8080 --api-key "secret"               # Connect to remote LightMem

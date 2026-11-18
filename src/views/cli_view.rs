@@ -2,7 +2,7 @@ use crate::models::{
     GraphSnapshot, LightMemConfig, MemoryConflict, MemoryRecord, PaginatedMemories, RelatedMemory,
     ScoredMemory, StorageStats,
 };
-use crate::services::{AnswerResult, ObservedCandidate};
+use crate::services::{AnswerResult, ObservedCandidate, OllamaReranker};
 
 use anyhow::Result;
 use colored::*;
@@ -83,6 +83,37 @@ impl CliView {
         s.truecolor(167, 139, 250)
     }
 
+    pub fn model_provider_name(cfg: &LightMemConfig) -> &'static str {
+        let lower_r = cfg.reranker.to_lowercase();
+        let lower_url = cfg.ollama_url.to_lowercase();
+        if lower_r.starts_with("ollama:")
+            || lower_r == "ollama"
+            || lower_url.contains("11434")
+            || lower_url.contains("ollama.com")
+        {
+            "Ollama"
+        } else if lower_r.starts_with("gemini:") || lower_url.contains("googleapis.com") {
+            "Gemini"
+        } else if lower_r.starts_with("openrouter:") || lower_url.contains("openrouter.ai") {
+            "OpenRouter"
+        } else if lower_r.starts_with("groq:") || lower_url.contains("groq.com") {
+            "Groq"
+        } else if lower_r.starts_with("deepseek:") || lower_url.contains("deepseek.com") {
+            "DeepSeek"
+        } else if lower_r.starts_with("mistral:") || lower_url.contains("mistral.ai") {
+            "Mistral"
+        } else if lower_r.starts_with("openai:") || lower_url.contains("openai.com") {
+            "OpenAI"
+        } else if matches!(
+            lower_r.as_str(),
+            "minilm-squad2" | "tinyroberta-squad2" | "onnx"
+        ) {
+            "Local ONNX"
+        } else {
+            "Chat/QA"
+        }
+    }
+
     /// Render a single pair of vertical pixel rows from `CLOUD_LOGO_MATRIX` using Unicode half-blocks.
     fn render_logo_row(pair_idx: usize) -> String {
         let top_row = CLOUD_LOGO_MATRIX[pair_idx * 2].as_bytes();
@@ -160,9 +191,39 @@ impl CliView {
         let norm_reranker = LightMemConfig::normalize_reranker(&cfg.reranker, None);
         let reranker_label = match norm_reranker.as_str() {
             "minilm-squad2" | "tinyroberta-squad2" => format!("onnx ({})", norm_reranker),
-            "ollama" => "ollama (auto)".to_string(),
+            "ollama" | "auto" => {
+                let resolved = OllamaReranker::with_api_key(
+                    cfg.effective_ollama_url(),
+                    None,
+                    cfg.ollama_api_key.clone(),
+                )
+                .resolve_model_with_timeout(std::time::Duration::from_millis(200));
+                if let Some(m) = resolved {
+                    format!("ollama (auto: {})", m)
+                } else {
+                    "ollama (auto)".to_string()
+                }
+            }
             other if other.starts_with("ollama:") => {
                 format!("ollama ({})", &other[7..])
+            }
+            other if other.starts_with("openai:") => {
+                format!("openai ({})", &other[7..])
+            }
+            other if other.starts_with("openrouter:") => {
+                format!("openrouter ({})", &other[11..])
+            }
+            other if other.starts_with("gemini:") => {
+                format!("gemini ({})", &other[7..])
+            }
+            other if other.starts_with("groq:") => {
+                format!("groq ({})", &other[7..])
+            }
+            other if other.starts_with("deepseek:") => {
+                format!("deepseek ({})", &other[9..])
+            }
+            other if other.starts_with("mistral:") => {
+                format!("mistral ({})", &other[8..])
             }
             other => other.to_string(),
         };
@@ -1147,11 +1208,53 @@ impl CliView {
             Self::rose(&conf_pct.to_string())
         );
         println!();
-        println!(
-            "  {} {}",
-            Self::crimson_bold("▸"),
-            Self::white_bold(&result.answer)
-        );
+        if result.answer.contains('\n') {
+            let mut printed_first = false;
+            for line in result.answer.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(item) = trimmed
+                    .strip_prefix("- ")
+                    .or_else(|| trimmed.strip_prefix("* "))
+                    .or_else(|| trimmed.strip_prefix("• "))
+                {
+                    println!(
+                        "  {} {}",
+                        Self::crimson_bold("•"),
+                        Self::white_bold(item.trim())
+                    );
+                } else if !printed_first {
+                    println!(
+                        "  {} {}",
+                        Self::crimson_bold("▸"),
+                        Self::white_bold(trimmed)
+                    );
+                } else {
+                    println!("    {}", Self::white_bold(trimmed));
+                }
+                printed_first = true;
+            }
+        } else if let Some(item) = result
+            .answer
+            .trim()
+            .strip_prefix("- ")
+            .or_else(|| result.answer.trim().strip_prefix("* "))
+            .or_else(|| result.answer.trim().strip_prefix("• "))
+        {
+            println!(
+                "  {} {}",
+                Self::crimson_bold("•"),
+                Self::white_bold(item.trim())
+            );
+        } else {
+            println!(
+                "  {} {}",
+                Self::crimson_bold("▸"),
+                Self::white_bold(&result.answer)
+            );
+        }
         println!();
 
         if let Some(m) = &result.selected_memory {
@@ -1303,16 +1406,37 @@ impl CliView {
             "Search Embedder:",
             Self::emerald_bold(&cfg.active_embedding_summary())
         );
+        let provider = Self::model_provider_name(cfg);
+        let model_label = format!("{} Model:", provider);
+        let endpoint_label = format!("{} Endpoint:", provider);
+        let key_label = format!("{} API Key:", provider);
+
+        let model_display = if cfg.reranker == "ollama" || cfg.reranker == "auto" {
+            let resolved = OllamaReranker::with_api_key(
+                cfg.effective_ollama_url(),
+                None,
+                cfg.ollama_api_key.clone(),
+            )
+            .resolve_model_with_timeout(std::time::Duration::from_millis(200));
+            if let Some(m) = resolved {
+                format!("ollama (auto: {})", m)
+            } else {
+                "ollama (auto)".to_string()
+            }
+        } else {
+            cfg.reranker.clone()
+        };
+
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "OpenAI Model:",
-            Self::emerald_bold(&cfg.reranker)
+            model_label,
+            Self::emerald_bold(&model_display)
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "OpenAI Endpoint:",
+            endpoint_label,
             Self::emerald(&cfg.ollama_url)
         );
         let key_disp = if cfg
@@ -1326,12 +1450,7 @@ impl CliView {
         } else {
             Self::slate("empty (none)")
         };
-        println!(
-            "  │  {} {:<18} {}",
-            Self::slate("▸"),
-            "OpenAI API Key:",
-            key_disp
-        );
+        println!("  │  {} {:<18} {}", Self::slate("▸"), key_label, key_disp);
         let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
         } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
@@ -1449,6 +1568,22 @@ impl CliView {
                     "active_reranker_summary".into(),
                     serde_json::Value::String(cfg.active_reranker_summary()),
                 );
+                let provider = Self::model_provider_name(cfg);
+                obj.insert(
+                    "model_provider".into(),
+                    serde_json::Value::String(provider.to_string()),
+                );
+                if cfg.reranker == "ollama" || cfg.reranker == "auto" {
+                    if let Some(m) = OllamaReranker::with_api_key(
+                        cfg.effective_ollama_url(),
+                        None,
+                        cfg.ollama_api_key.clone(),
+                    )
+                    .resolve_model_with_timeout(std::time::Duration::from_millis(200))
+                    {
+                        obj.insert("resolved_model".into(), serde_json::Value::String(m));
+                    }
+                }
                 obj.insert(
                     "config_file".into(),
                     serde_json::Value::String(
@@ -1538,16 +1673,37 @@ impl CliView {
             "Search Embedder:",
             Self::emerald_bold(&cfg.active_embedding_summary())
         );
+        let provider = Self::model_provider_name(cfg);
+        let model_label = format!("{} Model:", provider);
+        let endpoint_label = format!("{} Endpoint:", provider);
+        let key_label = format!("{} API Key:", provider);
+
+        let model_display = if cfg.reranker == "ollama" || cfg.reranker == "auto" {
+            let resolved = OllamaReranker::with_api_key(
+                cfg.effective_ollama_url(),
+                None,
+                cfg.ollama_api_key.clone(),
+            )
+            .resolve_model_with_timeout(std::time::Duration::from_millis(200));
+            if let Some(m) = resolved {
+                format!("ollama (auto: {})", m)
+            } else {
+                "ollama (auto)".to_string()
+            }
+        } else {
+            cfg.reranker.clone()
+        };
+
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "OpenAI Model:",
-            Self::emerald_bold(&cfg.reranker)
+            model_label,
+            Self::emerald_bold(&model_display)
         );
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "OpenAI Endpoint:",
+            endpoint_label,
             Self::emerald(&cfg.ollama_url)
         );
         let key_disp = if cfg
@@ -1561,12 +1717,7 @@ impl CliView {
         } else {
             Self::slate("empty (none)")
         };
-        println!(
-            "  │  {} {:<18} {}",
-            Self::slate("▸"),
-            "OpenAI API Key:",
-            key_disp
-        );
+        println!("  │  {} {:<18} {}", Self::slate("▸"), key_label, key_disp);
         let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
         } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
@@ -2405,6 +2556,152 @@ impl CliView {
         Ok(())
     }
 
+    /// Render command history list in a branded table format or JSON.
+    pub fn render_history(
+        entries: &[crate::services::history::CommandHistoryEntry],
+        total: usize,
+        db_path: &Path,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(entries)?);
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("L I G H T M E M  Command History")
+        );
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
+        println!(
+            "  {} {:<18} {}",
+            Self::slate("◫"),
+            "Storage:".dimmed(),
+            Self::format_path(db_path).bold()
+        );
+        let count_str = if entries.len() < total {
+            format!("{} recorded (showing latest {})", total, entries.len())
+        } else {
+            format!("{} recorded", total)
+        };
+        println!(
+            "  {} {:<18} {}",
+            Self::slate("◈"),
+            "Total Entries:".dimmed(),
+            Self::emerald_bold(&count_str)
+        );
+        println!();
+
+        if entries.is_empty() {
+            println!("  {}", "No command history found.".dimmed());
+            println!();
+            return Ok(());
+        }
+
+        println!(
+            "  {:<6} {:<8} {:<14} {:<10} {}",
+            "#".dimmed(),
+            "STATUS".dimmed(),
+            "TIME".dimmed(),
+            "DURATION".dimmed(),
+            "COMMAND".dimmed()
+        );
+        println!(
+            "  {}",
+            "─────────────────────────────────────────────────────────────".dimmed()
+        );
+
+        for (idx, entry) in entries.iter().enumerate() {
+            let row_num = format!("{:>4}", entries.len() - idx);
+            let status_mark = if entry.status == "success" {
+                Self::emerald_bold("✓")
+            } else {
+                Self::crimson_bold("✗")
+            };
+            let time_disp = Self::format_relative_time(&entry.created_at);
+            let dur_disp = if entry.duration_ms < 1000 {
+                format!("{}ms", entry.duration_ms)
+            } else {
+                format!("{:.2}s", entry.duration_ms as f64 / 1000.0)
+            };
+
+            println!(
+                "  {}     {}     {:<14} {:<10} {}",
+                Self::slate(&row_num),
+                status_mark,
+                Self::slate(&time_disp),
+                Self::slate(&dur_disp),
+                entry.command.white().bold()
+            );
+        }
+
+        println!(
+            "  {}",
+            "─────────────────────────────────────────────────────────────".dimmed()
+        );
+        println!(
+            "  {} Tip: Filter with '{}', or clear with '{}'.",
+            Self::gold("💡"),
+            Self::violet("lmem history <query>"),
+            Self::violet("lmem history --clear")
+        );
+        println!();
+
+        Ok(())
+    }
+
+    /// Render message confirming command history was cleared.
+    pub fn render_history_cleared(cleared_count: usize, json: bool) -> Result<()> {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "ok",
+                    "cleared": cleared_count
+                })
+            );
+            return Ok(());
+        }
+        println!();
+        println!(
+            "  {} {}",
+            Self::emerald_bold("✓"),
+            format!("Command history cleared ({cleared_count} entries removed).")
+                .white()
+                .bold()
+        );
+        println!();
+        Ok(())
+    }
+
+    fn format_relative_time(iso_ts: &str) -> String {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_ts) {
+            let now = chrono::Utc::now();
+            let diff = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
+            let secs = diff.num_seconds();
+            if secs < 60 {
+                "just now".to_string()
+            } else if secs < 3600 {
+                format!("{}m ago", secs / 60)
+            } else if secs < 86400 {
+                format!("{}h ago", secs / 3600)
+            } else if secs < 172800 {
+                "yesterday".to_string()
+            } else if secs < 86400 * 30 {
+                format!("{}d ago", secs / 86400)
+            } else {
+                dt.format("%b %d, %H:%M").to_string()
+            }
+        } else {
+            iso_ts.to_string()
+        }
+    }
+
     /// Render a standardized, branded LightMem error card with reasons and actionable suggestions.
     pub fn render_error(err: &CliErrorCard, json: bool) {
         if json {
@@ -2443,28 +2740,290 @@ impl CliView {
             "  {}",
             Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
+        let max_label_len = err
+            .details
+            .iter()
+            .map(|(l, _)| l.len() + 1)
+            .max()
+            .unwrap_or(16)
+            .max(16);
         eprintln!(
-            "  {} {:<16} {}",
+            "  {} {:<width$} {}",
             Self::slate("◈"),
             Self::white_bold("Reason:"),
-            err.reason
+            err.reason,
+            width = max_label_len
         );
         for (label, val) in err.details {
             eprintln!(
-                "  {} {:<16} {}",
+                "  {} {:<width$} {}",
                 Self::slate("◈"),
                 Self::white_bold(&format!("{}:", label)),
-                val
+                val,
+                width = max_label_len
             );
         }
         if !err.suggestions.is_empty() {
             eprintln!();
             eprintln!("  {} {}", Self::gold("💡"), Self::white_bold("How to fix:"));
+            let max_action_len = err
+                .suggestions
+                .iter()
+                .map(|(a, _)| a.len())
+                .max()
+                .unwrap_or(18)
+                .max(18);
             for (action, cmd) in err.suggestions {
-                eprintln!("    {} {:<18} {}", Self::slate("•"), action, cmd.cyan());
+                eprintln!(
+                    "    {} {:<width$} {}",
+                    Self::slate("•"),
+                    action,
+                    cmd.cyan(),
+                    width = max_action_len + 1
+                );
             }
         }
         eprintln!();
+    }
+
+    /// Parse and render a generative/chat completions error using a standardized LightMem error card.
+    /// Returns `true` if the error was recognized as a model error and rendered, or `false` otherwise.
+    pub fn try_render_model_error(err_str: &str, json: bool) -> bool {
+        let is_chat = err_str.contains("Chat completions request to")
+            || err_str.contains("Ollama QA request to")
+            || err_str.contains("/v1/chat/completions")
+            || err_str.contains("chat/completions")
+            || err_str.contains("/api/generate");
+
+        if !is_chat {
+            return false;
+        }
+
+        // Extract endpoint URL
+        let endpoint = if let Some(start) = err_str.find("request to ") {
+            let rest = &err_str[start + "request to ".len()..];
+            let end = rest.find(' ').unwrap_or(rest.len());
+            rest[..end].trim()
+        } else if let Some(start) = err_str.find("https://") {
+            let rest = &err_str[start..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ')' || c == '\'' || c == '"')
+                .unwrap_or(rest.len());
+            rest[..end].trim()
+        } else if let Some(start) = err_str.find("http://") {
+            let rest = &err_str[start..];
+            let end = rest
+                .find(|c: char| c.is_whitespace() || c == ')' || c == '\'' || c == '"')
+                .unwrap_or(rest.len());
+            rest[..end].trim()
+        } else {
+            ""
+        };
+
+        // Extract model name
+        let model = if let Some(start) = err_str.find("(model '") {
+            let rest = &err_str[start + "(model '".len()..];
+            let end = rest.find("')").unwrap_or(rest.len());
+            rest[..end].trim()
+        } else if let Some(start) = err_str.find("model '") {
+            let rest = &err_str[start + "model '".len()..];
+            let end = rest.find('\'').unwrap_or(rest.len());
+            rest[..end].trim()
+        } else {
+            ""
+        };
+
+        // Extract failure details
+        let failure_detail = if let Some(idx) = err_str.rfind("failed:") {
+            err_str[idx + "failed:".len()..].trim()
+        } else {
+            err_str.trim()
+        };
+
+        // Check error category
+        let lower = failure_detail.to_lowercase();
+        let is_401 = lower.contains("401")
+            || lower.contains("unauthorized")
+            || lower.contains("invalid_api_key")
+            || lower.contains("incorrect api key");
+        let is_403 = lower.contains("403") || lower.contains("forbidden");
+        let is_404 = lower.contains("404") || lower.contains("not found");
+        let is_429 =
+            lower.contains("429") || lower.contains("rate limit") || lower.contains("quota");
+        let is_connection = lower.contains("connection refused")
+            || lower.contains("failed to connect")
+            || lower.contains("timed out")
+            || lower.contains("timeout")
+            || lower.contains("dns")
+            || lower.contains("could not resolve");
+
+        let mut details_vec: Vec<(&str, String)> = Vec::new();
+
+        let (title, reason_str, suggestions): (&str, String, &[(&str, &str)]) = if is_401 {
+            if !model.is_empty() {
+                details_vec.push(("Model", model.to_string()));
+            }
+            if !endpoint.is_empty() {
+                details_vec.push(("Endpoint", endpoint.to_string()));
+            }
+            details_vec.push(("HTTP Status", "401 Unauthorized".to_string()));
+
+            if let Some(pos) = failure_detail.find("401:") {
+                let msg = failure_detail[pos + "401:".len()..].trim();
+                if !msg.is_empty() {
+                    details_vec.push(("Provider Note", msg.to_string()));
+                }
+            } else if lower.contains("incorrect api key") {
+                if let Some(pos) = failure_detail.find("Incorrect API key") {
+                    details_vec.push(("Provider Note", failure_detail[pos..].trim().to_string()));
+                }
+            }
+
+            (
+                "Chat Model Authentication Failed",
+                "The endpoint rejected authentication (HTTP 401 Unauthorized). The configured API key is missing or invalid.".to_string(),
+                &[
+                    ("Set API key:", "lmem config --api-key <key>"),
+                    ("Set via environment:", "export OPENAI_API_KEY=\"sk-...\""),
+                    ("Switch to local model:", "lmem config --preset local"),
+                    ("Switch to Ollama:", "lmem config --preset ollama"),
+                ],
+            )
+        } else if is_403 {
+            if !model.is_empty() {
+                details_vec.push(("Model", model.to_string()));
+            }
+            if !endpoint.is_empty() {
+                details_vec.push(("Endpoint", endpoint.to_string()));
+            }
+            details_vec.push(("HTTP Status", "403 Forbidden".to_string()));
+            (
+                "Chat Model Access Forbidden",
+                "Access to the model or endpoint was forbidden (HTTP 403 Forbidden).".to_string(),
+                &[
+                    (
+                        "Check permissions:",
+                        "Verify API key permissions with provider",
+                    ),
+                    ("Switch to local model:", "lmem config --preset local"),
+                ],
+            )
+        } else if is_404 {
+            if !model.is_empty() {
+                details_vec.push(("Model", model.to_string()));
+            }
+            if !endpoint.is_empty() {
+                details_vec.push(("Endpoint", endpoint.to_string()));
+            }
+            details_vec.push(("HTTP Status", "404 Not Found".to_string()));
+            (
+                "Chat Model Not Found",
+                "The requested model or endpoint was not found (HTTP 404 Not Found).".to_string(),
+                &[
+                    ("Configure model:", "lmem config --openai-model <model>"),
+                    ("Pull model (Ollama):", "ollama pull <model>"),
+                    ("Switch to local model:", "lmem config --preset local"),
+                ],
+            )
+        } else if is_429 {
+            if !model.is_empty() {
+                details_vec.push(("Model", model.to_string()));
+            }
+            if !endpoint.is_empty() {
+                details_vec.push(("Endpoint", endpoint.to_string()));
+            }
+            details_vec.push(("HTTP Status", "429 Too Many Requests".to_string()));
+            (
+                "Chat Model Rate Limit Exceeded",
+                "API rate limit reached or quota exhausted (HTTP 429 Too Many Requests)."
+                    .to_string(),
+                &[
+                    (
+                        "Check provider quota:",
+                        "Verify billing and rate limits on provider platform",
+                    ),
+                    ("Switch provider:", "lmem config --preset groq"),
+                    ("Switch to local model:", "lmem config --preset local"),
+                ],
+            )
+        } else if is_connection {
+            if !model.is_empty() {
+                details_vec.push(("Model", model.to_string()));
+            }
+            if !endpoint.is_empty() {
+                details_vec.push(("Endpoint", endpoint.to_string()));
+            }
+            (
+                "Chat Model Endpoint Unreachable",
+                "Could not connect to the model endpoint (connection refused or timed out)."
+                    .to_string(),
+                &[
+                    ("Start Ollama daemon:", "ollama serve"),
+                    ("Set endpoint URL:", "lmem config --endpoint <url>"),
+                    ("Switch to local model:", "lmem config --preset local"),
+                ],
+            )
+        } else {
+            if !model.is_empty() {
+                details_vec.push(("Model", model.to_string()));
+            }
+            if !endpoint.is_empty() {
+                details_vec.push(("Endpoint", endpoint.to_string()));
+            }
+            (
+                "Chat Model Request Failed",
+                format!(
+                    "Failed to communicate with generative model: {}",
+                    failure_detail
+                ),
+                &[
+                    ("Check configuration:", "lmem config"),
+                    ("Run diagnostics:", "lmem doctor"),
+                    ("Switch to local model:", "lmem config --preset local"),
+                ],
+            )
+        };
+
+        let borrowed_details: Vec<(&str, &str)> =
+            details_vec.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        Self::render_error(
+            &CliErrorCard {
+                title,
+                reason: &reason_str,
+                details: &borrowed_details,
+                suggestions,
+            },
+            json,
+        );
+
+        true
+    }
+
+    /// Render a known model error or fallback to a general error card for answer generation.
+    pub fn render_llm_or_error(err: &anyhow::Error, json: bool) {
+        let err_str = err.to_string();
+        if !Self::try_render_model_error(&err_str, json) {
+            Self::render_error(
+                &CliErrorCard {
+                    title: "Answer Generation Failed",
+                    reason: &err_str,
+                    details: &[],
+                    suggestions: &[
+                        ("Run diagnostics:", "lmem doctor"),
+                        ("Check configuration:", "lmem config"),
+                        ("Switch to local model:", "lmem config --preset local"),
+                    ],
+                },
+                json,
+            );
+        }
+    }
+
+    /// Try to render any known error (such as model or chat error) as a branded card.
+    pub fn try_render_known_error(err: &anyhow::Error, json: bool) -> bool {
+        let err_str = err.to_string();
+        Self::try_render_model_error(&err_str, json)
     }
 }
 
@@ -2475,4 +3034,34 @@ pub struct CliErrorCard<'a> {
     pub reason: &'a str,
     pub details: &'a [(&'a str, &'a str)],
     pub suggestions: &'a [(&'a str, &'a str)],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_render_model_error_exact_user_string() {
+        let err = "Chat completions request to https://api.openai.com/v1/chat/completions (model 'gpt-4o-mini') failed: https://api.openai.com/v1/chat/completions: status code 401";
+        assert!(CliView::try_render_model_error(err, false));
+        assert!(CliView::try_render_model_error(err, true));
+    }
+
+    #[test]
+    fn test_try_render_model_error_variants() {
+        let auth_err = "Chat completions request to https://api.openai.com/v1/chat/completions (model 'gpt-4o-mini') failed: status code 401: Incorrect API key provided";
+        assert!(CliView::try_render_model_error(auth_err, false));
+
+        let not_found_err = "Chat completions request to http://localhost:11434/v1/chat/completions (model 'qwen2.5:3b') failed: status code 404: model not found";
+        assert!(CliView::try_render_model_error(not_found_err, false));
+
+        let rate_err = "Chat completions request to https://api.openai.com/v1/chat/completions (model 'gpt-4o-mini') failed: status code 429: rate limit exceeded";
+        assert!(CliView::try_render_model_error(rate_err, false));
+
+        let conn_err = "Chat completions request to http://localhost:11434/v1/chat/completions (model 'bonsai-2:2b') failed: Connection refused";
+        assert!(CliView::try_render_model_error(conn_err, false));
+
+        let non_model_err = "Sqlite error: database disk image is malformed";
+        assert!(!CliView::try_render_model_error(non_model_err, false));
+    }
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.3
+
+- **Command History & Audit Trail**: Added `lmem history` (and alias `lmem hist`) command backed by an isolated local SQLite database (`~/.lightmem/history.db`, mode `0600`). Records executed command history, status (`✓`/`✗`), duration, relative timestamps, search query filtering (`lmem history <query>`), status filtering (`--status success|error`), limiting (`-n, --limit`), clearing (`--clear`), and JSON output (`--json`), with strict secret redaction (`--api-key`, `--openai-api-key`, etc.).
+- **Branded Model Error Cards**: Generative LLM and extractive QA HTTP failures (401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Rate Limited, timeouts, and network unreachable) now render structured, branded terminal error cards (`CliErrorCard`) with clear root causes and actionable troubleshooting steps instead of raw provider stack traces.
+- **Dynamic Model Provider Resolution**: The `lmem` home page banner, `lmem config`, and `lmem answer` now dynamically inspect and display the active model provider and resolved model (e.g. `[reranker: groq:qwen/qwen3.8-27b]`, `Ollama Model: ollama (auto: bonsai-2:2b)`) instead of hardcoded `ollama:` prefixes or static strings.
+- **Multi-Memory Bullet Answers & Grounding Fix**: `lmem answer` now instructs LLMs to return concise bullet points for multi-memory and multi-item answers, formats multiline bullets cleanly in the terminal, accepts grounded multi-index / natural-language answers without false `Insufficient evidence` rejections, and respects `--limit` beyond 10 candidates (up to 30).
+
 ## Unreleased — simpler terminal commands
 
 - Add first-class `lmem local` (alias: `disconnect`) and `lmem remote` commands with interactive URL/key prompting, actionable offline hints, and updated Welcome Screen / Banner quick commands featuring `remote`, `local`, and `help`.

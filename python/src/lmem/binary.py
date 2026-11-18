@@ -219,7 +219,7 @@ def _verify_release_digest(archive: Path, checksums: Path) -> None:
         raise ValueError("Release archive SHA-256 mismatch")
 
 
-def ensure_binary_downloaded(version: str = "v0.8.2") -> str:
+def ensure_binary_downloaded(version: str = "v0.8.3") -> str:
     """Downloads pre-built release binary for current system into ~/.lightmem/bin/lmem."""
     system = platform.system().lower()
     machine = platform.machine().lower()

@@ -27,13 +27,13 @@ pub use repositories::{SqliteRepository, Storage};
 pub use services::McpServer;
 pub use services::{
     serve_api, serve_docs, AnswerRequest, AnswerResult, AttachmentPayload, BundleAttachmentEntry,
-    BundleImportResult, BundleManifest, BundleService, BundleStats, ClearPayload, ConnectResult,
-    ConnectService, DocsOptions, EmbeddingProvider, Exporter, ForgetPayload, HashEmbeddingProvider,
-    HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LinkRequest, LinkResult, LlmReranker,
-    MemoryImporter, MultimodalInput, ObservedCandidate, ObserverService, OkfMemoryImporter,
-    OllamaEmbeddingProvider, OllamaReranker, OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo,
-    PrecisionReranker, RecallRequest, RememberRequest, RemoteClient, Reranker, ServerOptions,
-    Top1Reranker, UnlinkRequest,
+    BundleImportResult, BundleManifest, BundleService, BundleStats, ClearPayload,
+    CommandHistoryEntry, ConnectResult, ConnectService, DocsOptions, EmbeddingProvider, Exporter,
+    ForgetPayload, HashEmbeddingProvider, HistoryService, HybridSearchEngine, ImportCandidate,
+    JsonMemoryImporter, LinkRequest, LinkResult, LlmReranker, MemoryImporter, MultimodalInput,
+    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
+    OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker, RecallRequest,
+    RememberRequest, RemoteClient, Reranker, ServerOptions, Top1Reranker, UnlinkRequest,
 };
 
 pub use views::{CliErrorCard, CliView};

@@ -286,6 +286,30 @@ lmem local
 
 ---
 
+## 📜 Command History & Audit Trail
+
+LightMem automatically tracks executed CLI commands in an isolated local SQLite database (`~/.lightmem/history.db`), recording timestamps, execution status, duration, and arguments with credentials securely redacted:
+
+```bash
+# View recent command execution history
+lmem history
+
+# Search history for specific terms
+lmem history "answer"
+
+# Filter by execution status with limit
+lmem history --status error -n 10
+lmem history --status success
+
+# Output structured JSON (ideal for agent automation)
+lmem history -n 5 --json
+
+# Clear history database
+lmem history --clear
+```
+
+---
+
 ## 🔌 Model Context Protocol (MCP) Server
 
 LightMem natively implements the **Model Context Protocol (MCP)** (JSON-RPC 2.0 stdio) for direct integration into AI agent environments:

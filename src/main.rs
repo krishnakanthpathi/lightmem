@@ -5,8 +5,8 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand};
 use colored::*;
 use lightmem::{
-    encode_base64, parse_ttl_duration, CliErrorCard, CliView, LightMem, LightMemConfig,
-    MemoryStatus, MemoryType, MultimodalInput,
+    encode_base64, parse_ttl_duration, CliErrorCard, CliView, HistoryService, LightMem,
+    LightMemConfig, MemoryStatus, MemoryType, MultimodalInput,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal, Read, Write};
@@ -812,6 +812,30 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// View or clear the history of executed CLI commands
+    #[command(visible_alias = "hist")]
+    History {
+        /// Optional search query or subcommand filter (e.g. 'recall', 'remember', or keywords)
+        #[arg(index = 1)]
+        query: Option<String>,
+
+        /// Maximum number of history entries to display
+        #[arg(short = 'n', long, default_value = "20")]
+        limit: usize,
+
+        /// Filter commands by status: 'success' (ok) or 'error' (failed)
+        #[arg(short = 's', long)]
+        status: Option<String>,
+
+        /// Clear all recorded command history
+        #[arg(long)]
+        clear: bool,
+
+        /// Output results as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {
@@ -1062,14 +1086,20 @@ fn handle_remote_command(
             anyhow::ensure!(image.is_none() && save_to.is_none() && !path && !open, "Remote recall does not support --image, --save-to, --path, or --open. Use local mode to download attachments.");
             if *precision {
                 anyhow::ensure!(media.is_none() && !multi_hop && min_similarity.is_none(), "Precision recall returns an answer; media, multi-hop, and similarity filters are not supported. Use recall without --precision for filtered results.");
-                let answer = client.answer(&lightmem::AnswerRequest {
+                let answer = match client.answer(&lightmem::AnswerRequest {
                     question: query.clone(),
                     category: *category,
                     as_of: *as_of,
                     date: *date,
                     limit: *limit,
                     ..Default::default()
-                })?;
+                }) {
+                    Ok(ans) => ans,
+                    Err(err) => {
+                        CliView::render_llm_or_error(&err, *cmd_json || json);
+                        return Err(AlreadyHandledError.into());
+                    }
+                };
                 CliView::render_answer(&answer, *cmd_json || json)?;
                 return Ok(true);
             }
@@ -1112,7 +1142,13 @@ fn handle_remote_command(
                 date: *date,
                 limit: *limit,
             };
-            let result = client.answer(&req)?;
+            let result = match client.answer(&req) {
+                Ok(ans) => ans,
+                Err(err) => {
+                    CliView::render_llm_or_error(&err, *cmd_json || json);
+                    return Err(AlreadyHandledError.into());
+                }
+            };
             CliView::render_answer(&result, *cmd_json || json)?;
             Ok(true)
         }
@@ -1342,6 +1378,7 @@ fn handle_remote_command(
         | Commands::Completions { .. }
         | Commands::Connect { mcp: false, .. }
         | Commands::Uninstall { .. }
+        | Commands::History { .. }
         | Commands::Local { .. }
         | Commands::Remote { .. } => Ok(false),
         cmd => {
@@ -1740,12 +1777,117 @@ fn open_files_in_default_app(paths: &[PathBuf]) {
     }
 }
 
-fn main() -> Result<()> {
+#[derive(Debug)]
+struct AlreadyHandledError;
+
+impl std::fmt::Display for AlreadyHandledError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "")
+    }
+}
+
+impl std::error::Error for AlreadyHandledError {}
+
+fn should_record_history(cli: &Cli) -> bool {
+    if cli.version {
+        return false;
+    }
+    !matches!(
+        &cli.command,
+        None | Some(Commands::Completions { .. })
+            | Some(Commands::CompletionConnections)
+            | Some(Commands::Doctor { .. })
+            | Some(Commands::History { .. })
+            | Some(Commands::Config { .. })
+            | Some(Commands::Setup { .. })
+    )
+}
+
+fn extract_subcommand_name(cli: &Cli) -> String {
+    match &cli.command {
+        Some(Commands::Status { .. }) => "status",
+        Some(Commands::Identity { .. }) => "identity",
+        Some(Commands::Context { .. }) => "context",
+        Some(Commands::Remember { .. }) => "remember",
+        Some(Commands::Recall { .. }) => "recall",
+        Some(Commands::Answer { .. }) => "answer",
+        Some(Commands::Forget { .. }) => "forget",
+        Some(Commands::Restore { .. }) => "restore",
+        Some(Commands::Clear { .. }) => "clear",
+        Some(Commands::Deduplicate { .. }) => "dedup",
+        Some(Commands::Inspect { .. }) => "inspect",
+        Some(Commands::List { .. }) => "list",
+        Some(Commands::Config { .. }) => "config",
+        Some(Commands::Setup { .. }) => "setup",
+        Some(Commands::Reindex { .. }) => "reindex",
+        Some(Commands::Conflicts { .. }) => "conflicts",
+        Some(Commands::Stats { .. }) => "stats",
+        Some(Commands::Export { .. }) => "export",
+        Some(Commands::Import { .. }) => "import",
+        Some(Commands::Bundle { .. }) => "bundle",
+        Some(Commands::Link { .. }) => "link",
+        Some(Commands::Unlink { .. }) => "unlink",
+        Some(Commands::Related { .. }) => "related",
+        Some(Commands::Graph { .. }) => "graph",
+        Some(Commands::Autolink { .. }) => "autolink",
+        Some(Commands::Observe { .. }) => "observe",
+        Some(Commands::Connect { .. }) => "connect",
+        Some(Commands::Mcp) => "mcp",
+        Some(Commands::Doctor { .. }) => "doctor",
+        Some(Commands::Serve { .. }) => "serve",
+        Some(Commands::Local { .. }) => "local",
+        Some(Commands::Remote { .. }) => "remote",
+        Some(Commands::Docs { .. }) => "docs",
+        Some(Commands::Uninstall { .. }) => "uninstall",
+        Some(Commands::History { .. }) => "history",
+        Some(Commands::Completions { .. }) => "completions",
+        Some(Commands::CompletionConnections) => "__connections",
+        Some(Commands::Version { .. }) => "version",
+        None => "stats",
+    }
+    .to_string()
+}
+
+fn main() {
     #[cfg(windows)]
     {
         let _ = colored::control::set_virtual_terminal(true);
     }
     let cli = Cli::parse();
+    let json = cli.json || std::env::args().any(|a| a == "--json");
+    let should_record = should_record_history(&cli);
+    let subcommand = extract_subcommand_name(&cli);
+    let args: Vec<String> = std::env::args().collect();
+    let sanitized_cmd = HistoryService::sanitize_args(&args);
+
+    let start_time = std::time::Instant::now();
+    let run_res = run(cli);
+    let duration = start_time.elapsed();
+
+    if should_record {
+        let status = if run_res.is_ok() { "success" } else { "error" };
+        let err_msg = run_res.as_ref().err().map(|e| e.to_string());
+        HistoryService::record(
+            &sanitized_cmd,
+            &subcommand,
+            status,
+            duration.as_millis() as u64,
+            err_msg.as_deref(),
+        );
+    }
+
+    if let Err(err) = run_res {
+        if !err.is::<AlreadyHandledError>() {
+            if CliView::try_render_known_error(&err, json) {
+                std::process::exit(1);
+            }
+            eprintln!("Error: {err}");
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     if cli.version {
         return CliView::render_version(cli.json);
     }
@@ -1999,6 +2141,7 @@ fn main() -> Result<()> {
                     | Commands::Completions { .. }
                     | Commands::Connect { mcp: false, .. }
                     | Commands::Uninstall { .. }
+                    | Commands::History { .. }
                     | Commands::Local { .. }
                     | Commands::Remote { .. }
                     | Commands::Bundle {
@@ -2161,7 +2304,14 @@ fn main() -> Result<()> {
                     !query.trim().is_empty(),
                     "Search query cannot be blank with --precision"
                 );
-                let result = lm.answer_with_options(&query, cat, as_of_dt, date, limit, None)?;
+                let result = match lm.answer_with_options(&query, cat, as_of_dt, date, limit, None)
+                {
+                    Ok(ans) => ans,
+                    Err(err) => {
+                        CliView::render_llm_or_error(&err, json);
+                        return Err(AlreadyHandledError.into());
+                    }
+                };
                 CliView::render_answer(&result, json)?;
             } else {
                 let filter_attachments = media.is_some() || path || save_to.is_some() || open;
@@ -2848,8 +2998,20 @@ fn main() -> Result<()> {
             } else {
                 None
             };
-            let result =
-                lm.answer_with_options(&question, cat, as_of_dt, date, limit, effective_reranker)?;
+            let result = match lm.answer_with_options(
+                &question,
+                cat,
+                as_of_dt,
+                date,
+                limit,
+                effective_reranker,
+            ) {
+                Ok(ans) => ans,
+                Err(err) => {
+                    CliView::render_llm_or_error(&err, json);
+                    return Err(AlreadyHandledError.into());
+                }
+            };
             CliView::render_answer(&result, json)?;
         }
 
@@ -3624,6 +3786,28 @@ fn main() -> Result<()> {
             json,
         } => {
             handle_uninstall(purge_data, yes, json)?;
+        }
+
+        Commands::History {
+            query,
+            limit,
+            status,
+            clear,
+            json,
+        } => {
+            if clear {
+                let count = HistoryService::clear()?;
+                CliView::render_history_cleared(count, json || cli.json)?;
+            } else {
+                let (entries, total) =
+                    HistoryService::list(query.as_deref(), status.as_deref(), limit)?;
+                CliView::render_history(
+                    &entries,
+                    total,
+                    &HistoryService::db_path(),
+                    json || cli.json,
+                )?;
+            }
         }
     }
 

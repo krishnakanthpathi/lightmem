@@ -1611,10 +1611,9 @@ impl LightMem {
             if active_reranker.len() > prefix.len()
                 && active_reranker[..prefix.len()].eq_ignore_ascii_case(prefix)
             {
-                let model = active_reranker[prefix.len()..].trim();
                 return Ok(Box::new(OllamaReranker::with_api_key(
                     self.config.effective_ollama_url(),
-                    Some(model.to_string()),
+                    Some(active_reranker.to_string()),
                     self.config.effective_ollama_api_key(),
                 )));
             }

@@ -5,6 +5,7 @@ pub mod docs_server;
 pub mod embeddings;
 pub mod exporter;
 pub mod graph_view;
+pub mod history;
 pub mod importer;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -33,6 +34,7 @@ pub use embeddings::{
 };
 pub use exporter::Exporter;
 pub use graph_view::render_terminal;
+pub use history::{CommandHistoryEntry, HistoryService};
 pub use importer::{
     extract_imported_links, ImportCandidate, JsonMemoryImporter, MemoryImporter, OkfMemoryImporter,
 };

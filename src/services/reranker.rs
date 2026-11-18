@@ -584,7 +584,56 @@ impl OllamaReranker {
         }
     }
 
-    pub fn resolve_model(&self) -> String {
+    pub fn provider_prefix(&self) -> &'static str {
+        if let Some(ref raw) = self.model {
+            let l = raw.trim().to_lowercase();
+            if l == "groq" || l.starts_with("groq:") {
+                return "groq";
+            }
+            if l == "openai" || l.starts_with("openai:") {
+                return "openai";
+            }
+            if l == "openrouter" || l.starts_with("openrouter:") {
+                return "openrouter";
+            }
+            if l == "gemini" || l.starts_with("gemini:") {
+                return "gemini";
+            }
+            if l == "deepseek" || l.starts_with("deepseek:") {
+                return "deepseek";
+            }
+            if l == "mistral" || l.starts_with("mistral:") {
+                return "mistral";
+            }
+            if l == "ollama" || l.starts_with("ollama:") {
+                return "ollama";
+            }
+        }
+        let u = self.ollama_url.to_lowercase();
+        if u.contains("groq.com") {
+            "groq"
+        } else if u.contains("openrouter.ai") {
+            "openrouter"
+        } else if u.contains("googleapis.com") {
+            "gemini"
+        } else if u.contains("deepseek.com") {
+            "deepseek"
+        } else if u.contains("mistral.ai") {
+            "mistral"
+        } else if u.contains("openai.com") {
+            "openai"
+        } else if u.contains("11434")
+            || u.contains("ollama.com")
+            || u.contains("localhost")
+            || u.contains("127.0.0.1")
+        {
+            "ollama"
+        } else {
+            "llm"
+        }
+    }
+
+    pub fn resolve_model_with_timeout(&self, timeout: Duration) -> Option<String> {
         if let Some(ref explicit) = self.model {
             let l = explicit.trim().to_lowercase();
             if !matches!(
@@ -618,18 +667,18 @@ impl OllamaReranker {
                     if explicit.len() > prefix.len()
                         && explicit[..prefix.len()].eq_ignore_ascii_case(prefix)
                     {
-                        return explicit[prefix.len()..].trim().to_string();
+                        return Some(explicit[prefix.len()..].trim().to_string());
                     }
                 }
-                return explicit.clone();
+                return Some(explicit.clone());
             }
             match l.as_str() {
-                "openai" => return "gpt-4o-mini".to_string(),
-                "openrouter" => return "anthropic/claude-3.5-sonnet".to_string(),
-                "gemini" => return "gemini-1.5-flash".to_string(),
-                "groq" => return "llama-3.3-70b-versatile".to_string(),
-                "deepseek" => return "deepseek-chat".to_string(),
-                "mistral" => return "mistral-small-latest".to_string(),
+                "openai" => return Some("gpt-4o-mini".to_string()),
+                "openrouter" => return Some("anthropic/claude-3.5-sonnet".to_string()),
+                "gemini" => return Some("gemini-1.5-flash".to_string()),
+                "groq" => return Some("llama-3.3-70b-versatile".to_string()),
+                "deepseek" => return Some("deepseek-chat".to_string()),
+                "mistral" => return Some("mistral-small-latest".to_string()),
                 _ => {}
             }
         }
@@ -702,7 +751,7 @@ impl OllamaReranker {
 
         // 1. Try standard OpenAI-compatible `/v1/models` endpoint
         let v1_models_url = format!("{}/v1/models", self.ollama_url);
-        let mut req = ureq::get(&v1_models_url).timeout(Duration::from_secs(2));
+        let mut req = ureq::get(&v1_models_url).timeout(timeout);
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
@@ -718,7 +767,7 @@ impl OllamaReranker {
                         .collect();
 
                     if let Some(chosen) = select_model(&names) {
-                        return chosen;
+                        return Some(chosen);
                     }
                 }
             }
@@ -726,7 +775,7 @@ impl OllamaReranker {
 
         // 2. Fallback: query Ollama-specific `/api/tags`
         let tags_url = format!("{}/api/tags", self.ollama_url);
-        let mut req_tags = ureq::get(&tags_url).timeout(Duration::from_secs(2));
+        let mut req_tags = ureq::get(&tags_url).timeout(timeout);
         if let Some(ref key) = self.api_key {
             req_tags = req_tags.set(
                 "Authorization",
@@ -742,12 +791,21 @@ impl OllamaReranker {
                         .collect();
 
                     if let Some(chosen) = select_model(&names) {
-                        return chosen;
+                        return Some(chosen);
                     }
                 }
             }
         }
 
+        None
+    }
+
+    pub fn resolve_model(&self) -> String {
+        if let Some(chosen) = self.resolve_model_with_timeout(Duration::from_secs(2)) {
+            return chosen;
+        }
+
+        let is_cloud_endpoint = self.ollama_url.to_lowercase().contains("ollama.com");
         if is_cloud_endpoint {
             "gemma4:31b-cloud".to_string()
         } else {
@@ -882,11 +940,35 @@ impl OllamaReranker {
                     .to_string())
             }
             Err(e) => {
+                let detail = match *e {
+                    ureq::Error::Status(code, resp) => {
+                        let body_str = resp.into_string().unwrap_or_default();
+                        let parsed_msg = serde_json::from_str::<serde_json::Value>(&body_str)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("error").and_then(|err| {
+                                    if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
+                                        Some(msg.to_string())
+                                    } else {
+                                        err.as_str().map(|msg| msg.to_string())
+                                    }
+                                })
+                            });
+                        if let Some(msg) = parsed_msg {
+                            format!("status code {code}: {msg}")
+                        } else if !body_str.trim().is_empty() && body_str.len() < 300 {
+                            format!("status code {code}: {}", body_str.trim())
+                        } else {
+                            format!("status code {code}")
+                        }
+                    }
+                    ureq::Error::Transport(t) => t.to_string(),
+                };
                 anyhow::bail!(
                     "Chat completions request to {} (model '{}') failed: {}",
                     chat_url,
                     model_name,
-                    e
+                    detail
                 );
             }
         }
@@ -900,9 +982,9 @@ pub fn build_answer_prompt(
     synthesis: bool,
 ) -> (&'static str, String) {
     let system_prompt = if synthesis {
-        "Synthesize answer from memories as JSON: {\"answer\": string|null, \"memory_index\": int|null, \"confidence\": float}. If unsupported, answer=null."
+        "Synthesize answer from memories as JSON: {\"answer\": string|null, \"memory_index\": int|[int]|null, \"confidence\": float}. When combining multiple memories or listing multiple items, format \"answer\" as concise bullet points (each starting with \"- \", separated by \"\\n\"). Ground every fact strictly in the memories. If unsupported, answer=null."
     } else {
-        "Answer question using memories as JSON: {\"answer\": string|null, \"memory_index\": int|null, \"confidence\": float}. If unsupported, answer=null."
+        "Answer question using memories as JSON: {\"answer\": string|null, \"memory_index\": int|[int]|null, \"confidence\": float}. Give a concise direct answer for a single fact, or concise bullet points (each starting with \"- \", separated by \"\\n\") if multiple memories or a natural multi-point answer applies. Ground every fact strictly in the memories. If unsupported, answer=null."
     };
     let user_prompt = format!(
         "Memories:\n{}\nQuestion: {}",
@@ -919,12 +1001,12 @@ impl Reranker for OllamaReranker {
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {
         let model_name = self.resolve_model();
-        let provider_label = format!("ollama:{}", model_name);
+        let provider_label = format!("{}:{}", self.provider_prefix(), model_name);
 
         let gated: Vec<&ScoredMemory> = candidates
             .iter()
             .filter(|c| c.bm25_rank.is_some() || c.score >= 0.35)
-            .take(10)
+            .take(30)
             .collect();
 
         if gated.is_empty() {
@@ -934,22 +1016,27 @@ impl Reranker for OllamaReranker {
         let synthesis = is_synthesis_query(question);
         let mut memories_block = String::new();
         for (idx, c) in gated.iter().enumerate() {
-            if synthesis {
+            let title_trimmed = c.memory.title.trim();
+            let content_trimmed = c.memory.content.trim();
+            let title_adds_info = !title_trimmed.is_empty()
+                && title_trimmed != content_trimmed
+                && !content_trimmed.starts_with(title_trimmed);
+            if synthesis || title_adds_info {
                 memories_block.push_str(&format!(
                     "[{}] ({} · {}) {}\n",
                     idx,
                     c.memory.category.as_str(),
-                    c.memory.title,
-                    c.memory.content
+                    title_trimmed,
+                    content_trimmed
                 ));
             } else {
-                memories_block.push_str(&format!("[{}] {}\n", idx, c.memory.content));
+                memories_block.push_str(&format!("[{}] {}\n", idx, content_trimmed));
             }
         }
 
         let (system_prompt, user_prompt) =
             build_answer_prompt(&memories_block, question, synthesis);
-        let max_tokens = if synthesis { 512 } else { 256 };
+        let max_tokens = if synthesis { 512 } else { 384 };
         let raw_response =
             self.request_json_completion(&model_name, system_prompt, &user_prompt, max_tokens)?;
 
@@ -1096,13 +1183,20 @@ pub(crate) fn is_synthesis_query(question: &str) -> bool {
         return true;
     }
 
-    [
+    if [
         " list all ",
         " list my ",
+        " list the ",
         " all my ",
         " all of my ",
+        " all the ",
         " what are my ",
+        " what are the ",
         " what are all ",
+        " which are my ",
+        " which are the ",
+        " show me all ",
+        " show my ",
         " tell me about my ",
         " tell me about all ",
         " describe my ",
@@ -1110,6 +1204,16 @@ pub(crate) fn is_synthesis_query(question: &str) -> bool {
     ]
     .iter()
     .any(|phrase| padded.contains(phrase))
+    {
+        return true;
+    }
+
+    (lower.starts_with("what are ") || lower.starts_with("what ") || lower.starts_with("which "))
+        && (padded.contains(" do i have")
+            || padded.contains(" i have")
+            || padded.contains(" have i "))
+        && !lower.starts_with("what is ")
+        && !lower.starts_with("what's ")
 }
 
 fn find_thinking_ranges(raw: &str) -> Vec<(usize, usize)> {
@@ -1305,9 +1409,22 @@ fn is_synthesis_grounded(answer: &str, gated: &[&ScoredMemory]) -> bool {
         return false;
     }
 
+    let token_in_corpus = |t: &str| -> bool {
+        if corpus_tokens.contains(t) || grounded(t, &corpus_text) {
+            return true;
+        }
+        if t.len() >= 4 && t.ends_with('s') && corpus_tokens.contains(&t[..t.len() - 1]) {
+            return true;
+        }
+        if t.len() >= 5 && t.ends_with("es") && corpus_tokens.contains(&t[..t.len() - 2]) {
+            return true;
+        }
+        false
+    };
+
     let matched = substantive
         .iter()
-        .filter(|t| corpus_tokens.contains(t.as_str()) || grounded(t, &corpus_text))
+        .filter(|t| token_in_corpus(t.as_str()))
         .count();
 
     let min_required = if substantive.len() == 1 { 1 } else { 2 };
@@ -1321,21 +1438,37 @@ fn clean_synthesis_answer(raw: &str) -> String {
         .to_string()
 }
 
-fn extract_memory_index(val: Option<&serde_json::Value>) -> Option<usize> {
-    let v = val?;
+fn extract_memory_indices(val: Option<&serde_json::Value>) -> Vec<usize> {
+    let Some(v) = val else {
+        return Vec::new();
+    };
+    let mut indices = Vec::new();
+    let mut push_unique = |idx: usize| {
+        if !indices.contains(&idx) {
+            indices.push(idx);
+        }
+    };
     if let Some(n) = v.as_u64() {
-        return Some(n as usize);
+        push_unique(n as usize);
+    } else if let Some(arr) = v.as_array() {
+        for item in arr {
+            if let Some(n) = item.as_u64() {
+                push_unique(n as usize);
+            } else if let Some(s) = item.as_str() {
+                if let Ok(n) = s.trim().parse::<usize>() {
+                    push_unique(n);
+                }
+            }
+        }
+    } else if let Some(s) = v.as_str() {
+        for part in s.split(|c: char| c == ',' || c.is_whitespace()) {
+            let trimmed = part.trim().trim_matches(|c| c == '[' || c == ']');
+            if let Ok(n) = trimmed.parse::<usize>() {
+                push_unique(n);
+            }
+        }
     }
-    if let Some(arr) = v.as_array() {
-        return arr
-            .first()
-            .and_then(|item| item.as_u64())
-            .map(|n| n as usize);
-    }
-    if let Some(s) = v.as_str() {
-        return s.trim().parse::<usize>().ok();
-    }
-    None
+    indices
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1358,7 +1491,15 @@ fn parse_and_ground_ollama_answer_with_mode(
         return None;
     }
 
-    let cleaned = if synthesis {
+    let explicit_indices = extract_memory_indices(parsed.get("memory_index"));
+    let explicit_idx = explicit_indices.first().copied();
+    let is_multiline_or_bullets = raw_ans.contains('\n')
+        || raw_ans.starts_with("- ")
+        || raw_ans.starts_with("* ")
+        || raw_ans.starts_with("• ");
+    let use_synthesis_mode = synthesis || explicit_indices.len() > 1 || is_multiline_or_bullets;
+
+    let cleaned = if use_synthesis_mode {
         clean_synthesis_answer(raw_ans)
     } else {
         clean_extracted_span(raw_ans)
@@ -1389,15 +1530,15 @@ fn parse_and_ground_ollama_answer_with_mode(
         0.85
     };
 
-    let explicit_idx = extract_memory_index(parsed.get("memory_index"));
-
-    if synthesis {
+    if use_synthesis_mode {
         if !is_synthesis_grounded(&cleaned, gated) {
             return None;
         }
         let ans_tokens = content_tokens(&cleaned);
-        let best_idx = explicit_idx
-            .filter(|&i| {
+        let best_idx = explicit_indices
+            .iter()
+            .copied()
+            .find(|&i| {
                 if i >= gated.len() {
                     return false;
                 }
@@ -1433,6 +1574,37 @@ fn parse_and_ground_ollama_answer_with_mode(
         if is_answer_grounded_in(&cleaned, &cand.memory) {
             return Some((cleaned, idx, confidence));
         }
+    }
+
+    // Natural-language paraphrase fallback for multi-token answers: allow natural phrasing
+    // when strictly grounded in the retrieved memories (all digits/codes + >=65% lexical overlap).
+    let ans_tokens = content_tokens(&cleaned);
+    if ans_tokens.len() >= 3 && is_synthesis_grounded(&cleaned, gated) {
+        let best_idx = explicit_idx
+            .filter(|&i| {
+                if i >= gated.len() {
+                    return false;
+                }
+                let mut m_toks = content_tokens(&gated[i].memory.content);
+                m_toks.extend(content_tokens(&gated[i].memory.title));
+                ans_tokens.iter().any(|t| m_toks.contains(t))
+            })
+            .unwrap_or_else(|| {
+                gated
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, c)| {
+                        let mut m_toks = content_tokens(&c.memory.content);
+                        m_toks.extend(content_tokens(&c.memory.title));
+                        ans_tokens
+                            .iter()
+                            .filter(|t| m_toks.contains(t.as_str()))
+                            .count()
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0)
+            });
+        return Some((cleaned, best_idx, confidence));
     }
 
     None
@@ -1510,9 +1682,10 @@ fn clean_extracted_span_for_question(raw: &str, q_tokens: &HashSet<String>) -> S
 fn content_tokens(text: &str) -> HashSet<String> {
     const FUNCTION_WORDS: &[&str] = &[
         "what", "which", "who", "where", "when", "why", "how", "is", "are", "was", "were", "does",
-        "do", "did", "has", "have", "had", "the", "a", "an", "in", "on", "at", "to", "for", "of",
-        "with", "by", "from", "my", "me", "our", "your", "user", "users", "use", "uses", "used",
-        "run", "runs", "running", "did", "i",
+        "do", "did", "has", "have", "had", "be", "been", "being", "the", "a", "an", "in", "on",
+        "at", "to", "for", "of", "with", "by", "from", "as", "and", "or", "but", "that", "this",
+        "these", "those", "it", "its", "they", "them", "their", "you", "my", "me", "our", "your",
+        "user", "users", "use", "uses", "used", "run", "runs", "running", "i",
     ];
     text.split(|c: char| !c.is_alphanumeric())
         .map(|w| w.to_lowercase())
@@ -1949,5 +2122,83 @@ mod tests {
         );
         assert_eq!(res.answer, "2008102776");
         assert_eq!(res.selected_memory.unwrap().id, "ssc10");
+    }
+
+    #[test]
+    fn test_multi_memory_bullet_answers_and_synthesis_detection() {
+        assert!(is_synthesis_query("what are the offers i have"));
+        assert!(is_synthesis_query("what are the offer job i have"));
+        assert!(is_synthesis_query("what offers do i have"));
+        assert!(is_synthesis_query("which certifications have i completed"));
+        assert!(!is_synthesis_query("what is my pan"));
+        assert!(!is_synthesis_query("what port does redis use"));
+
+        let (sys_syn, _) = build_answer_prompt("[0] a", "what are the offers i have", true);
+        assert!(sys_syn.contains("bullet points"));
+        let (sys_std, _) = build_answer_prompt("[0] a", "what is my pan", false);
+        assert!(sys_std.contains("bullet points"));
+
+        let c0 = make_candidate("infy", "i got the infosys offer letter on 16 nov", 0.84);
+        let c1 = make_candidate("sis", "i have 4 sister in law", 0.78);
+        let c2 = make_candidate(
+            "turtil",
+            "completed a paid 6-week internship at turtil (Teachbricks Pvt Ltd), Offer dated 24 Apr 2025",
+            0.78,
+        );
+        let c3 = make_candidate(
+            "cartrade",
+            "worked at CarTrade Tech Limited. Offer letter Ref CTT/OFF/2025-26/457 (25 Nov 2025)",
+            0.76,
+        );
+        let gated = vec![&c0, &c1, &c2, &c3];
+
+        // Multi-memory bullet answer must pass even if synthesis flag was false
+        let multi_bullet = r#"{"answer": "- Infosys: offer letter on 16 nov\n- CarTrade Tech Limited: offer letter dated 25 Nov 2025\n- turtil (Teachbricks Pvt Ltd): paid internship offer dated 24 Apr 2025", "memory_index": [0, 3, 2], "confidence": 0.95}"#;
+        let (ans, idx, conf) =
+            parse_and_ground_ollama_answer_with_mode(multi_bullet, &gated, false).unwrap();
+        assert!(ans.contains("- Infosys:"));
+        assert!(ans.contains("- CarTrade Tech Limited:"));
+        assert!(ans.contains("- turtil"));
+        assert_eq!(idx, 0);
+        assert!(conf > 0.9);
+
+        // Single-memory natural-language paraphrase must pass when strictly grounded
+        let natural = r#"{"answer": "You received the Infosys offer letter on 16 Nov", "memory_index": 0, "confidence": 0.92}"#;
+        let (nat_ans, nat_idx, _) =
+            parse_and_ground_ollama_answer_with_mode(natural, &gated, false).unwrap();
+        assert!(nat_ans.contains("Infosys"));
+        assert_eq!(nat_idx, 0);
+
+        // Fabricated number in bullet answer must still be rejected
+        let fake_bullet = r#"{"answer": "- Infosys: offer letter on 16 nov\n- Google: offer letter dated 99 Dec 2029", "memory_index": [0, 3], "confidence": 0.95}"#;
+        assert!(parse_and_ground_ollama_answer_with_mode(fake_bullet, &gated, true).is_none());
+    }
+
+    #[test]
+    fn test_llm_reranker_provider_prefix_matches_endpoint_and_model_prefix() {
+        let groq = OllamaReranker::new(
+            "https://api.groq.com/openai".to_string(),
+            Some("groq:qwen/qwen3.8-27b".to_string()),
+        );
+        assert_eq!(groq.provider_prefix(), "groq");
+        assert_eq!(groq.resolve_model(), "qwen/qwen3.8-27b");
+
+        let groq_by_url = OllamaReranker::new(
+            "https://api.groq.com/openai".to_string(),
+            Some("qwen/qwen3.8-27b".to_string()),
+        );
+        assert_eq!(groq_by_url.provider_prefix(), "groq");
+
+        let openai = OllamaReranker::new(
+            "https://api.openai.com".to_string(),
+            Some("openai:gpt-4o-mini".to_string()),
+        );
+        assert_eq!(openai.provider_prefix(), "openai");
+
+        let local_ollama = OllamaReranker::new(
+            "http://127.0.0.1:11434".to_string(),
+            Some("bonsai-2:2b".to_string()),
+        );
+        assert_eq!(local_ollama.provider_prefix(), "ollama");
     }
 }
