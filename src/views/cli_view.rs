@@ -84,33 +84,19 @@ impl CliView {
     }
 
     pub fn model_provider_name(cfg: &LightMemConfig) -> &'static str {
-        let lower_r = cfg.reranker.to_lowercase();
-        let lower_url = cfg.ollama_url.to_lowercase();
-        if lower_r.starts_with("ollama:")
-            || lower_r == "ollama"
-            || lower_url.contains("11434")
-            || lower_url.contains("ollama.com")
-        {
-            "Ollama"
-        } else if lower_r.starts_with("gemini:") || lower_url.contains("googleapis.com") {
-            "Gemini"
-        } else if lower_r.starts_with("openrouter:") || lower_url.contains("openrouter.ai") {
-            "OpenRouter"
-        } else if lower_r.starts_with("groq:") || lower_url.contains("groq.com") {
-            "Groq"
-        } else if lower_r.starts_with("deepseek:") || lower_url.contains("deepseek.com") {
-            "DeepSeek"
-        } else if lower_r.starts_with("mistral:") || lower_url.contains("mistral.ai") {
-            "Mistral"
-        } else if lower_r.starts_with("openai:") || lower_url.contains("openai.com") {
-            "OpenAI"
-        } else if matches!(
-            lower_r.as_str(),
-            "minilm-squad2" | "tinyroberta-squad2" | "onnx"
-        ) {
-            "Local ONNX"
-        } else {
-            "Chat/QA"
+        let (prov, _, _) = cfg.active_provider();
+        match prov {
+            "openai" => "OpenAI",
+            "openrouter" => "OpenRouter",
+            "gemini" => "Gemini",
+            "groq" => "Groq",
+            "deepseek" => "DeepSeek",
+            "mistral" => "Mistral",
+            "custom" => "Custom",
+            "top1" => "Top-1",
+            "onnx" => "Local ONNX",
+            "ollama" => "Ollama",
+            _ => "Local ONNX",
         }
     }
 
@@ -1398,17 +1384,14 @@ impl CliView {
         );
         println!();
 
-        println!("  ╭─ {}", Self::crimson_bold("PROPOSED SETTINGS"));
+        println!("  ╭─ {}", Self::crimson_bold("ANSWER GENERATION ENGINE"));
+        let provider = Self::model_provider_name(cfg);
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "Search Embedder:",
-            Self::emerald_bold(&cfg.active_embedding_summary())
+            "Provider:",
+            Self::violet_bold(provider)
         );
-        let provider = Self::model_provider_name(cfg);
-        let model_label = format!("{} Model:", provider);
-        let endpoint_label = format!("{} Endpoint:", provider);
-        let key_label = format!("{} API Key:", provider);
 
         let model_display = if cfg.reranker == "ollama" || cfg.reranker == "auto" {
             let resolved = OllamaReranker::with_api_key(
@@ -1429,16 +1412,27 @@ impl CliView {
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            model_label,
+            "Answer Model:",
             Self::emerald_bold(&model_display)
         );
+
+        let eff_url = cfg.effective_ollama_url();
+        let endpoint_disp = if eff_url.is_empty() || provider == "Local ONNX" || provider == "Top-1"
+        {
+            Self::slate("local (offline, built-in)")
+        } else {
+            Self::emerald(&eff_url)
+        };
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            endpoint_label,
-            Self::emerald(&cfg.ollama_url)
+            "Model Endpoint:",
+            endpoint_disp
         );
-        let key_disp = if cfg
+
+        let key_disp = if provider == "Local ONNX" || provider == "Top-1" {
+            Self::slate("none (local, offline)")
+        } else if cfg
             .ollama_api_key
             .as_deref()
             .map(str::trim)
@@ -1449,7 +1443,13 @@ impl CliView {
         } else {
             Self::slate("empty (none)")
         };
-        println!("  │  {} {:<18} {}", Self::slate("▸"), key_label, key_disp);
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Model API Key:",
+            key_disp
+        );
+
         let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
         } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
@@ -1458,11 +1458,46 @@ impl CliView {
             Self::slate("off")
         };
         println!(
-            "  │  {} {:<18} {}",
+            "  ╰─ {} {:<18} {}",
             Self::slate("▸"),
             "Entity Extraction:",
             extraction_summary
         );
+        println!();
+
+        println!("  ╭─ {}", Self::crimson_bold("VECTOR SEARCH EMBEDDINGS"));
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Search Embedder:",
+            Self::emerald_bold(&cfg.active_embedding_summary())
+        );
+        let emb_url = cfg.effective_embedding_url();
+        let emb_endpoint_disp = if emb_url.is_empty() {
+            Self::slate("local (offline, built-in)")
+        } else {
+            Self::emerald(&emb_url)
+        };
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Embedding Endpoint:",
+            emb_endpoint_disp
+        );
+        let migration_req = plan["migration_required"] == true;
+        println!(
+            "  ╰─ {} {:<18} {}",
+            Self::slate("▸"),
+            "Vault Index:",
+            if migration_req {
+                Self::gold_bold("reindex required (embedding changes need approval)")
+            } else {
+                Self::emerald("no migration required")
+            }
+        );
+        println!();
+
+        println!("  ╭─ {}", Self::crimson_bold("ROUTING & MIGRATION"));
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
@@ -1475,32 +1510,27 @@ impl CliView {
         let changes = plan["changed_fields"]
             .as_array()
             .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                let mut unique = std::collections::BTreeSet::new();
+                for item in items.iter().filter_map(|s| s.as_str()) {
+                    let display_name = match item {
+                        "reranker" | "openai_model" => "answer_model",
+                        "ollama_url" | "openai_endpoint" => "endpoint",
+                        "ollama_api_key" | "openai_api_key" => "api_key",
+                        other => other,
+                    };
+                    unique.insert(display_name);
+                }
+                unique.into_iter().collect::<Vec<_>>().join(", ")
             })
             .unwrap_or_default();
         println!(
-            "  │  {} {:<18} {}",
+            "  ╰─ {} {:<18} {}",
             Self::slate("▸"),
             "Changed Fields:",
             if changes.is_empty() {
                 Self::slate("none")
             } else {
                 Self::gold_bold(&changes)
-            }
-        );
-        let migration_req = plan["migration_required"] == true;
-        println!(
-            "  ╰─ {} {:<18} {}",
-            Self::slate("▸"),
-            "Vault Index:",
-            if migration_req {
-                Self::gold_bold("reindex required (embedding changes need approval)")
-            } else {
-                Self::emerald("no migration required")
             }
         );
         println!();
@@ -1707,7 +1737,9 @@ impl CliView {
             "Model Endpoint:",
             endpoint_disp
         );
-        let key_disp = if cfg
+        let key_disp = if provider == "Local ONNX" || provider == "Top-1" {
+            Self::slate("none (local, offline)")
+        } else if cfg
             .ollama_api_key
             .as_deref()
             .map(str::trim)

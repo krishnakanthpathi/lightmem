@@ -177,17 +177,21 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         match line("Choose [1-5]: ")?.as_str() {
             "1" => cfg.apply_preset("local")?,
             "2" => {
-                cfg.apply_preset("local")?;
-                let model = value("Ollama model name", "qwen2.5-coder:1.5b")?;
-                cfg.reranker = format!("ollama:{model}");
+                cfg.apply_preset("ollama")?;
+                let model = value("Ollama model name", "qwen2.5:3b")?;
+                if !model.is_empty() && model != "qwen2.5:3b" {
+                    cfg.reranker = format!("ollama:{model}");
+                }
                 cfg.entity_extraction = "on".into();
             }
             "3" => {
-                cfg.apply_preset("local")?;
                 eprintln!(
                     "  Supported providers: openai, openrouter, gemini, groq, deepseek, mistral"
                 );
                 let provider = value("Provider", "openai")?.to_lowercase();
+                if cfg.apply_preset(&provider).is_err() {
+                    cfg.apply_preset("local")?;
+                }
                 let default_model = match provider.as_str() {
                     "openrouter" => "anthropic/claude-3.5-sonnet",
                     "gemini" => "gemini-1.5-flash",
@@ -197,7 +201,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
                     _ => "gpt-4o-mini",
                 };
                 let model = value("Model name", default_model)?;
-                cfg.reranker = format!("{provider}:{model}");
+                if !model.is_empty() && model != default_model {
+                    cfg.reranker = format!("{provider}:{model}");
+                }
                 cfg.entity_extraction = "on".into();
                 if confirm("Configure API key now?", true)? {
                     let mut key_opt = None;
