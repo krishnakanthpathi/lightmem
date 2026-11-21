@@ -163,6 +163,43 @@ download_with_pct() {
     fi
 }
 
+# Run a command with an animated braille spinner (or clean line if not a tty)
+run_with_spinner() {
+    msg="$1"
+    shift
+    if [ ! -t 1 ]; then
+        printf "  \033[1;31m▸\033[0m %s...\n" "$msg"
+        if "$@"; then
+            printf "  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m\n" "$msg"
+            return 0
+        else
+            return 1
+        fi
+    fi
+
+    "$@" >/dev/null 2>&1 &
+    cmd_pid=$!
+    spin_chars="⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏"
+    while kill -0 "$cmd_pid" 2>/dev/null; do
+        for c in $spin_chars; do
+            if ! kill -0 "$cmd_pid" 2>/dev/null; then
+                break
+            fi
+            printf "\r  \033[1;31m%s\033[0m %s...   " "$c" "$msg"
+            sleep 0.08
+        done
+    done
+    wait "$cmd_pid"
+    res=$?
+    if [ "$res" -eq 0 ]; then
+        printf "\r  \033[1;32m◈\033[0m %s... \033[1;32m100%%\033[0m   \n" "$msg"
+        return 0
+    else
+        printf "\r  \033[1;33m▸\033[0m %s... \033[1;33mskipped\033[0m   \n" "$msg"
+        return "$res"
+    fi
+}
+
 case "$OS" in
     Darwin)
         OS_TARGET="apple-darwin"
@@ -203,7 +240,8 @@ TMP_DIR="$(mktemp -d)"
 
 INSTALLED_BIN=0
 verify_release_archive() {
-    curl -fsSL "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS" -o "$TMP_DIR/SHA256SUMS" || return 1
+    (curl -4 -fsSL --retry 2 --connect-timeout 8 "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS" -o "$TMP_DIR/SHA256SUMS" 2>/dev/null || \
+     curl -fsSL --retry 2 --connect-timeout 8 "https://github.com/${REPO}/releases/download/${VERSION}/SHA256SUMS" -o "$TMP_DIR/SHA256SUMS" 2>/dev/null) || return 1
     release_expected="$(awk -v file="lmem-${TARGET}.tar.gz" '$2 == file || $2 == "*" file { print $1 }' "$TMP_DIR/SHA256SUMS")"
     [ "${#release_expected}" -eq 64 ] || return 1
     case "$release_expected" in *[!a-fA-F0-9]*) return 1 ;; esac
@@ -212,25 +250,32 @@ verify_release_archive() {
     elif command -v shasum >/dev/null 2>&1; then
         release_actual="$(shasum -a 256 "$TMP_DIR/lmem.tar.gz" | awk '{print $1}')"
     else
-        printf 'A SHA-256 utility is required to verify the prebuilt release.\n' >&2
         return 1
     fi
     [ "$release_actual" = "$release_expected" ]
 }
+
+install_binary_files() {
+    tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR" || return 1
+    mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem" || return 1
+    chmod +x "$INSTALL_DIR/lmem" || return 1
+    if [ -d "$HOME/.cargo/bin" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
+        cp "$INSTALL_DIR/lmem" "$HOME/.cargo/bin/lmem" 2>/dev/null || true
+        chmod +x "$HOME/.cargo/bin/lmem" 2>/dev/null || true
+    fi
+    if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ] && [ "$INSTALL_DIR" != "$PREFIX/bin" ]; then
+        cp "$INSTALL_DIR/lmem" "$PREFIX/bin/lmem" 2>/dev/null || true
+        chmod +x "$PREFIX/bin/lmem" 2>/dev/null || true
+    fi
+    return 0
+}
+
 if [ "${LIGHTMEM_FROM_SOURCE:-0}" != "1" ]; then
-    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})" 12467430 && verify_release_archive; then
-        tar -xzf "$TMP_DIR/lmem.tar.gz" -C "$TMP_DIR"
-        mv "$TMP_DIR/lmem" "$INSTALL_DIR/lmem"
-        chmod +x "$INSTALL_DIR/lmem"
-        if [ -d "$HOME/.cargo/bin" ] && [ "$INSTALL_DIR" != "$HOME/.cargo/bin" ]; then
-            cp "$INSTALL_DIR/lmem" "$HOME/.cargo/bin/lmem"
-            chmod +x "$HOME/.cargo/bin/lmem"
+    if download_with_pct "$RELEASE_URL" "$TMP_DIR/lmem.tar.gz" "Downloading pre-built binary (${TARGET})" 14600000; then
+        if run_with_spinner "Verifying release checksum (SHA-256)" verify_release_archive && \
+           run_with_spinner "Extracting and installing binary" install_binary_files; then
+            INSTALLED_BIN=1
         fi
-        if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX/bin" ] && [ "$INSTALL_DIR" != "$PREFIX/bin" ]; then
-            cp "$INSTALL_DIR/lmem" "$PREFIX/bin/lmem" 2>/dev/null || true
-            chmod +x "$PREFIX/bin/lmem" 2>/dev/null || true
-        fi
-        INSTALLED_BIN=1
     fi
 fi
 
@@ -299,39 +344,43 @@ elif [ -n "$MODEL_CHOICE" ]; then
 fi
 
 # 6. Install Shell Completions with Interactive Tab + Arrow-Key Menu Navigation
-COMP_DIR="$HOME/.lightmem/completions"
-mkdir -p "$COMP_DIR"
-"$INSTALL_DIR/lmem" completions zsh > "$COMP_DIR/_lmem" 2>/dev/null || true
-"$INSTALL_DIR/lmem" completions bash > "$COMP_DIR/lmem.bash" 2>/dev/null || true
+configure_shell_completions() {
+    COMP_DIR="$HOME/.lightmem/completions"
+    mkdir -p "$COMP_DIR"
+    "$INSTALL_DIR/lmem" completions zsh > "$COMP_DIR/_lmem" 2>/dev/null || true
+    "$INSTALL_DIR/lmem" completions bash > "$COMP_DIR/lmem.bash" 2>/dev/null || true
 
-if [ -f "$HOME/.zshrc" ] || [ "${SHELL:-}" = "/bin/zsh" ] || [ "${SHELL:-}" = "/usr/bin/zsh" ]; then
-    touch "$HOME/.zshrc"
-    if ! grep -q "lightmem/completions" "$HOME/.zshrc" 2>/dev/null; then
-        cat << 'EOF' >> "$HOME/.zshrc"
+    if [ -f "$HOME/.zshrc" ] || [ "${SHELL:-}" = "/bin/zsh" ] || [ "${SHELL:-}" = "/usr/bin/zsh" ]; then
+        touch "$HOME/.zshrc"
+        if ! grep -q "lightmem/completions" "$HOME/.zshrc" 2>/dev/null; then
+            cat << 'EOF' >> "$HOME/.zshrc"
 
 # LightMem CLI completions & interactive Tab/Arrow-key menu
 fpath=("$HOME/.lightmem/completions" $fpath)
 autoload -Uz compinit && compinit -C
 zstyle ':completion:*' menu select
 EOF
+        fi
     fi
-fi
 
-if [ -f "$HOME/.bashrc" ] || [ "${SHELL:-}" = "/bin/bash" ] || [ "${SHELL:-}" = "/usr/bin/bash" ]; then
-    touch "$HOME/.bashrc"
-    if ! grep -q "lightmem/completions/lmem.bash" "$HOME/.bashrc" 2>/dev/null; then
-        cat << 'EOF' >> "$HOME/.bashrc"
+    if [ -f "$HOME/.bashrc" ] || [ "${SHELL:-}" = "/bin/bash" ] || [ "${SHELL:-}" = "/usr/bin/bash" ]; then
+        touch "$HOME/.bashrc"
+        if ! grep -q "lightmem/completions/lmem.bash" "$HOME/.bashrc" 2>/dev/null; then
+            cat << 'EOF' >> "$HOME/.bashrc"
 
 # LightMem CLI completions
 [ -f "$HOME/.lightmem/completions/lmem.bash" ] && source "$HOME/.lightmem/completions/lmem.bash"
 EOF
+        fi
     fi
-fi
-printf "  \033[1;32m◈\033[0m Configured shell completions (Tab + Arrow keys)... \033[1;32m100%%\033[0m\n"
+}
+run_with_spinner "Configuring shell completions (Tab + Arrow keys)" configure_shell_completions
 
 # 7. Auto-deploy LightMem skill to detected AI agent platforms
-"$INSTALL_DIR/lmem" connect >/dev/null 2>&1 || true
-printf "  \033[1;32m◈\033[0m Deployed LightMem skill to detected AI agents... \033[1;32m100%%\033[0m\n"
+deploy_agent_skills() {
+    "$INSTALL_DIR/lmem" connect >/dev/null 2>&1 || true
+}
+run_with_spinner "Deploying LightMem skill to AI agent environments" deploy_agent_skills
 
 # 8. Interactive Model Context Protocol (MCP) Setup (Optional)
 select_mcp_interactive() {
