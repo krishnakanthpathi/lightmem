@@ -72,18 +72,18 @@ lmem conflicts --min-similarity 0.70
 
 ---
 
-## 5. Reranker-Guided Fact Synthesis (`-r, --reranker`)
+## 5. Model-Guided Fact Synthesis (`-m, --model`)
 
 ### Synthesize Merged Clauses Using LLM or QA Models
 ```bash
 # Synthesize with configured default Ollama model
-lmem conflicts --yes -r ollama
+lmem conflicts --yes -m ollama
 
 # Synthesize with a specific local LLM
-lmem conflicts --yes -r ollama:qwen2.5:3b
+lmem conflicts --yes -m ollama:qwen2.5:3b
 
 # Instant zero-overhead vector rank-1 merge
-lmem conflicts --yes -r top1
+lmem conflicts --yes -m top1
 ```
 * Merging rules:
   1. Prioritizes newer fact statements over older contradictory clauses.

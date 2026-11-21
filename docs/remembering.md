@@ -191,7 +191,7 @@ lmem remember "Release assets" -f ./app.tar.gz -f ./checksums.txt
 lmem remember "Ingress diagram" -f ./ingress.png -e
 
 # Extract with specific Ollama model
-lmem remember "Whiteboard notes" -f ./notes.jpg -e -r ollama:qwen2.5:3b
+lmem remember "Whiteboard notes" -f ./notes.jpg -e -m ollama:qwen2.5:3b
 ```
 * Invokes vision/multimodal model on file.
 * Embeds extracted summary text directly into memory content for semantic search.

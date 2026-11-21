@@ -32,43 +32,46 @@ Output:
 
 ---
 
-## 3. Reranker Backends (`-r, --reranker`)
+## 3. Answer Generation Engines (`-m, --model`)
 
-### 1. Instant Top-1 Vector Answer (`-r top1`)
+### 1. Instant Top-1 Vector Answer (`-m top1`)
 ```bash
-lmem answer "what did we decide for database?" -r top1
+lmem answer "what did we decide for database?" -m top1
 ```
-* Zero-overhead (0ms reranker latency).
+* Zero-overhead (0ms latency).
 * Returns the content of the highest-ranked vector memory directly.
 
-### 2. Local ONNX Extractive QA (`-r minilm-squad2`)
+### 2. Local ONNX Extractive QA (`-m minilm-squad2`)
 ```bash
-lmem answer "what is my api key?" -r minilm-squad2
+lmem answer "what is my api key?" -m minilm-squad2
 ```
 * 100% offline, local ONNX neural model (`deepset/minilm-uncased-squad2`).
 * Extracts exact token span (under 20 tokens) with ~600ms latency.
 * Zero cloud dependencies and zero API costs.
 
-### 3. High-Accuracy Local ONNX (`-r tinyroberta-squad2`)
+### 3. High-Accuracy Local ONNX (`-m tinyroberta-squad2`)
 ```bash
-lmem answer "what is the root cause of the crash?" -r tinyroberta-squad2
+lmem answer "what is the root cause of the crash?" -m tinyroberta-squad2
 ```
 * Local ONNX RoBERTa model trained on SQuAD-2.0.
 * Higher precision on complex, multi-sentence contexts (~1.2s latency).
 
-### 4. Swappable Ollama LLM Reranker (`-r ollama:<model>`)
+### 4. Swappable LLM Models (`-m <provider>:<model>`)
 ```bash
-# Use currently configured default Ollama model
-lmem answer "what language was chosen for performance?" -r ollama
+# Use Ollama local model
+lmem answer "summarize sprint goals" -m ollama:qwen2.5:3b
 
-# Override with a specific local model
-lmem answer "summarize sprint goals" -r ollama:qwen2.5:3b
+# Use OpenAI
+lmem answer "summarize deployment steps" -m openai:gpt-4o-mini
 
-# Override with an Ollama cloud model
-lmem answer "what are our compliance requirements?" -r ollama:gemma4:31b-cloud
+# Use Gemini
+lmem answer "what are our compliance requirements?" -m gemini:gemini-1.5-flash
+
+# Use Groq
+lmem answer "explain database architecture" -m groq:llama-3.3-70b-versatile
 ```
-* Invokes LLM over standard Ollama HTTP API.
 * Synthesizes and extracts answers across multi-paragraph candidates.
+* Note: `-r, --reranker` is retained as a fully supported backwards-compatible alias.
 
 ---
 
@@ -159,7 +162,7 @@ lmem --db /path/to/custom.db answer "what is the encryption key?"
 ## 9. Machine-Readable JSON Output (`--json`)
 
 ```bash
-lmem answer "what language was chosen for performance?" -r ollama --json
+lmem answer "what language was chosen for performance?" -m ollama --json
 ```
 
 Output:

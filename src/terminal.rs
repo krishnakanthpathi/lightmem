@@ -160,75 +160,225 @@ pub fn ensure_unchanged(previous: &LightMemConfig) -> Result<()> {
     Ok(())
 }
 
+fn prompt_api_key(cfg: &mut LightMemConfig, provider: &str) -> Result<()> {
+    if confirm(&format!("Configure {provider} API key now?"), true)? {
+        eprint!("  New {provider} API key (hidden): ");
+        io::stderr().flush()?;
+        let key = rpassword::read_password()?;
+        if !key.trim().is_empty() {
+            cfg.ollama_api_key = Some(key.trim().into());
+        }
+    }
+    Ok(())
+}
+
 pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> {
     require_terminal()?;
+    eprintln!();
     eprintln!(
-        "LightMem setup · Settings shared under {}",
-        LightMemConfig::config_dir().display()
+        "  {}  {}",
+        CliView::crimson_bold("❖"),
+        CliView::white_bold("L I G H T M E M  Interactive Setup")
     );
+    eprintln!(
+        "  {}",
+        CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    );
+    eprintln!(
+        "  {} Config Directory: {}",
+        CliView::slate("◫"),
+        CliView::slate(&LightMemConfig::config_dir().display().to_string())
+    );
+    eprintln!();
+    eprintln!(
+        "  {}",
+        CliView::slate("Choose an answer generation profile:")
+    );
+    eprintln!();
+    eprintln!(
+        "  ╭─ {}",
+        CliView::crimson_bold("LOCAL & OFFLINE (No API Key Required)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[1]"),
+        CliView::emerald_bold("Local ONNX"),
+        CliView::slate("100% offline, zero setup, private (bge-small + minilm) [Recommended]")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[2]"),
+        CliView::emerald("Ollama Local"),
+        CliView::slate("Run local open-source LLMs via Ollama (localhost:11434)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[3]"),
+        CliView::emerald("Offline Demo"),
+        CliView::slate("Deterministic hash search (testing & CI, no downloads)")
+    );
+    eprintln!();
+    eprintln!(
+        "  ╭─ {}",
+        CliView::crimson_bold("CLOUD LLM PROVIDERS (Preconfigured Endpoints)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[4]"),
+        CliView::violet_bold("OpenAI"),
+        CliView::slate("gpt-4o-mini (api.openai.com)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[5]"),
+        CliView::violet_bold("Google Gemini"),
+        CliView::slate("gemini-1.5-flash (generativelanguage.googleapis.com)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[6]"),
+        CliView::violet_bold("Groq"),
+        CliView::slate("llama-3.3-70b-versatile (api.groq.com)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[7]"),
+        CliView::violet_bold("OpenRouter"),
+        CliView::slate("anthropic/claude-3.5-sonnet (openrouter.ai)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[8]"),
+        CliView::violet_bold("DeepSeek"),
+        CliView::slate("deepseek-chat (api.deepseek.com)")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[9]"),
+        CliView::violet_bold("Mistral"),
+        CliView::slate("mistral-small-latest (api.mistral.ai)")
+    );
+    eprintln!();
+    eprintln!("  ╭─ {}", CliView::crimson_bold("CUSTOM & NETWORKING"));
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[10]"),
+        CliView::gold_bold("Custom Endpoint"),
+        CliView::slate("Self-hosted OpenAI-compatible proxy / LLM")
+    );
+    eprintln!(
+        "  │  {} {:<20} {}",
+        CliView::slate("[11]"),
+        CliView::gold_bold("Remote Vault"),
+        CliView::slate("Connect to a remote LightMem daemon")
+    );
+    eprintln!();
+    eprintln!("  {} Cancel", CliView::slate("[0]"));
+    eprintln!();
+
     let mut cfg = previous.clone();
-    if confirm(
-        "Use recommended local settings (BGE search, MiniLM answers, extraction off)?",
-        true,
-    )? {
-        cfg.apply_preset("local")?;
-    } else {
-        eprintln!("  1. Local ONNX models (100% offline, zero setup)\n  2. Ollama local LLM (localhost:11434)\n  3. Cloud LLM (OpenAI, OpenRouter, Gemini, Groq)\n  4. No-download demo (hash search)\n  5. Remote LightMem vault\n  0. Cancel");
-        match line("Choose [1-5]: ")?.as_str() {
-            "1" => cfg.apply_preset("local")?,
-            "2" => {
-                cfg.apply_preset("ollama")?;
-                let model = value("Ollama model name", "qwen2.5:3b")?;
-                if !model.is_empty() && model != "qwen2.5:3b" {
-                    cfg.reranker = format!("ollama:{model}");
-                }
-                cfg.entity_extraction = "on".into();
+    let choice = value(
+        "Select profile [1-11] (default: 1 · Use recommended local settings)",
+        "1",
+    )?
+    .to_lowercase();
+
+    match choice.as_str() {
+        "1" | "local" | "onnx" => cfg.apply_preset("local")?,
+        "2" | "ollama" => {
+            cfg.apply_preset("ollama")?;
+            let model = value("Ollama model name", "qwen2.5:3b")?;
+            if !model.is_empty() && model != "qwen2.5:3b" {
+                cfg.reranker = format!("ollama:{model}");
             }
-            "3" => {
-                eprintln!(
-                    "  Supported providers: openai, openrouter, gemini, groq, deepseek, mistral"
-                );
-                let provider = value("Provider", "openai")?.to_lowercase();
-                if cfg.apply_preset(&provider).is_err() {
-                    cfg.apply_preset("local")?;
-                }
-                let default_model = match provider.as_str() {
-                    "openrouter" => "anthropic/claude-3.5-sonnet",
-                    "gemini" => "gemini-1.5-flash",
-                    "groq" => "llama-3.3-70b-versatile",
-                    "deepseek" => "deepseek-chat",
-                    "mistral" => "mistral-small-latest",
-                    _ => "gpt-4o-mini",
-                };
-                let model = value("Model name", default_model)?;
-                if !model.is_empty() && model != default_model {
-                    cfg.reranker = format!("{provider}:{model}");
-                }
-                cfg.entity_extraction = "on".into();
-                if confirm("Configure API key now?", true)? {
-                    let mut key_opt = None;
-                    credential(&mut key_opt, &provider, false)?;
-                    if let Some(k) = key_opt {
-                        cfg.ollama_api_key = Some(k);
-                    }
-                }
+            let url = value("Ollama endpoint URL", "http://localhost:11434")?;
+            if !url.is_empty() {
+                cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
             }
-            "4" => cfg.apply_preset("demo")?,
-            "5" => {
-                let url = value(
-                    "Remote LightMem URL",
-                    cfg.remote_url.as_deref().unwrap_or("http://localhost:8080"),
-                )?;
-                http_url(&url)?;
-                cfg.remote_url = Some(url.trim_end_matches('/').into());
-                let present = cfg.effective_api_key().is_some();
-                credential(&mut cfg.api_key, "remote LightMem", present)?;
-                eprintln!("Remote client setup does not download local models. Test the server with lmem context.");
-                return Ok(cfg);
-            }
-            "0" => bail!("Setup cancelled. No settings changed."),
-            _ => bail!("Invalid choice. No settings changed."),
+            cfg.entity_extraction = "on".into();
         }
+        "3" | "demo" | "hash" => cfg.apply_preset("demo")?,
+        "4" | "openai" => {
+            cfg.apply_preset("openai")?;
+            let model = value("Model name", "gpt-4o-mini")?;
+            if !model.is_empty() && model != "gpt-4o-mini" {
+                cfg.reranker = format!("openai:{model}");
+            }
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "OpenAI")?;
+        }
+        "5" | "gemini" => {
+            cfg.apply_preset("gemini")?;
+            let model = value("Model name", "gemini-1.5-flash")?;
+            if !model.is_empty() && model != "gemini-1.5-flash" {
+                cfg.reranker = format!("gemini:{model}");
+            }
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "Google Gemini")?;
+        }
+        "6" | "groq" => {
+            cfg.apply_preset("groq")?;
+            let model = value("Model name", "llama-3.3-70b-versatile")?;
+            if !model.is_empty() && model != "llama-3.3-70b-versatile" {
+                cfg.reranker = format!("groq:{model}");
+            }
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "Groq")?;
+        }
+        "7" | "openrouter" => {
+            cfg.apply_preset("openrouter")?;
+            let model = value("Model name", "anthropic/claude-3.5-sonnet")?;
+            if !model.is_empty() && model != "anthropic/claude-3.5-sonnet" {
+                cfg.reranker = format!("openrouter:{model}");
+            }
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "OpenRouter")?;
+        }
+        "8" | "deepseek" => {
+            cfg.apply_preset("deepseek")?;
+            let model = value("Model name", "deepseek-chat")?;
+            if !model.is_empty() && model != "deepseek-chat" {
+                cfg.reranker = format!("deepseek:{model}");
+            }
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "DeepSeek")?;
+        }
+        "9" | "mistral" => {
+            cfg.apply_preset("mistral")?;
+            let model = value("Model name", "mistral-small-latest")?;
+            if !model.is_empty() && model != "mistral-small-latest" {
+                cfg.reranker = format!("mistral:{model}");
+            }
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "Mistral")?;
+        }
+        "10" | "custom" => {
+            cfg.apply_preset("custom")?;
+            let url = value(
+                "Custom OpenAI-compatible endpoint URL (e.g. http://localhost:8000/v1)",
+                "http://localhost:8000/v1",
+            )?;
+            http_url(&url)?;
+            cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
+            let model = value("Model name", "default")?;
+            cfg.reranker = format!("custom:{model}");
+            cfg.entity_extraction = "on".into();
+            prompt_api_key(&mut cfg, "Custom Endpoint")?;
+        }
+        "11" | "remote" => {
+            let url = value(
+                "Remote LightMem URL",
+                cfg.remote_url.as_deref().unwrap_or("http://localhost:8080"),
+            )?;
+            http_url(&url)?;
+            cfg.remote_url = Some(url.trim_end_matches('/').into());
+            let present = cfg.effective_api_key().is_some();
+            credential(&mut cfg.api_key, "remote LightMem", present)?;
+            eprintln!("Remote client setup does not download local models. Test the server with lmem context.");
+            return Ok(cfg);
+        }
+        "0" | "cancel" => bail!("Setup cancelled. No settings changed."),
+        _ => bail!("Invalid choice '{choice}'. No settings changed."),
     }
     if cfg.effective_remote_url().is_some() {
         eprintln!("Remote routing is configured. Local presets do not clear routing.");

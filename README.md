@@ -239,8 +239,8 @@ lmem answer "what is my pincode"
 # Local ONNX extractive QA (minilm-squad2 by default)
 lmem answer "what port does postgresql use"
 
-# Swappable LLM QA
-lmem answer "summarize deployment steps" -r ollama:qwen2.5:0.5b
+# Swappable LLM QA (Ollama, OpenAI, Gemini, Groq, etc.)
+lmem answer "summarize deployment steps" -m ollama:qwen2.5:0.5b
 ```
 
 ---
