@@ -465,11 +465,11 @@ enum Commands {
         #[arg(long)]
         download: Option<String>,
 
-        /// OpenAI-compatible server URL or endpoint (e.g. http://localhost:11434, https://api.openai.com)
-        #[arg(long, visible_alias = "endpoint")]
+        /// OpenAI-compatible answer server URL or endpoint (e.g. https://api.openai.com, http://localhost:11434)
+        #[arg(long = "endpoint", visible_alias = "url")]
         url: Option<String>,
 
-        /// Setup preset: demo (no downloads), local (ONNX), ollama-cloud, or ollama-local
+        /// Setup preset: local, ollama, openai, gemini, groq, openrouter, deepseek, mistral, custom, or demo
         #[arg(long, visible_alias = "profile", visible_alias = "provider")]
         preset: Option<String>,
 
@@ -499,10 +499,10 @@ enum Commands {
         #[arg(long)]
         entity_extraction: Option<String>,
 
-        /// Save an OpenAI / LLM endpoint key; use 'none' to remove it (environment keys still apply)
+        /// Save an answer generation model API key (OpenAI, Gemini, Groq, Ollama, etc.); use 'none' to remove
         #[arg(
-            long,
-            visible_alias = "model-api-key",
+            long = "model-api-key",
+            visible_alias = "ollama-api-key",
             visible_alias = "openai-api-key"
         )]
         ollama_api_key: Option<String>,
@@ -527,8 +527,8 @@ enum Commands {
         #[arg(long, visible_alias = "remote-url")]
         remote: Option<String>,
 
-        /// Secret API key for authenticating with the remote server
-        #[arg(long)]
+        /// Secret API key for authenticating with the remote LightMem server
+        #[arg(long = "api-key", visible_alias = "remote-api-key")]
         api_key: Option<String>,
 
         /// Clear saved remote server configuration and revert to local mode
@@ -542,17 +542,25 @@ enum Commands {
 
     /// Guided terminal setup with a configuration preview before saving
     Setup {
-        /// Setup preset: demo (no downloads), local (ONNX), ollama-local, or ollama-cloud
+        /// Setup preset: local, ollama, openai, gemini, groq, openrouter, deepseek, mistral, custom, or demo
         #[arg(long)]
         preset: Option<String>,
 
-        /// OpenAI / Ollama server URL (e.g. http://localhost:11434)
-        #[arg(long, visible_alias = "endpoint")]
+        /// OpenAI / Ollama server URL (e.g. http://localhost:11434, https://api.openai.com)
+        #[arg(long = "endpoint", visible_alias = "url")]
         url: Option<String>,
 
-        /// Answer engine spec (e.g. ollama:qwen2.5:3b, minilm-squad2, or top1)
-        #[arg(long, visible_alias = "answer-model")]
+        /// Answer engine spec (e.g. openai:gpt-4o-mini, ollama:qwen2.5:3b, minilm-squad2, or top1)
+        #[arg(long = "model", visible_alias = "answer-model")]
         model: Option<String>,
+
+        /// Optional API key when setting up a cloud provider
+        #[arg(
+            long = "api-key",
+            visible_alias = "key",
+            visible_alias = "model-api-key"
+        )]
+        api_key: Option<String>,
 
         /// Override entity extraction toggle ('on' or 'off') independently of the preset
         #[arg(long)]
@@ -3350,7 +3358,7 @@ fn run(cli: Cli) -> Result<()> {
                 cfg.entity_extraction = normalized;
                 changed = true;
             }
-            if let Some(key) = ollama_api_key {
+            if let Some(ref key) = ollama_api_key {
                 let key = key.trim();
                 cfg.ollama_api_key = if key.is_empty() || key.eq_ignore_ascii_case("none") {
                     None
@@ -3444,16 +3452,19 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(k) = api_key {
                 let trimmed = k.trim();
-                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
-                    cfg.api_key = None;
-                    if cfg.remote_url.is_none() && remote.is_none() {
-                        cfg.ollama_api_key = None;
-                    }
+                let is_clear = trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none");
+                if ollama_api_key.is_some() || remote.is_some() || cfg.remote_url.is_some() {
+                    cfg.api_key = if is_clear {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
                 } else {
-                    cfg.api_key = Some(trimmed.to_string());
-                    if cfg.remote_url.is_none() && remote.is_none() {
-                        cfg.ollama_api_key = Some(trimmed.to_string());
-                    }
+                    cfg.ollama_api_key = if is_clear {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
                 }
                 changed = true;
             }
@@ -3482,6 +3493,7 @@ fn run(cli: Cli) -> Result<()> {
             preset,
             url,
             model,
+            api_key,
             entity_extraction,
             dry_run,
             yes,
@@ -3490,8 +3502,11 @@ fn run(cli: Cli) -> Result<()> {
             let previous = LightMemConfig::try_load()?;
             let mut cfg = previous.clone();
             let interactive = io::stdin().is_terminal() && io::stderr().is_terminal() && !json;
-            let explicit =
-                preset.is_some() || url.is_some() || model.is_some() || entity_extraction.is_some();
+            let explicit = preset.is_some()
+                || url.is_some()
+                || model.is_some()
+                || api_key.is_some()
+                || entity_extraction.is_some();
             if let Some(preset) = preset {
                 cfg.apply_preset(&preset)?;
             } else if !explicit {
@@ -3504,6 +3519,14 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(model) = model {
                 cfg.reranker = parse_reranker_setting(&model)?;
+            }
+            if let Some(key) = api_key {
+                let trimmed = key.trim();
+                cfg.ollama_api_key = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
             }
             if let Some(mode) = entity_extraction {
                 let trimmed = mode.trim();

@@ -448,10 +448,13 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                     )?)
                 }
                 "ollama" => {
-                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
-                        "Model service URL (shared with LLM answers/extraction)",
-                        &cfg.ollama_url,
-                    )?);
+                    let ep = value(
+                        "Ollama embedding endpoint URL (e.g. http://localhost:11434)",
+                        cfg.embedding_endpoint
+                            .as_deref()
+                            .unwrap_or("http://localhost:11434"),
+                    )?;
+                    cfg.embedding_endpoint = Some(LightMemConfig::normalize_ollama_url(&ep));
                     cfg.embedding_model = value("Ollama embedding model", &cfg.embedding_model)?;
                 }
                 "hash" => {
@@ -461,13 +464,31 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
             }
         }
         "2" => {
-            eprintln!("Choose provider and model (e.g. minilm-squad2, ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>, top1).");
-            cfg.reranker = super::parse_reranker_setting(&value("Answer engine", &cfg.reranker)?)?;
-            if cfg.reranker.starts_with("ollama") {
-                cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
-                    "Model service URL (shared with search/extraction)",
-                    &cfg.ollama_url,
-                )?);
+            eprintln!("Choose provider or model (e.g. minilm-squad2, ollama, openai, gemini, groq, openrouter, deepseek, mistral, custom, top1).");
+            let ans = value("Answer engine", &cfg.reranker)?;
+            let lower = ans.trim().to_lowercase();
+            match lower.as_str() {
+                "local" | "offline" | "onnx" => cfg.apply_preset("local")?,
+                "openai" | "gemini" | "groq" | "openrouter" | "ollama" | "deepseek" | "mistral"
+                | "demo" => cfg.apply_preset(&lower)?,
+                "custom" => {
+                    let ep = value(
+                        "Custom OpenAI-compatible endpoint URL",
+                        "http://localhost:8000/v1",
+                    )?;
+                    http_url(&ep)?;
+                    cfg.apply_preset("custom")?;
+                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
+                }
+                _ => {
+                    cfg.reranker = super::parse_reranker_setting(&ans)?;
+                    if cfg.reranker.starts_with("ollama") {
+                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
+                            "Ollama service URL",
+                            &cfg.ollama_url,
+                        )?);
+                    }
+                }
             }
         }
         "3" => {
@@ -491,17 +512,25 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 cfg.remote_url = Some(url.trim_end_matches('/').into());
             }
         }
-        "5" => match line("Credential: 1. Model service, 2. Remote LightMem: ")?.as_str() {
-            "1" => {
-                let present = cfg.effective_ollama_api_key().is_some();
-                credential(&mut cfg.ollama_api_key, "model service", present)?;
+        "5" => {
+            match line("Credential: 1. Model service, 2. Remote LightMem, 3. Embedding endpoint: ")?
+                .as_str()
+            {
+                "1" => {
+                    let present = cfg.effective_ollama_api_key().is_some();
+                    credential(&mut cfg.ollama_api_key, "model service", present)?;
+                }
+                "2" => {
+                    let present = cfg.effective_api_key().is_some();
+                    credential(&mut cfg.api_key, "remote LightMem", present)?;
+                }
+                "3" => {
+                    let present = cfg.effective_embedding_api_key().is_some();
+                    credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
+                }
+                _ => bail!("Invalid credential choice. No settings changed."),
             }
-            "2" => {
-                let present = cfg.effective_api_key().is_some();
-                credential(&mut cfg.api_key, "remote LightMem", present)?;
-            }
-            _ => bail!("Invalid credential choice. No settings changed."),
-        },
+        }
         _ => bail!("Invalid choice. No settings changed."),
     }
     if serde_json::to_value(previous)? == serde_json::to_value(&cfg)? {
