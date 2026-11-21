@@ -36,6 +36,14 @@ pub struct LightMemConfig {
     pub ollama_api_key: Option<String>,
     pub embedding_model: String,
     #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "embedding_url"
+    )]
+    pub embedding_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_api_key: Option<String>,
+    #[serde(
         default = "default_reranker",
         rename = "openai_model",
         alias = "reranker",
@@ -69,6 +77,8 @@ impl Default for LightMemConfig {
             ollama_url: "http://localhost:11434".to_string(),
             ollama_api_key: None,
             embedding_model: "nomic-embed-text".to_string(),
+            embedding_endpoint: None,
+            embedding_api_key: None,
             reranker: default_reranker(),
             entity_extraction: default_entity_extraction(),
             remote_url: None,
@@ -144,7 +154,7 @@ impl LightMemConfig {
         }
     }
 
-    /// Apply a standard setup preset: 'local', 'ollama', 'openai', 'openrouter', 'gemini', 'groq', 'demo'
+    /// Apply a standard setup preset: 'local', 'ollama', 'openai', 'openrouter', 'gemini', 'groq', 'deepseek', 'mistral', 'custom', 'demo'
     pub fn apply_preset(&mut self, preset: &str) -> Result<()> {
         match preset.to_lowercase().as_str() {
             "demo" | "hash" => {
@@ -170,7 +180,16 @@ impl LightMemConfig {
                 self.ollama_url = "http://localhost:11434".to_string();
                 Ok(())
             }
-            "ollama-local" | "ollama" => {
+            "ollama-local" => {
+                self.entity_extraction = "on".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
+                self.reranker = "ollama".to_string();
+                self.ollama_url = "http://localhost:11434".to_string();
+                Ok(())
+            }
+            "ollama" => {
                 self.entity_extraction = "on".to_string();
                 self.backend = "onnx".to_string();
                 self.onnx_model = Some("bge-small".to_string());
@@ -215,8 +234,32 @@ impl LightMemConfig {
                 self.ollama_url = "https://api.groq.com/openai".to_string();
                 Ok(())
             }
+            "deepseek" => {
+                self.entity_extraction = "on".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
+                self.reranker = "deepseek:deepseek-chat".to_string();
+                self.ollama_url = "https://api.deepseek.com".to_string();
+                Ok(())
+            }
+            "mistral" => {
+                self.entity_extraction = "on".to_string();
+                self.backend = "onnx".to_string();
+                self.onnx_model = Some("bge-small".to_string());
+                self.embedding_model = "bge-small".to_string();
+                self.reranker = "mistral:mistral-small-latest".to_string();
+                self.ollama_url = "https://api.mistral.ai".to_string();
+                Ok(())
+            }
+            "custom" => {
+                if !self.reranker.starts_with("custom:") {
+                    self.reranker = "custom".to_string();
+                }
+                Ok(())
+            }
             other => anyhow::bail!(
-                "Unknown preset '{}'. Choose 'local' (offline ONNX), 'ollama' (localhost LLM), 'openai', 'openrouter', 'gemini', 'groq', or 'demo'.",
+                "Unknown preset '{}'. Choose 'local' (offline ONNX), 'ollama' (localhost LLM), 'openai', 'openrouter', 'gemini', 'groq', 'deepseek', 'mistral', 'custom', or 'demo'.",
                 other
             ),
         }
@@ -280,6 +323,8 @@ impl LightMemConfig {
             ("mistral", "https://api.mistral.ai", Some("MISTRAL_API_KEY"))
         } else if lower == "top1" {
             ("top1", "", None)
+        } else if lower == "custom" || lower.starts_with("custom:") {
+            ("custom", "", None)
         } else if lower == "minilm-squad2"
             || lower == "tinyroberta-squad2"
             || lower == "onnx"
@@ -295,7 +340,8 @@ impl LightMemConfig {
     /// Respects custom configured URL; otherwise defaults to active provider's default URL.
     pub fn effective_ollama_url(&self) -> String {
         let raw = self.ollama_url.trim();
-        if !raw.is_empty() && raw != "http://localhost:11434" {
+        let (_prov, default_url, _key_env) = self.active_provider();
+        if !raw.is_empty() && raw != "http://localhost:11434" && raw != default_url {
             return Self::normalize_ollama_url(raw);
         }
         if let Some(env_url) = std::env::var("LIGHTMEM_MODEL_URL")
@@ -308,11 +354,57 @@ impl LightMemConfig {
         {
             return Self::normalize_ollama_url(&env_url);
         }
-        let (_prov, default_url, _key_env) = self.active_provider();
         if !default_url.is_empty() {
             return default_url.to_string();
         }
         Self::normalize_ollama_url(&self.ollama_url)
+    }
+
+    /// Resolves effective embedding endpoint URL for Ollama or custom embedding servers.
+    pub fn effective_embedding_url(&self) -> String {
+        if let Some(ref u) = self.embedding_endpoint {
+            let trimmed = u.trim();
+            if !trimmed.is_empty() {
+                return Self::normalize_ollama_url(trimmed);
+            }
+        }
+        if let Ok(env_url) = std::env::var("LIGHTMEM_EMBEDDING_URL") {
+            let trimmed = env_url.trim();
+            if !trimmed.is_empty() {
+                return Self::normalize_ollama_url(trimmed);
+            }
+        }
+        if self.backend == "ollama" {
+            let raw = self.ollama_url.trim();
+            let (prov, default_url, _) = self.active_provider();
+            let is_cloud_provider_url = matches!(
+                prov,
+                "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
+            ) && raw == default_url;
+
+            if !raw.is_empty() && raw != "http://localhost:11434" && !is_cloud_provider_url {
+                return self.effective_ollama_url();
+            }
+            return "http://localhost:11434".to_string();
+        }
+        String::new()
+    }
+
+    /// Resolves effective embedding API key if using an authenticated remote embedding endpoint.
+    pub fn effective_embedding_api_key(&self) -> Option<String> {
+        let from_config = self
+            .embedding_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+            .map(String::from);
+        if from_config.is_some() {
+            return from_config;
+        }
+        std::env::var("LIGHTMEM_EMBEDDING_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
     }
 
     /// Resolves effective API key from config, provider-specific environment variables, or fallback environment variables.
@@ -460,8 +552,9 @@ impl LightMemConfig {
             "groq" => "Groq",
             "deepseek" => "DeepSeek",
             "mistral" => "Mistral",
-            "onnx" => "Local ONNX",
+            "onnx" | "local" => "Local ONNX",
             "top1" => "Top-1",
+            "custom" => "Custom",
             _ => "Ollama",
         };
         let model_display = if self.reranker == "ollama" {
@@ -515,7 +608,7 @@ impl LightMemConfig {
             "hash" => "hash:fnv-bigram-v1".to_string(),
             "ollama" => format!(
                 "ollama:{}:{}",
-                self.effective_ollama_url().trim_end_matches('/'),
+                self.effective_embedding_url().trim_end_matches('/'),
                 self.embedding_model
             ),
             "onnx" => {
@@ -598,7 +691,7 @@ impl LightMemConfig {
             "ollama" => format!(
                 "{} (via Ollama @ {})",
                 self.embedding_model,
-                self.effective_ollama_url()
+                self.effective_embedding_url()
             ),
             "hash" => "deterministic hash (384-dim keyword/demo mode)".to_string(),
             other => other.to_string(),
@@ -724,7 +817,12 @@ impl LightMemConfig {
 
     pub fn redacted_json(&self) -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(self)?;
-        for field in ["api_key", "ollama_api_key", "openai_api_key"] {
+        for field in [
+            "api_key",
+            "ollama_api_key",
+            "openai_api_key",
+            "embedding_api_key",
+        ] {
             if value.get(field).is_some() {
                 value[field] = serde_json::json!("[REDACTED]");
             }
@@ -735,10 +833,22 @@ impl LightMemConfig {
                 value["openai_api_key"] = serde_json::json!("[REDACTED]");
             }
         }
+        if let Some(ref k) = self.embedding_api_key {
+            if !k.trim().is_empty() {
+                value["embedding_api_key"] = serde_json::json!("[REDACTED]");
+            }
+        }
+        let (prov, _, _) = self.active_provider();
+        value["provider"] = serde_json::json!(prov);
+        value["model"] = serde_json::json!(self.reranker);
+        value["endpoint"] = serde_json::json!(self.effective_ollama_url());
         value["ollama_url"] = serde_json::json!(self.ollama_url);
         value["openai_endpoint"] = serde_json::json!(self.ollama_url);
         value["reranker"] = serde_json::json!(self.reranker);
         value["openai_model"] = serde_json::json!(self.reranker);
+        value["embedding_backend"] = serde_json::json!(self.backend);
+        value["embedding_endpoint"] = serde_json::json!(self.embedding_endpoint);
+        value["effective_embedding_url"] = serde_json::json!(self.effective_embedding_url());
         let norm_entity = if self.entity_extraction != "off" && !self.entity_extraction.is_empty() {
             "on"
         } else {
@@ -753,6 +863,8 @@ impl LightMemConfig {
             serde_json::json!(self.effective_ollama_api_key().is_some());
         value["openai_api_key_configured"] =
             serde_json::json!(self.effective_ollama_api_key().is_some());
+        value["embedding_api_key_configured"] =
+            serde_json::json!(self.effective_embedding_api_key().is_some());
         Ok(value)
     }
 
@@ -953,9 +1065,30 @@ mod tests {
         assert_eq!(cfg.reranker, "groq:llama-3.3-70b-versatile");
         assert_eq!(cfg.effective_ollama_url(), "https://api.groq.com/openai");
 
+        cfg.apply_preset("deepseek").unwrap();
+        assert_eq!(cfg.reranker, "deepseek:deepseek-chat");
+        assert_eq!(cfg.effective_ollama_url(), "https://api.deepseek.com");
+
+        cfg.apply_preset("mistral").unwrap();
+        assert_eq!(cfg.reranker, "mistral:mistral-small-latest");
+        assert_eq!(cfg.effective_ollama_url(), "https://api.mistral.ai");
+
         cfg.apply_preset("local").unwrap();
         assert_eq!(cfg.reranker, "minilm-squad2");
         assert_eq!(cfg.entity_extraction, "off");
+
+        // Embedding endpoint separation test
+        let mut emb_cfg = LightMemConfig::default();
+        emb_cfg.apply_preset("openai").unwrap();
+        emb_cfg.backend = "ollama".to_string();
+        assert_eq!(emb_cfg.effective_ollama_url(), "https://api.openai.com");
+        // Embedding URL does not collide with OpenAI answer endpoint
+        assert_eq!(emb_cfg.effective_embedding_url(), "http://localhost:11434");
+        emb_cfg.embedding_endpoint = Some("http://remote-ollama:11434".to_string());
+        assert_eq!(
+            emb_cfg.effective_embedding_url(),
+            "http://remote-ollama:11434"
+        );
 
         // Normalization
         assert_eq!(

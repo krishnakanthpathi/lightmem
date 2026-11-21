@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.4
+
+- **Unified & Simplified Provider Presets**: Streamlined model and provider configuration with pre-built presets (`local`, `ollama`, `openai`, `gemini`, `groq`, `openrouter`, `deepseek`, `mistral`, `custom`, `demo`). Selecting a provider preset automatically configures official endpoint URLs, requiring only the user's API key without URL boilerplate.
+- **Dedicated Vector Embedding Endpoints**: Completely separated vector search embedding configuration from answer generation endpoints. Added dedicated `--embedding-endpoint` and `--embedding-api-key` flags and configuration fields, preventing cloud LLM endpoints from conflicting with or leaking into Ollama or custom embedding backends.
+- **One-Command Model Switching (`lmem model`)**: Added first-class `lmem model [provider_or_model] [--api-key KEY] [--endpoint URL]` command to quickly view the current setup or switch answer models and providers with a single command.
+- **Clean Two-Card Configuration Display**: Rebuilt `lmem config` into two clear visual cards (`ANSWER GENERATION ENGINE` and `VECTOR SEARCH EMBEDDINGS`), eliminating ambiguous legacy configuration displays while maintaining full backwards compatibility for existing config files.
+- **Explicit Custom Endpoints**: Custom proxy and self-hosted OpenAI-compatible services are configured explicitly via `--preset custom --endpoint <url>`, eliminating confusing automatic name-guessing heuristics.
+
 ## 0.8.3
 
 - **Command History & Audit Trail**: Added `lmem history` (and alias `lmem hist`) command backed by an isolated local SQLite database (`~/.lightmem/history.db`, mode `0600`). Records executed command history, status (`✓`/`✗`), duration, relative timestamps, search query filtering (`lmem history <query>`), status filtering (`--status success|error`), limiting (`-n, --limit`), clearing (`--clear`), and JSON output (`--json`), with strict secret redaction (`--api-key`, `--openai-api-key`, etc.).

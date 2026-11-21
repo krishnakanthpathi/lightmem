@@ -96,8 +96,15 @@ enum Commands {
         #[arg(short = 'e', long = "extract")]
         extract: bool,
 
-        /// Optional LLM model override when --extract is enabled (e.g. 'ollama:gemma4:31b-cloud')
-        #[arg(short = 'r', long = "reranker")]
+        /// Optional model override when --extract is enabled (e.g. 'ollama:gemma4:31b-cloud', 'gpt-4o-mini')
+        #[arg(
+            short = 'm',
+            long = "model",
+            value_name = "MODEL",
+            visible_alias = "answer-model",
+            alias = "reranker",
+            short_alias = 'r'
+        )]
         reranker: Option<String>,
 
         /// Memory category (fact, decision, instruction, preference, learning, goal, commitment, artifact, event, relationship, observation, error, context, password)
@@ -171,7 +178,7 @@ enum Commands {
         #[arg(long)]
         min_similarity: Option<f32>,
 
-        /// Toggle: Run precision QA reranker on recalled memories
+        /// Toggle: Run precision QA extractive answering on recalled memories
         #[arg(long)]
         precision: bool,
 
@@ -370,12 +377,19 @@ enum Commands {
         /// The question to answer
         question: String,
 
-        /// Toggle: Force use of precision extractive QA reranker
+        /// Toggle: Force use of precision local extractive QA
         #[arg(long)]
         precision: bool,
 
-        /// Override reranker mode for this query ("onnx", "ollama", "ollama:<model>", or "top1")
-        #[arg(short = 'r', long)]
+        /// Answer model or provider override for this query (e.g. 'openai:gpt-4o-mini', 'gemini', 'ollama:qwen2.5', 'onnx', 'top1')
+        #[arg(
+            short = 'm',
+            long = "model",
+            value_name = "MODEL",
+            visible_alias = "answer-model",
+            alias = "reranker",
+            short_alias = 'r'
+        )]
         reranker: Option<String>,
 
         /// Filter candidate memories by category
@@ -390,7 +404,7 @@ enum Commands {
         #[arg(long, value_parser = parse_exact_date)]
         date: Option<NaiveDate>,
 
-        /// Max candidate memories to retrieve for reranking
+        /// Max candidate memories to retrieve for answering
         #[arg(short = 'l', long, default_value = "10")]
         limit: usize,
 
@@ -399,14 +413,32 @@ enum Commands {
         json: bool,
     },
 
+    #[command(hide = true, name = "__connections")]
+    CompletionConnections,
+
     /// Inspect local configuration and index readiness without downloads or writes
     Doctor {
         #[arg(long)]
         json: bool,
     },
 
-    #[command(hide = true, name = "__connections")]
-    CompletionConnections,
+    /// View or switch the active answer model and provider
+    Model {
+        /// Target provider or model (e.g. 'openai', 'gemini', 'ollama', 'local', 'groq', 'openrouter', 'custom')
+        provider_or_model: Option<String>,
+
+        /// Optional API key when configuring a cloud provider
+        #[arg(long, visible_alias = "key")]
+        api_key: Option<String>,
+
+        /// Optional custom endpoint URL (required for 'custom' provider)
+        #[arg(long, visible_alias = "url")]
+        endpoint: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// View shared settings, preview changes, or test the saved embedding backend
     Config {
@@ -438,17 +470,26 @@ enum Commands {
         url: Option<String>,
 
         /// Setup preset: demo (no downloads), local (ONNX), ollama-cloud, or ollama-local
-        #[arg(long, visible_alias = "profile")]
+        #[arg(long, visible_alias = "profile", visible_alias = "provider")]
         preset: Option<String>,
 
-        /// Ollama vector embedding model name (explicit alias: --embedding-model; for the answer/generative LLM use --reranker or --answer-model)
-        #[arg(long, visible_alias = "embedding-model")]
+        /// Vector embedding model name (e.g. 'bge-small', 'nomic-embed-text')
+        #[arg(long = "embedding-model", alias = "model")]
         model: Option<String>,
 
-        /// OpenAI-compatible chat model for answers and entity extraction (e.g. 'qwen2.5-coder:1.5b', 'gpt-4o-mini', 'ollama:qwen2.5:3b')
+        /// Dedicated endpoint URL for Ollama or custom vector embeddings (separate from answer endpoint)
+        #[arg(long)]
+        embedding_endpoint: Option<String>,
+
+        /// Dedicated API key for remote vector embedding endpoint
+        #[arg(long)]
+        embedding_api_key: Option<String>,
+
+        /// Model for answers and entity extraction (e.g. 'gpt-4o-mini', 'gemini-1.5-flash', 'ollama:qwen2.5:3b')
         #[arg(
-            long,
-            visible_alias = "answer-model",
+            long = "answer-model",
+            value_name = "MODEL",
+            alias = "reranker",
             visible_alias = "openai-model",
             visible_alias = "chat-model"
         )]
@@ -554,8 +595,15 @@ enum Commands {
         #[arg(short = 'y', long, visible_alias = "resolve")]
         yes: bool,
 
-        /// Override reranker used for merging ("onnx", "ollama", "ollama:<model>", or "top1")
-        #[arg(short = 'r', long)]
+        /// Override model used for merging (e.g. 'openai:gpt-4o-mini', 'ollama:qwen2.5', 'top1')
+        #[arg(
+            short = 'm',
+            long = "model",
+            value_name = "MODEL",
+            visible_alias = "answer-model",
+            alias = "reranker",
+            short_alias = 'r'
+        )]
         reranker: Option<String>,
 
         /// Minimum similarity threshold to flag as overlapping/conflicting (0.0 - 1.0)
@@ -676,8 +724,15 @@ enum Commands {
         #[arg(short = 'c', long, default_value = "0.85")]
         confidence: f32,
 
-        /// Override reranker/extractor model (e.g. 'ollama:qwen2.5:3b')
-        #[arg(short = 'r', long)]
+        /// Override model used for extraction (e.g. 'ollama:qwen2.5:3b', 'gpt-4o-mini')
+        #[arg(
+            short = 'm',
+            long = "model",
+            value_name = "MODEL",
+            visible_alias = "answer-model",
+            alias = "reranker",
+            short_alias = 'r'
+        )]
         reranker: Option<String>,
 
         /// Output extracted observations as JSON
@@ -1367,6 +1422,7 @@ fn handle_remote_command(
         }
 
         Commands::Config { .. }
+        | Commands::Model { .. }
         | Commands::Setup { .. }
         | Commands::Docs { .. }
         | Commands::Bundle {
@@ -1593,11 +1649,13 @@ fn parse_reranker_setting(raw: &str) -> Result<String> {
                 | "mistral"
                 | "llm"
                 | "top1"
+                | "custom"
                 | "minilm-squad2"
                 | "tinyroberta-squad2"
         ) || lower.starts_with("onnx:")
+            || lower.starts_with("custom:")
             || lower.contains(':'),
-        "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or a model spec like ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>.",
+        "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or a model spec like ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>, custom:<model>.",
         raw
     );
     let normalized = LightMemConfig::normalize_reranker(raw, None);
@@ -1799,6 +1857,7 @@ fn should_record_history(cli: &Cli) -> bool {
             | Some(Commands::Doctor { .. })
             | Some(Commands::History { .. })
             | Some(Commands::Config { .. })
+            | Some(Commands::Model { .. })
             | Some(Commands::Setup { .. })
     )
 }
@@ -1817,6 +1876,8 @@ fn extract_subcommand_name(cli: &Cli) -> String {
         Some(Commands::Deduplicate { .. }) => "dedup",
         Some(Commands::Inspect { .. }) => "inspect",
         Some(Commands::List { .. }) => "list",
+        Some(Commands::Doctor { .. }) => "doctor",
+        Some(Commands::Model { .. }) => "model",
         Some(Commands::Config { .. }) => "config",
         Some(Commands::Setup { .. }) => "setup",
         Some(Commands::Reindex { .. }) => "reindex",
@@ -1833,7 +1894,6 @@ fn extract_subcommand_name(cli: &Cli) -> String {
         Some(Commands::Observe { .. }) => "observe",
         Some(Commands::Connect { .. }) => "connect",
         Some(Commands::Mcp) => "mcp",
-        Some(Commands::Doctor { .. }) => "doctor",
         Some(Commands::Serve { .. }) => "serve",
         Some(Commands::Local { .. }) => "local",
         Some(Commands::Remote { .. }) => "remote",
@@ -1908,7 +1968,7 @@ fn run(cli: Cli) -> Result<()> {
             cli.scope.clone(),
             cli.session.as_deref(),
             cli.remote.as_deref(),
-            *json || cli.json,
+            *json,
         );
     }
     if let Some(Commands::Local { json }) = &cli.command {
@@ -2134,6 +2194,7 @@ fn run(cli: Cli) -> Result<()> {
             cli.command,
             Some(
                 Commands::Config { .. }
+                    | Commands::Model { .. }
                     | Commands::Setup { .. }
                     | Commands::Docs { .. }
                     | Commands::Serve { .. }
@@ -3015,6 +3076,79 @@ fn run(cli: Cli) -> Result<()> {
             CliView::render_answer(&result, json)?;
         }
 
+        Commands::Model {
+            provider_or_model,
+            api_key,
+            endpoint,
+            json,
+        } => {
+            let mut cfg = LightMemConfig::try_load()?;
+            if provider_or_model.is_none() && api_key.is_none() && endpoint.is_none() {
+                if json {
+                    CliView::render_config(&cfg, false, true, effective_db, global)?;
+                } else {
+                    terminal::render_config(&cfg, false, effective_db, global)?;
+                }
+                return Ok(());
+            }
+
+            let path = effective_db
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+            let previous = cfg.clone();
+
+            if let Some(target) = provider_or_model {
+                let lower = target.trim().to_lowercase();
+                match lower.as_str() {
+                    "local" | "offline" | "onnx" => {
+                        cfg.apply_preset("local")?;
+                    }
+                    "openai" | "gemini" | "groq" | "openrouter" | "ollama" | "deepseek"
+                    | "mistral" | "demo" => {
+                        cfg.apply_preset(&lower)?;
+                    }
+                    "custom" => {
+                        anyhow::ensure!(
+                            endpoint.is_some() || (!cfg.ollama_url.trim().is_empty() && cfg.ollama_url != "http://localhost:11434"),
+                            "Custom provider requires an endpoint URL. Provide one with '--endpoint <URL>'"
+                        );
+                        cfg.apply_preset("custom")?;
+                    }
+                    _ => {
+                        cfg.reranker = parse_reranker_setting(&target)?;
+                    }
+                }
+            }
+
+            if let Some(ref ep) = endpoint {
+                cfg.ollama_url = LightMemConfig::normalize_ollama_url(ep);
+            }
+            if let Some(ref key) = api_key {
+                let trimmed = key.trim();
+                cfg.ollama_api_key = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+
+            terminal::validate(&cfg)?;
+            if !apply_configuration(&previous, &cfg, &path, true, json)? {
+                return Ok(());
+            }
+
+            if json {
+                CliView::render_config(&cfg, true, true, effective_db, global)?;
+            } else {
+                println!(
+                    "\n  {} {}",
+                    CliView::emerald_bold("✓"),
+                    CliView::emerald_bold("Answer model and provider updated")
+                );
+                terminal::render_config(&cfg, true, effective_db, global)?;
+            }
+        }
+
         Commands::Config {
             reload,
             action,
@@ -3022,6 +3156,8 @@ fn run(cli: Cli) -> Result<()> {
             preset,
             backend,
             onnx_model,
+            embedding_endpoint,
+            embedding_api_key,
             download,
             url,
             model,
@@ -3173,7 +3309,33 @@ fn run(cli: Cli) -> Result<()> {
             let mut changed = false;
 
             if let Some(ref p) = preset {
+                if p.eq_ignore_ascii_case("custom") {
+                    anyhow::ensure!(
+                        url.is_some() || (!cfg.ollama_url.trim().is_empty() && cfg.ollama_url != "http://localhost:11434"),
+                        "Custom provider requires an endpoint URL. Provide one with '--endpoint <URL>'"
+                    );
+                }
                 cfg.apply_preset(p)?;
+                changed = true;
+            }
+            if let Some(ref eu) = embedding_endpoint {
+                let trimmed = eu.trim();
+                cfg.embedding_endpoint =
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(LightMemConfig::normalize_ollama_url(trimmed))
+                    };
+                changed = true;
+            }
+            if let Some(ref ek) = embedding_api_key {
+                let trimmed = ek.trim();
+                cfg.embedding_api_key =
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
                 changed = true;
             }
             if let Some(mode) = entity_extraction {

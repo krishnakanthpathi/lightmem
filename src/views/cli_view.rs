@@ -337,7 +337,6 @@ impl CliView {
                 "lmem list --page 1 --limit 20",
                 "Paginated chronological index",
             ),
-            ("│", "lmem doctor", "Inspect system readiness & diagnostics"),
             (
                 "│",
                 "lmem connect <agent>",
@@ -1666,18 +1665,14 @@ impl CliView {
         );
         println!();
 
-        println!("  ╭─ {}", Self::crimson_bold("ENGINE SPECIFICATIONS"));
+        println!("  ╭─ {}", Self::crimson_bold("ANSWER GENERATION ENGINE"));
+        let provider = Self::model_provider_name(cfg);
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            "Search Embedder:",
-            Self::emerald_bold(&cfg.active_embedding_summary())
+            "Provider:",
+            Self::violet_bold(provider)
         );
-        let provider = Self::model_provider_name(cfg);
-        let model_label = format!("{} Model:", provider);
-        let endpoint_label = format!("{} Endpoint:", provider);
-        let key_label = format!("{} API Key:", provider);
-
         let model_display = if cfg.reranker == "ollama" || cfg.reranker == "auto" {
             let resolved = OllamaReranker::with_api_key(
                 cfg.effective_ollama_url(),
@@ -1697,14 +1692,20 @@ impl CliView {
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            model_label,
+            "Answer Model:",
             Self::emerald_bold(&model_display)
         );
+        let eff_url = cfg.effective_ollama_url();
+        let endpoint_disp = if eff_url.is_empty() || provider == "Local" || provider == "Top-1" {
+            Self::slate("local (offline, built-in)")
+        } else {
+            Self::emerald(&eff_url)
+        };
         println!(
             "  │  {} {:<18} {}",
             Self::slate("▸"),
-            endpoint_label,
-            Self::emerald(&cfg.ollama_url)
+            "Model Endpoint:",
+            endpoint_disp
         );
         let key_disp = if cfg
             .ollama_api_key
@@ -1714,10 +1715,23 @@ impl CliView {
             .is_some()
         {
             Self::gold("configured (secret)")
+        } else if let Some((_, _, Some(env_name))) = Some(cfg.active_provider()) {
+            if std::env::var(env_name).is_ok() {
+                Self::gold(&format!("from {}", env_name))
+            } else if provider == "Gemini" && std::env::var("GOOGLE_API_KEY").is_ok() {
+                Self::gold("from GOOGLE_API_KEY")
+            } else {
+                Self::slate("empty (none)")
+            }
         } else {
             Self::slate("empty (none)")
         };
-        println!("  │  {} {:<18} {}", Self::slate("▸"), key_label, key_disp);
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Model API Key:",
+            key_disp
+        );
         let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
         } else if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
@@ -1726,10 +1740,30 @@ impl CliView {
             Self::slate("off")
         };
         println!(
-            "  │  {} {:<18} {}",
+            "  ╰─ {} {:<18} {}",
             Self::slate("▸"),
             "Entity Extraction:",
             extraction_summary
+        );
+        println!();
+
+        println!("  ╭─ {}", Self::crimson_bold("VECTOR SEARCH EMBEDDINGS"));
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Search Embedder:",
+            Self::emerald_bold(&cfg.active_embedding_summary())
+        );
+        let emb_ep_disp = if cfg.backend == "ollama" {
+            Self::emerald(&cfg.effective_embedding_url())
+        } else {
+            Self::slate("local (offline, built-in)")
+        };
+        println!(
+            "  │  {} {:<18} {}",
+            Self::slate("▸"),
+            "Embedding Endpoint:",
+            emb_ep_disp
         );
         println!(
             "  ╰─ {} {:<18} {}",
@@ -1782,113 +1816,6 @@ impl CliView {
             }
         );
         println!();
-
-        if !updated {
-            println!(
-                "  {} {}",
-                Self::crimson_bold("◈"),
-                Self::white_bold("Available Setup Presets")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::emerald_bold("•"),
-                Self::emerald_bold("local"),
-                Self::violet("lmem config --preset local"),
-                Self::slate("Offline ONNX search + answers (100% private, no setup)")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::emerald_bold("•"),
-                Self::emerald_bold("ollama"),
-                Self::violet("lmem config --preset ollama"),
-                Self::slate("Local ONNX embeddings + Ollama LLM (localhost:11434)")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::emerald_bold("•"),
-                Self::emerald_bold("openai"),
-                Self::violet("lmem config --preset openai"),
-                Self::slate("Local ONNX embeddings + OpenAI (gpt-4o-mini)")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::emerald_bold("•"),
-                Self::emerald_bold("openrouter"),
-                Self::violet("lmem config --preset openrouter"),
-                Self::slate("Local ONNX embeddings + OpenRouter (Claude 3.5 Sonnet)")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::emerald_bold("•"),
-                Self::emerald_bold("gemini"),
-                Self::violet("lmem config --preset gemini"),
-                Self::slate("Local ONNX embeddings + Google Gemini (1.5 Flash)")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::emerald_bold("•"),
-                Self::emerald_bold("groq"),
-                Self::violet("lmem config --preset groq"),
-                Self::slate("Local ONNX embeddings + Groq (Llama 3.3 70B)")
-            );
-            println!(
-                "    {} {:<14} {:<34} {}",
-                Self::slate("•"),
-                Self::slate("demo"),
-                Self::violet("lmem config --preset demo"),
-                Self::slate("No-download deterministic hash search (test mode)")
-            );
-            println!();
-            println!(
-                "  {} {}",
-                Self::gold("💡"),
-                Self::white_bold("Quick Actions:")
-            );
-            println!("    • Easy setup:        {}", Self::violet("lmem setup"));
-            println!(
-                "    • Search backend:    {}",
-                Self::violet("lmem config --backend onnx|ollama|hash")
-            );
-            println!(
-                "    • Embedding model:   {}",
-                Self::violet("lmem config --embedding-model <model>")
-            );
-            println!(
-                "    • OpenAI model:      {}",
-                Self::violet("lmem config --openai-model <model>")
-            );
-            println!(
-                "    • Entity extraction: {}",
-                Self::violet("lmem config --entity-extraction on|off")
-            );
-            println!(
-                "    • Set endpoint:      {}",
-                Self::violet("lmem config --endpoint <url>")
-            );
-            println!(
-                "    • Set API key:       {}",
-                Self::violet("lmem config --api-key <key>")
-            );
-            println!(
-                "    • Reload settings:   {}",
-                Self::violet("lmem config reload")
-            );
-            println!("    • Run diagnostics:  {}", Self::violet("lmem doctor"));
-            println!(
-                "    • Test embeddings:  {}",
-                Self::violet("lmem config --test")
-            );
-            println!(
-                "    • Switch mode:      {} or {}",
-                Self::violet("lmem remote [url]"),
-                Self::violet("lmem local")
-            );
-            println!(
-                "    • All flags:        {}",
-                Self::gold("lmem config --help")
-            );
-            println!();
-        }
         Ok(())
     }
 
@@ -2978,7 +2905,7 @@ impl CliView {
                 ),
                 &[
                     ("Check configuration:", "lmem config"),
-                    ("Run diagnostics:", "lmem doctor"),
+                    ("Test embedding engine:", "lmem config --test"),
                     ("Switch to local model:", "lmem config --preset local"),
                 ],
             )
@@ -3010,8 +2937,8 @@ impl CliView {
                     reason: &err_str,
                     details: &[],
                     suggestions: &[
-                        ("Run diagnostics:", "lmem doctor"),
                         ("Check configuration:", "lmem config"),
+                        ("Test embedding engine:", "lmem config --test"),
                         ("Switch to local model:", "lmem config --preset local"),
                     ],
                 },

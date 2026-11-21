@@ -11,6 +11,8 @@ fn hash_config() -> LightMemConfig {
         ollama_url: "http://127.0.0.1:9".to_string(),
         ollama_api_key: None,
         embedding_model: "nomic-embed-text".to_string(),
+        embedding_endpoint: None,
+        embedding_api_key: None,
         reranker: "top1".to_string(),
         entity_extraction: "off".into(),
         remote_url: None,

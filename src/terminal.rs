@@ -66,12 +66,17 @@ pub fn validate(cfg: &LightMemConfig) -> Result<()> {
             || entity_clean.starts_with("mistral:"),
         "Entity extraction must be on, off, or <provider>:<model>."
     );
-    http_url(&cfg.ollama_url)?;
+    if !cfg.ollama_url.trim().is_empty() {
+        http_url(&cfg.ollama_url)?;
+    }
+    if let Some(url) = &cfg.embedding_endpoint {
+        http_url(url)?;
+    }
     if let Some(url) = &cfg.remote_url {
         http_url(url)?;
     }
     ensure!(
-        cfg.backend != "ollama" || cfg.effective_ollama_url() != "https://ollama.com",
+        cfg.backend != "ollama" || cfg.effective_embedding_url() != "https://ollama.com",
         "This endpoint provides generative models, not embeddings. Use --backend onnx for search."
     );
     ensure!(

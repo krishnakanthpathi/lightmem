@@ -90,9 +90,9 @@ impl LightMem {
                 }
             }
             "ollama" => Arc::new(OllamaEmbeddingProvider::with_api_key(
-                self.config.effective_ollama_url(),
+                self.config.effective_embedding_url(),
                 self.config.embedding_model.clone(),
-                self.config.effective_ollama_api_key(),
+                self.config.effective_embedding_api_key(),
             )),
             "hash" => Arc::new(HashEmbeddingProvider),
             other => anyhow::bail!("Unknown embedding backend: {}", other),
