@@ -161,8 +161,30 @@ pub fn ensure_unchanged(previous: &LightMemConfig) -> Result<()> {
 }
 
 fn prompt_api_key(cfg: &mut LightMemConfig, provider: &str) -> Result<()> {
-    if confirm(&format!("Configure {provider} API key now?"), true)? {
-        eprint!("  New {provider} API key (hidden): ");
+    eprintln!();
+    let has_key = cfg
+        .ollama_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if has_key {
+        eprintln!(
+            "  {} {} API key: {}",
+            CliView::crimson("◈"),
+            provider,
+            CliView::emerald("configured (secret)")
+        );
+        if confirm(&format!("Update {provider} API key?"), false)? {
+            eprint!("  Enter new {provider} API key (hidden): ");
+            io::stderr().flush()?;
+            let key = rpassword::read_password()?;
+            if !key.trim().is_empty() {
+                cfg.ollama_api_key = Some(key.trim().into());
+            }
+        }
+    } else if confirm(&format!("Configure {provider} API key now?"), true)? {
+        eprint!("  Enter {provider} API key (hidden): ");
         io::stderr().flush()?;
         let key = rpassword::read_password()?;
         if !key.trim().is_empty() {
@@ -199,78 +221,88 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "  ╭─ {}",
         CliView::crimson_bold("LOCAL & OFFLINE (No API Key Required)")
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[1]"),
-        CliView::emerald_bold("Local ONNX"),
-        CliView::slate("100% offline, zero setup, private (bge-small + minilm) [Recommended]")
+    let row = |num: &str, name: &str, desc: &str, color_fn: fn(&str) -> colored::ColoredString| {
+        let name_padded = format!("{:<18}", name);
+        eprintln!(
+            "  │  {} {} {}",
+            CliView::slate(num),
+            color_fn(&name_padded),
+            CliView::slate(desc)
+        );
+    };
+
+    row(
+        " [1]",
+        "Local ONNX",
+        "100% offline, zero setup, private (bge-small + minilm) [Recommended]",
+        CliView::emerald_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[2]"),
-        CliView::emerald("Ollama Local"),
-        CliView::slate("Run local open-source LLMs via Ollama (localhost:11434)")
+    row(
+        " [2]",
+        "Ollama Local",
+        "Run local open-source LLMs via Ollama (localhost:11434)",
+        CliView::emerald,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[3]"),
-        CliView::emerald("Offline Demo"),
-        CliView::slate("Deterministic hash search (testing & CI, no downloads)")
+    row(
+        " [3]",
+        "Offline Demo",
+        "Deterministic hash search (testing & CI, no downloads)",
+        CliView::emerald,
     );
     eprintln!();
     eprintln!(
         "  ╭─ {}",
         CliView::crimson_bold("CLOUD LLM PROVIDERS (Preconfigured Endpoints)")
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[4]"),
-        CliView::violet_bold("OpenAI"),
-        CliView::slate("gpt-4o-mini (api.openai.com)")
+    row(
+        " [4]",
+        "OpenAI",
+        "gpt-4o-mini (api.openai.com)",
+        CliView::violet_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[5]"),
-        CliView::violet_bold("Google Gemini"),
-        CliView::slate("gemini-1.5-flash (generativelanguage.googleapis.com)")
+    row(
+        " [5]",
+        "Google Gemini",
+        "gemini-1.5-flash (generativelanguage.googleapis.com)",
+        CliView::violet_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[6]"),
-        CliView::violet_bold("Groq"),
-        CliView::slate("llama-3.3-70b-versatile (api.groq.com)")
+    row(
+        " [6]",
+        "Groq",
+        "llama-3.3-70b-versatile (api.groq.com)",
+        CliView::violet_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[7]"),
-        CliView::violet_bold("OpenRouter"),
-        CliView::slate("anthropic/claude-3.5-sonnet (openrouter.ai)")
+    row(
+        " [7]",
+        "OpenRouter",
+        "anthropic/claude-3.5-sonnet (openrouter.ai)",
+        CliView::violet_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[8]"),
-        CliView::violet_bold("DeepSeek"),
-        CliView::slate("deepseek-chat (api.deepseek.com)")
+    row(
+        " [8]",
+        "DeepSeek",
+        "deepseek-chat (api.deepseek.com)",
+        CliView::violet_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[9]"),
-        CliView::violet_bold("Mistral"),
-        CliView::slate("mistral-small-latest (api.mistral.ai)")
+    row(
+        " [9]",
+        "Mistral",
+        "mistral-small-latest (api.mistral.ai)",
+        CliView::violet_bold,
     );
     eprintln!();
     eprintln!("  ╭─ {}", CliView::crimson_bold("CUSTOM & NETWORKING"));
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[10]"),
-        CliView::gold_bold("Custom Endpoint"),
-        CliView::slate("Self-hosted OpenAI-compatible proxy / LLM")
+    row(
+        "[10]",
+        "Custom Endpoint",
+        "Self-hosted OpenAI-compatible proxy / LLM",
+        CliView::gold_bold,
     );
-    eprintln!(
-        "  │  {} {:<20} {}",
-        CliView::slate("[11]"),
-        CliView::gold_bold("Remote Vault"),
-        CliView::slate("Connect to a remote LightMem daemon")
+    row(
+        "[11]",
+        "Remote Vault",
+        "Connect to a remote LightMem daemon",
+        CliView::gold_bold,
     );
     eprintln!();
     eprintln!("  {} Cancel", CliView::slate("[0]"));
@@ -278,18 +310,20 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
 
     let mut cfg = previous.clone();
     let choice = value(
-        "Select profile [1-11] (default: 1 · Use recommended local settings)",
+        "Select profile [1-11] (Use recommended local settings)",
         "1",
     )?
     .to_lowercase();
+    eprintln!();
 
     match choice.as_str() {
         "1" | "local" | "onnx" => cfg.apply_preset("local")?,
         "2" | "ollama" => {
             cfg.apply_preset("ollama")?;
             let model = value("Ollama model name", "qwen2.5:3b")?;
-            if !model.is_empty() && model != "qwen2.5:3b" {
-                cfg.reranker = format!("ollama:{model}");
+            let clean = model.strip_prefix("ollama:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "qwen2.5:3b" {
+                cfg.reranker = format!("ollama:{clean}");
             }
             let url = value("Ollama endpoint URL", "http://localhost:11434")?;
             if !url.is_empty() {
@@ -301,8 +335,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "4" | "openai" => {
             cfg.apply_preset("openai")?;
             let model = value("Model name", "gpt-4o-mini")?;
-            if !model.is_empty() && model != "gpt-4o-mini" {
-                cfg.reranker = format!("openai:{model}");
+            let clean = model.strip_prefix("openai:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "gpt-4o-mini" {
+                cfg.reranker = format!("openai:{clean}");
             }
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "OpenAI")?;
@@ -310,8 +345,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "5" | "gemini" => {
             cfg.apply_preset("gemini")?;
             let model = value("Model name", "gemini-1.5-flash")?;
-            if !model.is_empty() && model != "gemini-1.5-flash" {
-                cfg.reranker = format!("gemini:{model}");
+            let clean = model.strip_prefix("gemini:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "gemini-1.5-flash" {
+                cfg.reranker = format!("gemini:{clean}");
             }
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "Google Gemini")?;
@@ -319,8 +355,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "6" | "groq" => {
             cfg.apply_preset("groq")?;
             let model = value("Model name", "llama-3.3-70b-versatile")?;
-            if !model.is_empty() && model != "llama-3.3-70b-versatile" {
-                cfg.reranker = format!("groq:{model}");
+            let clean = model.strip_prefix("groq:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "llama-3.3-70b-versatile" {
+                cfg.reranker = format!("groq:{clean}");
             }
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "Groq")?;
@@ -328,8 +365,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "7" | "openrouter" => {
             cfg.apply_preset("openrouter")?;
             let model = value("Model name", "anthropic/claude-3.5-sonnet")?;
-            if !model.is_empty() && model != "anthropic/claude-3.5-sonnet" {
-                cfg.reranker = format!("openrouter:{model}");
+            let clean = model.strip_prefix("openrouter:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "anthropic/claude-3.5-sonnet" {
+                cfg.reranker = format!("openrouter:{clean}");
             }
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "OpenRouter")?;
@@ -337,8 +375,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "8" | "deepseek" => {
             cfg.apply_preset("deepseek")?;
             let model = value("Model name", "deepseek-chat")?;
-            if !model.is_empty() && model != "deepseek-chat" {
-                cfg.reranker = format!("deepseek:{model}");
+            let clean = model.strip_prefix("deepseek:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "deepseek-chat" {
+                cfg.reranker = format!("deepseek:{clean}");
             }
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "DeepSeek")?;
@@ -346,8 +385,9 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
         "9" | "mistral" => {
             cfg.apply_preset("mistral")?;
             let model = value("Model name", "mistral-small-latest")?;
-            if !model.is_empty() && model != "mistral-small-latest" {
-                cfg.reranker = format!("mistral:{model}");
+            let clean = model.strip_prefix("mistral:").unwrap_or(&model).trim();
+            if !clean.is_empty() && clean != "mistral-small-latest" {
+                cfg.reranker = format!("mistral:{clean}");
             }
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "Mistral")?;
@@ -361,7 +401,8 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
             http_url(&url)?;
             cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
             let model = value("Model name", "default")?;
-            cfg.reranker = format!("custom:{model}");
+            let clean = model.strip_prefix("custom:").unwrap_or(&model).trim();
+            cfg.reranker = format!("custom:{clean}");
             cfg.entity_extraction = "on".into();
             prompt_api_key(&mut cfg, "Custom Endpoint")?;
         }
