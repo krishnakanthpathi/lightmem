@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+
+- **Streamlined Interactive Configuration (`lmem config --edit`)**: Numbered sub-menus (1..10 for answer generation, 1..6 for vector embeddings, 1..2 for extraction and remote routing) with direct recommended defaults on `<Enter>`, preventing infinite re-prompt loops and eliminating double-prompt friction.
+- **Categorized 11-Profile Setup Experience (`lmem setup`)**: Pixel-perfect columnar interactive setup grouped into Local & Offline (ONNX, Ollama, Demo), Preconfigured Cloud LLMs (OpenAI, Gemini, Groq, OpenRouter, DeepSeek, Mistral), and Custom Endpoints / Remote Vaults.
+- **First-Class One-Command Model Switching (`lmem model`)**: Switch answer models and providers with a single command (`lmem model <provider:model>`). Automatically aligns endpoints, offers interactive API key configuration when missing, and displays active provider status.
+- **Decoupled Search Embeddings & Generation Endpoints**: Dedicated `--embedding-endpoint` and `--embedding-api-key` settings and CLI flags prevent cloud LLM endpoints from conflicting with Ollama or local vector search.
+- **Per-Query Model Overrides (`-m, --model`)**: Ad-hoc model testing via `lmem answer "..." -m <provider:model>` with dedicated `--model-api-key` support and branded error cards on 401/403/connection failures.
+- **Universal Installer Upgrades**: Standalone `install.sh` and `install.ps1` with animated step loaders, IPv6 dual-stack fallback, and automated shell PATH persistence.
+
 ## 0.8.4
 
 - **Unified & Simplified Provider Presets**: Streamlined model and provider configuration with pre-built presets (`local`, `ollama`, `openai`, `gemini`, `groq`, `openrouter`, `deepseek`, `mistral`, `custom`, `demo`). Selecting a provider preset automatically configures official endpoint URLs, requiring only the user's API key without URL boilerplate.
