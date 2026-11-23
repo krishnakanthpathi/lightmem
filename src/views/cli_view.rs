@@ -1726,7 +1726,11 @@ impl CliView {
             Self::emerald_bold(&model_display)
         );
         let eff_url = cfg.effective_ollama_url();
-        let endpoint_disp = if eff_url.is_empty() || provider == "Local" || provider == "Top-1" {
+        let endpoint_disp = if eff_url.is_empty()
+            || provider == "Local ONNX"
+            || provider == "Local"
+            || provider == "Top-1"
+        {
             Self::slate("local (offline, built-in)")
         } else {
             Self::emerald(&eff_url)

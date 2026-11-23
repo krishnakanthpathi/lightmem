@@ -424,7 +424,7 @@ enum Commands {
 
     /// View or switch the active answer model and provider
     Model {
-        /// Target provider or model (e.g. 'openai', 'gemini', 'ollama', 'local', 'groq', 'openrouter', 'custom')
+        /// Target provider or model (e.g. 'openai', 'gemini', 'groq', 'openrouter', 'deepseek', 'mistral', 'ollama', 'local', 'custom')
         provider_or_model: Option<String>,
 
         /// Optional API key when configuring a cloud provider
@@ -3123,7 +3123,26 @@ fn run(cli: Cli) -> Result<()> {
                         cfg.apply_preset("custom")?;
                     }
                     _ => {
-                        cfg.reranker = parse_reranker_setting(&target)?;
+                        if let Some((prov, specific_model)) = target.split_once(':') {
+                            let prov_lower = prov.trim().to_lowercase();
+                            if matches!(
+                                prov_lower.as_str(),
+                                "openai"
+                                    | "gemini"
+                                    | "groq"
+                                    | "openrouter"
+                                    | "deepseek"
+                                    | "mistral"
+                                    | "ollama"
+                            ) {
+                                cfg.apply_preset(&prov_lower)?;
+                                cfg.reranker = format!("{}:{}", prov_lower, specific_model.trim());
+                            } else {
+                                cfg.reranker = parse_reranker_setting(&target)?;
+                            }
+                        } else {
+                            cfg.reranker = parse_reranker_setting(&target)?;
+                        }
                     }
                 }
             }
@@ -3154,6 +3173,20 @@ fn run(cli: Cli) -> Result<()> {
                     CliView::emerald_bold("Answer model and provider updated")
                 );
                 terminal::render_config(&cfg, true, effective_db, global)?;
+                let (prov, _, key_env) = cfg.active_provider();
+                if prov != "onnx"
+                    && prov != "top1"
+                    && prov != "demo"
+                    && cfg.effective_ollama_api_key().is_none()
+                {
+                    if let Some(env_name) = key_env {
+                        println!(
+                            "  {} Tip: Configure an API key with 'lmem model --api-key <KEY>' or export {}.\n",
+                            CliView::gold("💡"),
+                            CliView::violet(env_name)
+                        );
+                    }
+                }
             }
         }
 
@@ -3437,6 +3470,16 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             if let Some(r) = reranker {
+                if let Some((prov, _)) = r.split_once(':') {
+                    let prov_lower = prov.trim().to_lowercase();
+                    if matches!(
+                        prov_lower.as_str(),
+                        "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
+                    ) && url.is_none()
+                    {
+                        let _ = cfg.apply_preset(&prov_lower);
+                    }
+                }
                 cfg.reranker = parse_reranker_setting(&r)?;
                 changed = true;
             }

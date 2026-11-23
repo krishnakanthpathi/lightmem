@@ -169,6 +169,7 @@ impl LightMemConfig {
                 self.onnx_model = Some("bge-small".to_string());
                 self.embedding_model = "bge-small".to_string();
                 self.reranker = "minilm-squad2".to_string();
+                self.ollama_url = "http://localhost:11434".to_string();
                 Ok(())
             }
             "ollama-cloud" | "cloud" => {
