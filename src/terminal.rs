@@ -893,11 +893,9 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                     if cfg.reranker.starts_with("ollama")
                                         && !cfg.reranker.contains(':')
                                     {
-                                        cfg.ollama_url =
-                                            LightMemConfig::normalize_ollama_url(&value(
-                                                "Ollama service URL",
-                                                &cfg.ollama_url,
-                                            )?);
+                                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(
+                                            &value("Ollama service URL", &cfg.ollama_url)?,
+                                        );
                                     }
                                     break;
                                 }
