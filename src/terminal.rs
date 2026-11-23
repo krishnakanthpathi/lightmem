@@ -466,211 +466,615 @@ fn credential(stored: &mut Option<String>, label: &str, effective_present: bool)
     Ok(())
 }
 
+fn prompt_key_if_missing(cfg: &mut LightMemConfig, provider_name: &str) -> Result<()> {
+    if cfg.effective_ollama_api_key().is_none() {
+        let (prov, _, key_env) = cfg.active_provider();
+        if prov != "onnx" && prov != "top1" && prov != "demo" {
+            let env_str = key_env
+                .map(|e| format!(" (or export {e})"))
+                .unwrap_or_default();
+            eprintln!(
+                "  {} Note: {} typically requires an API key{}.",
+                CliView::gold("💡"),
+                provider_name,
+                env_str
+            );
+            if confirm("Configure API key now?", true)? {
+                prompt_api_key(cfg, provider_name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemConfig>> {
     require_terminal()?;
-    eprintln!();
-    eprintln!(
-        "  ❖ {}",
-        CliView::white_bold("L I G H T M E M  Interactive Configuration")
-    );
-    eprintln!(
-        "  {}",
-        CliView::slate("─────────────────────────────────────────────────────────────")
-    );
-    eprintln!(
-        "  {} {:<16} {}",
-        CliView::slate("◫"),
-        CliView::white_bold("Config File:"),
-        CliView::slate(&LightMemConfig::config_file().display().to_string())
-    );
-    eprintln!();
-    eprintln!(
-        "  ╭─ {}",
-        CliView::crimson_bold("SELECT SETTING TO CONFIGURE")
-    );
-    eprintln!(
-        "  │  {} {} {:<26} {}",
-        CliView::slate("▸"),
-        CliView::white_bold("1."),
-        "Search & Embeddings",
-        CliView::slate(&format!(
-            "[{}: {}]",
-            previous.backend, previous.embedding_model
-        ))
-    );
-    let prov_display = CliView::model_provider_name(previous);
-    eprintln!(
-        "  │  {} {} {:<26} {}",
-        CliView::slate("▸"),
-        CliView::white_bold("2."),
-        "Answer Model & Provider",
-        CliView::slate(&format!("[{}: {}]", prov_display, previous.reranker))
-    );
-    eprintln!(
-        "  │  {} {} {:<26} {}",
-        CliView::slate("▸"),
-        CliView::white_bold("3."),
-        "Entity Extraction",
-        CliView::slate(&format!("[{}]", previous.entity_extraction))
-    );
-    let remote_disp = previous
-        .remote_url
-        .as_deref()
-        .unwrap_or("none (local vault)");
-    eprintln!(
-        "  │  {} {} {:<26} {}",
-        CliView::slate("▸"),
-        CliView::white_bold("4."),
-        "Remote Vault Routing",
-        CliView::slate(&format!("[{}]", remote_disp))
-    );
-    let model_key_stat = if previous.effective_ollama_api_key().is_some() {
-        "configured"
-    } else {
-        "none"
-    };
-    let remote_key_stat = if previous.effective_api_key().is_some() {
-        "configured"
-    } else {
-        "none"
-    };
-    eprintln!(
-        "  │  {} {} {:<26} {}",
-        CliView::slate("▸"),
-        CliView::white_bold("5."),
-        "Secrets & API Keys",
-        CliView::slate(&format!(
-            "[model: {}, remote: {}]",
-            model_key_stat, remote_key_stat
-        ))
-    );
-    eprintln!("  │");
-    eprintln!(
-        "  ╰─ {} {} {:<26}",
-        CliView::slate("▸"),
-        CliView::slate("0."),
-        CliView::slate("Cancel")
-    );
-    eprintln!();
     let mut cfg = previous.clone();
-    match line("Choose [1-5]: ")?.as_str() {
-        "0" => return Ok(None),
-        "1" => {
-            eprintln!(
-                "Embeddings help find related meanings. Changing them may require a vault reindex."
-            );
-            cfg.backend = value("Engine: onnx, ollama, hash", &cfg.backend)?;
-            match cfg.backend.as_str() {
-                "onnx" => {
-                    cfg.onnx_model = Some(value(
-                        "Model: bge-small, minilm, nomic, or custom directory",
-                        cfg.onnx_model.as_deref().unwrap_or("bge-small"),
-                    )?)
+
+    loop {
+        eprintln!();
+        eprintln!(
+            "  ❖ {}",
+            CliView::white_bold("L I G H T M E M  Interactive Configuration")
+        );
+        eprintln!(
+            "  {}",
+            CliView::slate("─────────────────────────────────────────────────────────────")
+        );
+        eprintln!(
+            "  {} {:<16} {}",
+            CliView::slate("◫"),
+            CliView::white_bold("Config File:"),
+            CliView::slate(&LightMemConfig::config_file().display().to_string())
+        );
+        eprintln!();
+        eprintln!(
+            "  ╭─ {}",
+            CliView::crimson_bold("SELECT SETTING TO CONFIGURE")
+        );
+        eprintln!(
+            "  │  {} {} {:<26} {}",
+            CliView::slate("▸"),
+            CliView::white_bold("1."),
+            "Search & Embeddings",
+            CliView::slate(&format!("[{}: {}]", cfg.backend, cfg.embedding_model))
+        );
+        let prov_display = CliView::model_provider_name(&cfg);
+        eprintln!(
+            "  │  {} {} {:<26} {}",
+            CliView::slate("▸"),
+            CliView::white_bold("2."),
+            "Answer Model & Provider",
+            CliView::slate(&format!("[{}: {}]", prov_display, cfg.reranker))
+        );
+        eprintln!(
+            "  │  {} {} {:<26} {}",
+            CliView::slate("▸"),
+            CliView::white_bold("3."),
+            "Entity Extraction",
+            CliView::slate(&format!("[{}]", cfg.entity_extraction))
+        );
+        let remote_disp = cfg.remote_url.as_deref().unwrap_or("none (local vault)");
+        eprintln!(
+            "  │  {} {} {:<26} {}",
+            CliView::slate("▸"),
+            CliView::white_bold("4."),
+            "Remote Vault Routing",
+            CliView::slate(&format!("[{}]", remote_disp))
+        );
+        let model_key_stat = if cfg.effective_ollama_api_key().is_some() {
+            "configured"
+        } else {
+            "none"
+        };
+        let remote_key_stat = if cfg.effective_api_key().is_some() {
+            "configured"
+        } else {
+            "none"
+        };
+        eprintln!(
+            "  │  {} {} {:<26} {}",
+            CliView::slate("▸"),
+            CliView::white_bold("5."),
+            "Secrets & API Keys",
+            CliView::slate(&format!(
+                "[model: {}, remote: {}]",
+                model_key_stat, remote_key_stat
+            ))
+        );
+        eprintln!("  │");
+        eprintln!(
+            "  ╰─ {} {} {:<26}",
+            CliView::slate("▸"),
+            CliView::slate("0."),
+            CliView::slate("Cancel / Done")
+        );
+        eprintln!();
+
+        match line("Choose [1-5]: ")?.as_str() {
+            "0" => {
+                if serde_json::to_value(previous)? == serde_json::to_value(&cfg)? {
+                    eprintln!("No settings changed.");
+                    return Ok(None);
                 }
-                "ollama" => {
-                    let ep = value(
-                        "Ollama embedding endpoint URL (e.g. http://localhost:11434)",
-                        cfg.embedding_endpoint
-                            .as_deref()
-                            .unwrap_or("http://localhost:11434"),
-                    )?;
-                    cfg.embedding_endpoint = Some(LightMemConfig::normalize_ollama_url(&ep));
-                    cfg.embedding_model = value("Ollama embedding model", &cfg.embedding_model)?;
-                }
-                "hash" => {
-                    eprintln!("Demo mode uses deterministic hashes; no neural semantic model.")
-                }
-                _ => bail!("Choose onnx, ollama, or hash. No settings changed."),
+                break;
             }
-        }
-        "2" => {
-            eprintln!("Choose provider or model (e.g. minilm-squad2, ollama, openai, gemini, groq, openrouter, deepseek, mistral, custom, top1).");
-            let ans = value("Answer engine", &cfg.reranker)?;
-            let lower = ans.trim().to_lowercase();
-            match lower.as_str() {
-                "local" | "offline" | "onnx" => cfg.apply_preset("local")?,
-                "openai" | "gemini" | "groq" | "openrouter" | "ollama" | "deepseek" | "mistral"
-                | "demo" => cfg.apply_preset(&lower)?,
-                "custom" => {
-                    let ep = value(
-                        "Custom OpenAI-compatible endpoint URL",
-                        "http://localhost:8000/v1",
-                    )?;
-                    http_url(&ep)?;
-                    cfg.apply_preset("custom")?;
-                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
-                }
-                _ => {
-                    if let Some((prov, specific_model)) = ans.split_once(':') {
-                        let prov_lower = prov.trim().to_lowercase();
-                        if matches!(
-                            prov_lower.as_str(),
-                            "openai"
-                                | "gemini"
-                                | "groq"
-                                | "openrouter"
-                                | "deepseek"
-                                | "mistral"
-                                | "ollama"
-                        ) {
-                            cfg.apply_preset(&prov_lower)?;
-                            cfg.reranker = format!("{}:{}", prov_lower, specific_model.trim());
-                        } else {
-                            cfg.reranker = super::parse_reranker_setting(&ans)?;
+            "1" => {
+                eprintln!();
+                eprintln!(
+                    "  ╭─ {}",
+                    CliView::crimson_bold("SEARCH & VECTOR EMBEDDINGS")
+                );
+                eprintln!(
+                    "  │  Embeddings power semantic search. Changing models may reindex the vault."
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 1."),
+                    "Local ONNX: bge-small",
+                    CliView::slate("[recommended, 384-dim, 100% offline]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 2."),
+                    "Local ONNX: minilm",
+                    CliView::slate("[lightweight, 384-dim, fast]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 3."),
+                    "Local ONNX: nomic",
+                    CliView::slate("[high capacity, 768-dim]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 4."),
+                    "Ollama Embeddings",
+                    CliView::slate("[local ollama endpoint, nomic-embed-text]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 5."),
+                    "Custom ONNX Model Directory",
+                    CliView::slate("[path to directory with model.onnx]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 6."),
+                    "Deterministic Hash",
+                    CliView::slate("[demo mode, no neural model]")
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  ╰─ {} {} {:<30}",
+                    CliView::slate("▸"),
+                    CliView::slate(" 0."),
+                    CliView::slate("Back to main menu")
+                );
+                eprintln!();
+
+                let choice = value("Engine: onnx, ollama, hash", &cfg.backend)?;
+                match choice.trim() {
+                    "0" => {}
+                    "1" | "bge-small" => {
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("bge-small".to_string());
+                        cfg.embedding_model = "bge-small".to_string();
+                    }
+                    "2" | "minilm" => {
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("minilm".to_string());
+                        cfg.embedding_model = "minilm".to_string();
+                    }
+                    "3" | "nomic" => {
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("nomic".to_string());
+                        cfg.embedding_model = "nomic".to_string();
+                    }
+                    "4" | "ollama" => {
+                        cfg.backend = "ollama".to_string();
+                        let ep = value(
+                            "Ollama embedding endpoint URL (e.g. http://localhost:11434)",
+                            cfg.embedding_endpoint
+                                .as_deref()
+                                .unwrap_or("http://localhost:11434"),
+                        )?;
+                        cfg.embedding_endpoint = Some(LightMemConfig::normalize_ollama_url(&ep));
+                        cfg.embedding_model =
+                            value("Ollama embedding model", &cfg.embedding_model)?;
+                    }
+                    "5" | "custom" => {
+                        cfg.backend = "onnx".to_string();
+                        let dir = value(
+                            "Path to custom model directory",
+                            cfg.onnx_model.as_deref().unwrap_or("~/.lightmem/models"),
+                        )?;
+                        cfg.onnx_model = Some(dir);
+                    }
+                    "6" | "hash" => {
+                        cfg.backend = "hash".to_string();
+                        cfg.embedding_model = "hash".to_string();
+                    }
+                    "onnx" => {
+                        let m = value(
+                            "Model: bge-small, minilm, nomic, or custom directory",
+                            cfg.onnx_model.as_deref().unwrap_or("bge-small"),
+                        )?;
+                        match m.trim() {
+                            "1" | "bge-small" => {
+                                cfg.onnx_model = Some("bge-small".to_string());
+                                cfg.embedding_model = "bge-small".to_string();
+                            }
+                            "2" | "minilm" => {
+                                cfg.onnx_model = Some("minilm".to_string());
+                                cfg.embedding_model = "minilm".to_string();
+                            }
+                            "3" | "nomic" => {
+                                cfg.onnx_model = Some("nomic".to_string());
+                                cfg.embedding_model = "nomic".to_string();
+                            }
+                            other => {
+                                cfg.onnx_model = Some(other.to_string());
+                                cfg.embedding_model = other.to_string();
+                            }
                         }
-                    } else {
-                        cfg.reranker = super::parse_reranker_setting(&ans)?;
                     }
-                    if cfg.reranker.starts_with("ollama") && !cfg.reranker.contains(':') {
-                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
-                            "Ollama service URL",
-                            &cfg.ollama_url,
-                        )?);
+                    _ => bail!("Choose onnx, ollama, or hash. No settings changed."),
+                }
+            }
+            "2" => {
+                eprintln!();
+                eprintln!(
+                    "  ╭─ {}",
+                    CliView::crimson_bold("SELECT ANSWER MODEL & PROVIDER")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 1."),
+                    "Local ONNX MiniLM",
+                    CliView::slate("[100% offline, zero setup]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 2."),
+                    "Local Ollama",
+                    CliView::slate("[localhost:11434, auto-detect]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 3."),
+                    "Groq Ultra-Fast",
+                    CliView::slate("[qwen/qwen3.8-27b, llama-3.3-70b]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 4."),
+                    "OpenAI Official",
+                    CliView::slate("[gpt-4o-mini, gpt-4o]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 5."),
+                    "Google Gemini",
+                    CliView::slate("[gemini-1.5-flash]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 6."),
+                    "DeepSeek Cloud",
+                    CliView::slate("[deepseek-chat]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 7."),
+                    "OpenRouter Multi-LLM",
+                    CliView::slate("[claude-3.5-sonnet]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 8."),
+                    "Mistral AI",
+                    CliView::slate("[mistral-small-latest]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold(" 9."),
+                    "Custom Endpoint",
+                    CliView::slate("[custom OpenAI-compatible URL]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("10."),
+                    "Top-1 Search Hit",
+                    CliView::slate("[no neural QA, return top memory]")
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  ╰─ {} {} {:<30}",
+                    CliView::slate("▸"),
+                    CliView::slate(" 0."),
+                    CliView::slate("Back to main menu")
+                );
+                eprintln!();
+
+                let ans = value("Answer engine", &cfg.reranker)?;
+                let trimmed = ans.trim();
+                match trimmed {
+                    "0" => {}
+                    "1" => cfg.apply_preset("local")?,
+                    "2" => cfg.apply_preset("ollama")?,
+                    "3" => {
+                        cfg.apply_preset("groq")?;
+                        prompt_key_if_missing(&mut cfg, "Groq")?;
+                    }
+                    "4" => {
+                        cfg.apply_preset("openai")?;
+                        prompt_key_if_missing(&mut cfg, "OpenAI")?;
+                    }
+                    "5" => {
+                        cfg.apply_preset("gemini")?;
+                        prompt_key_if_missing(&mut cfg, "Gemini")?;
+                    }
+                    "6" => {
+                        cfg.apply_preset("deepseek")?;
+                        prompt_key_if_missing(&mut cfg, "DeepSeek")?;
+                    }
+                    "7" => {
+                        cfg.apply_preset("openrouter")?;
+                        prompt_key_if_missing(&mut cfg, "OpenRouter")?;
+                    }
+                    "8" => {
+                        cfg.apply_preset("mistral")?;
+                        prompt_key_if_missing(&mut cfg, "Mistral")?;
+                    }
+                    "9" => {
+                        let ep = value(
+                            "Custom OpenAI-compatible endpoint URL",
+                            "http://localhost:8000/v1",
+                        )?;
+                        http_url(&ep)?;
+                        cfg.apply_preset("custom")?;
+                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
+                        prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
+                    }
+                    "10" => cfg.apply_preset("demo")?,
+                    _ => {
+                        let lower = trimmed.to_lowercase();
+                        match lower.as_str() {
+                            "local" | "offline" | "onnx" | "minilm-squad2" => {
+                                cfg.apply_preset("local")?
+                            }
+                            "openai" | "gemini" | "groq" | "openrouter" | "ollama" | "deepseek"
+                            | "mistral" | "demo" | "top1" => {
+                                cfg.apply_preset(&lower)?;
+                                let prov_name = CliView::model_provider_name(&cfg);
+                                prompt_key_if_missing(&mut cfg, prov_name)?;
+                            }
+                            "custom" => {
+                                let ep = value(
+                                    "Custom OpenAI-compatible endpoint URL",
+                                    "http://localhost:8000/v1",
+                                )?;
+                                http_url(&ep)?;
+                                cfg.apply_preset("custom")?;
+                                cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
+                            }
+                            _ => {
+                                if let Some((prov, specific_model)) = trimmed.split_once(':') {
+                                    let prov_lower = prov.trim().to_lowercase();
+                                    if matches!(
+                                        prov_lower.as_str(),
+                                        "openai"
+                                            | "gemini"
+                                            | "groq"
+                                            | "openrouter"
+                                            | "deepseek"
+                                            | "mistral"
+                                            | "ollama"
+                                    ) {
+                                        cfg.apply_preset(&prov_lower)?;
+                                        cfg.reranker =
+                                            format!("{}:{}", prov_lower, specific_model.trim());
+                                        let prov_name = CliView::model_provider_name(&cfg);
+                                        prompt_key_if_missing(&mut cfg, prov_name)?;
+                                    } else {
+                                        cfg.reranker = super::parse_reranker_setting(trimmed)?;
+                                    }
+                                } else {
+                                    cfg.reranker = super::parse_reranker_setting(trimmed)?;
+                                }
+                                if cfg.reranker.starts_with("ollama") && !cfg.reranker.contains(':')
+                                {
+                                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
+                                        "Ollama service URL",
+                                        &cfg.ollama_url,
+                                    )?);
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-        "3" => {
-            eprintln!("Entity extraction sends newly saved memory text to {}. Search and answers are separate.", cfg.effective_ollama_url());
-            cfg.entity_extraction = value(
-                "Entity extraction: on, off, or <provider>:<model>",
-                &cfg.entity_extraction,
-            )?;
-        }
-        "4" => {
-            eprintln!("This is the memory server, separate from the model service. Environment routing can override saved values.");
-            let url = value(
-                "Remote URL (none = clear saved routing/key)",
-                cfg.remote_url.as_deref().unwrap_or("none"),
-            )?;
-            if url.eq_ignore_ascii_case("none") {
-                cfg.remote_url = None;
-                cfg.api_key = None;
-            } else {
-                http_url(&url)?;
-                cfg.remote_url = Some(url.trim_end_matches('/').into());
+            "3" => {
+                eprintln!();
+                eprintln!("  ╭─ {}", CliView::crimson_bold("ENTITY EXTRACTION"));
+                eprintln!(
+                    "  │  Extracts structured entities & relations from newly saved memory text."
+                );
+                eprintln!(
+                    "  │  Generative Model Target: {}",
+                    CliView::emerald(&cfg.effective_ollama_url())
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  │  {} {} {:<26} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("1."),
+                    "Enabled (on)",
+                    CliView::slate("[extracts entities using active answer model]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<26} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("2."),
+                    "Disabled (off)",
+                    CliView::slate("[store memories as-is, faster ingestion]")
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  ╰─ {} {} {:<26}",
+                    CliView::slate("▸"),
+                    CliView::slate("0."),
+                    CliView::slate("Back to main menu")
+                );
+                eprintln!();
+                let mode = value(
+                    "Entity extraction: on, off, or <provider>:<model>",
+                    &cfg.entity_extraction,
+                )?;
+                let trimmed = mode.trim();
+                match trimmed {
+                    "0" => {}
+                    "1" => cfg.entity_extraction = "on".to_string(),
+                    "2" => cfg.entity_extraction = "off".to_string(),
+                    other => {
+                        let lower = other.to_lowercase();
+                        if lower == "off" || lower == "false" {
+                            cfg.entity_extraction = "off".to_string();
+                        } else if lower == "on" || lower == "true" {
+                            cfg.entity_extraction = "on".to_string();
+                        } else {
+                            cfg.entity_extraction = other.to_string();
+                        }
+                    }
+                }
             }
-        }
-        "5" => {
-            match line("Credential: 1. Model service, 2. Remote LightMem, 3. Embedding endpoint: ")?
+            "4" => {
+                eprintln!();
+                eprintln!(
+                    "  ╭─ {}",
+                    CliView::crimson_bold("REMOTE LIGHTMEM SERVER ROUTING")
+                );
+                eprintln!(
+                    "  │  Connect this workstation to a remote LightMem daemon vault server."
+                );
+                eprintln!(
+                    "  │  Current routing: {}",
+                    CliView::emerald(cfg.remote_url.as_deref().unwrap_or("none (local vault)"))
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  │  {} {} {:<26} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("1."),
+                    "Local Vault",
+                    CliView::slate("[disconnect remote, use local SQLite database]")
+                );
+                eprintln!(
+                    "  │  {} {} {:<26} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("2."),
+                    "Remote Server URL",
+                    CliView::slate("[enter http://<server>:<port>]")
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  ╰─ {} {} {:<26}",
+                    CliView::slate("▸"),
+                    CliView::slate("0."),
+                    CliView::slate("Back to main menu")
+                );
+                eprintln!();
+                let url = value(
+                    "Remote URL (none = clear saved routing/key)",
+                    cfg.remote_url.as_deref().unwrap_or("none"),
+                )?;
+                let trimmed = url.trim();
+                if trimmed == "0" {
+                    // Keep current
+                } else if trimmed == "1" || trimmed.eq_ignore_ascii_case("none") {
+                    cfg.remote_url = None;
+                    cfg.api_key = None;
+                } else if trimmed == "2" {
+                    let target = value("Enter remote server URL", "http://localhost:8080")?;
+                    http_url(&target)?;
+                    cfg.remote_url = Some(target.trim_end_matches('/').into());
+                } else {
+                    http_url(trimmed)?;
+                    cfg.remote_url = Some(trimmed.trim_end_matches('/').into());
+                }
+            }
+            "5" => {
+                eprintln!();
+                eprintln!("  ╭─ {}", CliView::crimson_bold("SECRETS & API KEYS"));
+                let m_stat = if cfg.effective_ollama_api_key().is_some() {
+                    CliView::gold("configured (secret)")
+                } else {
+                    CliView::slate("none (empty)")
+                };
+                let r_stat = if cfg.effective_api_key().is_some() {
+                    CliView::gold("configured (secret)")
+                } else {
+                    CliView::slate("none (empty)")
+                };
+                let e_stat = if cfg.effective_embedding_api_key().is_some() {
+                    CliView::gold("configured (secret)")
+                } else {
+                    CliView::slate("none (empty)")
+                };
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("1."),
+                    "Model Service API Key",
+                    m_stat
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("2."),
+                    "Remote LightMem Server Key",
+                    r_stat
+                );
+                eprintln!(
+                    "  │  {} {} {:<30} {}",
+                    CliView::slate("▸"),
+                    CliView::white_bold("3."),
+                    "Embedding Endpoint Key",
+                    e_stat
+                );
+                eprintln!("  │");
+                eprintln!(
+                    "  ╰─ {} {} {:<30}",
+                    CliView::slate("▸"),
+                    CliView::slate("0."),
+                    CliView::slate("Back to main menu")
+                );
+                eprintln!();
+                match line(
+                    "Credential: 1. Model service, 2. Remote LightMem, 3. Embedding endpoint: ",
+                )?
                 .as_str()
-            {
-                "1" => {
-                    let present = cfg.effective_ollama_api_key().is_some();
-                    credential(&mut cfg.ollama_api_key, "model service", present)?;
+                {
+                    "0" => {}
+                    "1" => {
+                        let present = cfg.effective_ollama_api_key().is_some();
+                        credential(&mut cfg.ollama_api_key, "model service", present)?;
+                    }
+                    "2" => {
+                        let present = cfg.effective_api_key().is_some();
+                        credential(&mut cfg.api_key, "remote LightMem", present)?;
+                    }
+                    "3" => {
+                        let present = cfg.effective_embedding_api_key().is_some();
+                        credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
+                    }
+                    _ => bail!("Invalid credential choice. No settings changed."),
                 }
-                "2" => {
-                    let present = cfg.effective_api_key().is_some();
-                    credential(&mut cfg.api_key, "remote LightMem", present)?;
-                }
-                "3" => {
-                    let present = cfg.effective_embedding_api_key().is_some();
-                    credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
-                }
-                _ => bail!("Invalid credential choice. No settings changed."),
             }
+            _ => bail!("Invalid choice. No settings changed."),
         }
-        _ => bail!("Invalid choice. No settings changed."),
+
+        if serde_json::to_value(previous)? != serde_json::to_value(&cfg)? {
+            break;
+        }
     }
     if serde_json::to_value(previous)? == serde_json::to_value(&cfg)? {
         eprintln!("No settings changed.");
