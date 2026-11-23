@@ -502,6 +502,7 @@ enum Commands {
         /// Save an answer generation model API key (OpenAI, Gemini, Groq, Ollama, etc.); use 'none' to remove
         #[arg(
             long = "model-api-key",
+            value_name = "KEY",
             visible_alias = "ollama-api-key",
             visible_alias = "openai-api-key"
         )]

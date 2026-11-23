@@ -1574,12 +1574,50 @@ impl LightMem {
             !LightMemConfig::offline_requested()
                 || !(lower.starts_with("ollama")
                     || lower.starts_with("openai")
+                    || lower.starts_with("gemini")
+                    || lower.starts_with("groq")
+                    || lower.starts_with("openrouter")
+                    || lower.starts_with("deepseek")
+                    || lower.starts_with("mistral")
                     || lower.starts_with("llm")),
             "Offline mode blocks LLM answers. Select a local answer engine."
         );
 
         if lower == "top1" {
             return Ok(Box::new(Top1Reranker));
+        }
+
+        let (stored_prov, _, _) = self.config.active_provider();
+        let mut effective_cfg = self.config.clone();
+        if let Some((prov, _)) = active_reranker.split_once(':') {
+            let prov_lower = prov.trim().to_lowercase();
+            if matches!(
+                prov_lower.as_str(),
+                "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
+            ) && (prov_lower != stored_prov
+                || self.config.ollama_url == "http://localhost:11434"
+                || self.config.ollama_url.is_empty())
+            {
+                let _ = effective_cfg.apply_preset(&prov_lower);
+                if prov_lower != stored_prov {
+                    effective_cfg.ollama_api_key = None;
+                }
+            }
+            effective_cfg.reranker = active_reranker.to_string();
+        } else if matches!(
+            lower.as_str(),
+            "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
+        ) {
+            if lower != stored_prov
+                || self.config.ollama_url == "http://localhost:11434"
+                || self.config.ollama_url.is_empty()
+            {
+                let _ = effective_cfg.apply_preset(&lower);
+                if lower != stored_prov {
+                    effective_cfg.ollama_api_key = None;
+                }
+            }
+            effective_cfg.reranker = active_reranker.to_string();
         }
 
         if lower == "ollama"
@@ -1592,9 +1630,9 @@ impl LightMem {
             || lower == "llm"
         {
             return Ok(Box::new(OllamaReranker::with_api_key(
-                self.config.effective_ollama_url(),
+                effective_cfg.effective_ollama_url(),
                 Some(lower),
-                self.config.effective_ollama_api_key(),
+                effective_cfg.effective_ollama_api_key(),
             )));
         }
 
@@ -1612,9 +1650,9 @@ impl LightMem {
                 && active_reranker[..prefix.len()].eq_ignore_ascii_case(prefix)
             {
                 return Ok(Box::new(OllamaReranker::with_api_key(
-                    self.config.effective_ollama_url(),
+                    effective_cfg.effective_ollama_url(),
                     Some(active_reranker.to_string()),
-                    self.config.effective_ollama_api_key(),
+                    effective_cfg.effective_ollama_api_key(),
                 )));
             }
         }

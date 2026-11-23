@@ -1417,7 +1417,9 @@ impl CliView {
         );
 
         let eff_url = cfg.effective_ollama_url();
-        let endpoint_disp = if eff_url.is_empty() || provider == "Local ONNX" || provider == "Top-1"
+        let endpoint_disp = if eff_url.is_empty()
+            || ((provider == "Local ONNX" || provider == "Top-1")
+                && eff_url == "http://localhost:11434")
         {
             Self::slate("local (offline, built-in)")
         } else {
@@ -1727,9 +1729,8 @@ impl CliView {
         );
         let eff_url = cfg.effective_ollama_url();
         let endpoint_disp = if eff_url.is_empty()
-            || provider == "Local ONNX"
-            || provider == "Local"
-            || provider == "Top-1"
+            || ((provider == "Local ONNX" || provider == "Local" || provider == "Top-1")
+                && eff_url == "http://localhost:11434")
         {
             Self::slate("local (offline, built-in)")
         } else {
@@ -2842,15 +2843,66 @@ impl CliView {
                 }
             }
 
+            let env_hint: &'static str = if endpoint.contains("groq.com") {
+                "export GROQ_API_KEY=\"gsk-...\""
+            } else if endpoint.contains("googleapis.com") {
+                "export GEMINI_API_KEY=\"AIza...\""
+            } else if endpoint.contains("openrouter.ai") {
+                "export OPENROUTER_API_KEY=\"sk-or-...\""
+            } else if endpoint.contains("deepseek.com") {
+                "export DEEPSEEK_API_KEY=\"sk-...\""
+            } else if endpoint.contains("mistral.ai") {
+                "export MISTRAL_API_KEY=\"...\""
+            } else {
+                "export OPENAI_API_KEY=\"sk-...\""
+            };
+
+            let auth_suggestions: &'static [(&'static str, &'static str)] = match env_hint {
+                "export GROQ_API_KEY=\"gsk-...\"" => &[
+                    ("Set API key:", "lmem model --api-key <key>"),
+                    ("Set via environment:", "export GROQ_API_KEY=\"gsk-...\""),
+                    ("Switch to local model:", "lmem model local"),
+                    ("Switch to Ollama:", "lmem model ollama"),
+                ],
+                "export GEMINI_API_KEY=\"AIza...\"" => &[
+                    ("Set API key:", "lmem model --api-key <key>"),
+                    ("Set via environment:", "export GEMINI_API_KEY=\"AIza...\""),
+                    ("Switch to local model:", "lmem model local"),
+                    ("Switch to Ollama:", "lmem model ollama"),
+                ],
+                "export OPENROUTER_API_KEY=\"sk-or-...\"" => &[
+                    ("Set API key:", "lmem model --api-key <key>"),
+                    (
+                        "Set via environment:",
+                        "export OPENROUTER_API_KEY=\"sk-or-...\"",
+                    ),
+                    ("Switch to local model:", "lmem model local"),
+                    ("Switch to Ollama:", "lmem model ollama"),
+                ],
+                "export DEEPSEEK_API_KEY=\"sk-...\"" => &[
+                    ("Set API key:", "lmem model --api-key <key>"),
+                    ("Set via environment:", "export DEEPSEEK_API_KEY=\"sk-...\""),
+                    ("Switch to local model:", "lmem model local"),
+                    ("Switch to Ollama:", "lmem model ollama"),
+                ],
+                "export MISTRAL_API_KEY=\"...\"" => &[
+                    ("Set API key:", "lmem model --api-key <key>"),
+                    ("Set via environment:", "export MISTRAL_API_KEY=\"...\""),
+                    ("Switch to local model:", "lmem model local"),
+                    ("Switch to Ollama:", "lmem model ollama"),
+                ],
+                _ => &[
+                    ("Set API key:", "lmem model --api-key <key>"),
+                    ("Set via environment:", "export OPENAI_API_KEY=\"sk-...\""),
+                    ("Switch to local model:", "lmem model local"),
+                    ("Switch to Ollama:", "lmem model ollama"),
+                ],
+            };
+
             (
                 "Chat Model Authentication Failed",
                 "The endpoint rejected authentication (HTTP 401 Unauthorized). The configured API key is missing or invalid.".to_string(),
-                &[
-                    ("Set API key:", "lmem config --api-key <key>"),
-                    ("Set via environment:", "export OPENAI_API_KEY=\"sk-...\""),
-                    ("Switch to local model:", "lmem config --preset local"),
-                    ("Switch to Ollama:", "lmem config --preset ollama"),
-                ],
+                auth_suggestions,
             )
         } else if is_403 {
             if !model.is_empty() {

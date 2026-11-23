@@ -468,11 +468,90 @@ fn credential(stored: &mut Option<String>, label: &str, effective_present: bool)
 
 pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemConfig>> {
     require_terminal()?;
+    eprintln!();
     eprintln!(
-        "Change shared settings in {}",
-        LightMemConfig::config_file().display()
+        "  ❖ {}",
+        CliView::white_bold("L I G H T M E M  Interactive Configuration")
     );
-    eprintln!("  1. Search\n  2. Answers\n  3. Extraction\n  4. Remote LightMem connection\n  5. Credentials\n  0. Cancel");
+    eprintln!(
+        "  {}",
+        CliView::slate("─────────────────────────────────────────────────────────────")
+    );
+    eprintln!(
+        "  {} {:<16} {}",
+        CliView::slate("◫"),
+        CliView::white_bold("Config File:"),
+        CliView::slate(&LightMemConfig::config_file().display().to_string())
+    );
+    eprintln!();
+    eprintln!(
+        "  ╭─ {}",
+        CliView::crimson_bold("SELECT SETTING TO CONFIGURE")
+    );
+    eprintln!(
+        "  │  {} {} {:<26} {}",
+        CliView::slate("▸"),
+        CliView::white_bold("1."),
+        "Search & Embeddings",
+        CliView::slate(&format!(
+            "[{}: {}]",
+            previous.backend, previous.embedding_model
+        ))
+    );
+    let prov_display = CliView::model_provider_name(previous);
+    eprintln!(
+        "  │  {} {} {:<26} {}",
+        CliView::slate("▸"),
+        CliView::white_bold("2."),
+        "Answer Model & Provider",
+        CliView::slate(&format!("[{}: {}]", prov_display, previous.reranker))
+    );
+    eprintln!(
+        "  │  {} {} {:<26} {}",
+        CliView::slate("▸"),
+        CliView::white_bold("3."),
+        "Entity Extraction",
+        CliView::slate(&format!("[{}]", previous.entity_extraction))
+    );
+    let remote_disp = previous
+        .remote_url
+        .as_deref()
+        .unwrap_or("none (local vault)");
+    eprintln!(
+        "  │  {} {} {:<26} {}",
+        CliView::slate("▸"),
+        CliView::white_bold("4."),
+        "Remote Vault Routing",
+        CliView::slate(&format!("[{}]", remote_disp))
+    );
+    let model_key_stat = if previous.effective_ollama_api_key().is_some() {
+        "configured"
+    } else {
+        "none"
+    };
+    let remote_key_stat = if previous.effective_api_key().is_some() {
+        "configured"
+    } else {
+        "none"
+    };
+    eprintln!(
+        "  │  {} {} {:<26} {}",
+        CliView::slate("▸"),
+        CliView::white_bold("5."),
+        "Secrets & API Keys",
+        CliView::slate(&format!(
+            "[model: {}, remote: {}]",
+            model_key_stat, remote_key_stat
+        ))
+    );
+    eprintln!("  │");
+    eprintln!(
+        "  ╰─ {} {} {:<26}",
+        CliView::slate("▸"),
+        CliView::slate("0."),
+        CliView::slate("Cancel")
+    );
+    eprintln!();
     let mut cfg = previous.clone();
     match line("Choose [1-5]: ")?.as_str() {
         "0" => return Ok(None),
@@ -522,8 +601,27 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                     cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
                 }
                 _ => {
-                    cfg.reranker = super::parse_reranker_setting(&ans)?;
-                    if cfg.reranker.starts_with("ollama") {
+                    if let Some((prov, specific_model)) = ans.split_once(':') {
+                        let prov_lower = prov.trim().to_lowercase();
+                        if matches!(
+                            prov_lower.as_str(),
+                            "openai"
+                                | "gemini"
+                                | "groq"
+                                | "openrouter"
+                                | "deepseek"
+                                | "mistral"
+                                | "ollama"
+                        ) {
+                            cfg.apply_preset(&prov_lower)?;
+                            cfg.reranker = format!("{}:{}", prov_lower, specific_model.trim());
+                        } else {
+                            cfg.reranker = super::parse_reranker_setting(&ans)?;
+                        }
+                    } else {
+                        cfg.reranker = super::parse_reranker_setting(&ans)?;
+                    }
+                    if cfg.reranker.starts_with("ollama") && !cfg.reranker.contains(':') {
                         cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
                             "Ollama service URL",
                             &cfg.ollama_url,
