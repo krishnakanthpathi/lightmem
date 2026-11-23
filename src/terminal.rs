@@ -572,13 +572,7 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
         eprintln!();
 
         match line("Choose [1-5]: ")?.as_str() {
-            "0" => {
-                if serde_json::to_value(previous)? == serde_json::to_value(&cfg)? {
-                    eprintln!("No settings changed.");
-                    return Ok(None);
-                }
-                break;
-            }
+            "0" => return Ok(None),
             "1" => {
                 eprintln!();
                 eprintln!(
@@ -640,23 +634,26 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 );
                 eprintln!();
 
-                let choice = value("Engine: onnx, ollama, hash", &cfg.backend)?;
+                let choice = value("Search embedder (select 1-6)", "1")?;
                 match choice.trim() {
-                    "0" => {}
+                    "0" => continue,
                     "1" | "bge-small" => {
                         cfg.backend = "onnx".to_string();
                         cfg.onnx_model = Some("bge-small".to_string());
                         cfg.embedding_model = "bge-small".to_string();
+                        break;
                     }
                     "2" | "minilm" => {
                         cfg.backend = "onnx".to_string();
                         cfg.onnx_model = Some("minilm".to_string());
                         cfg.embedding_model = "minilm".to_string();
+                        break;
                     }
                     "3" | "nomic" => {
                         cfg.backend = "onnx".to_string();
                         cfg.onnx_model = Some("nomic".to_string());
                         cfg.embedding_model = "nomic".to_string();
+                        break;
                     }
                     "4" | "ollama" => {
                         cfg.backend = "ollama".to_string();
@@ -667,8 +664,16 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                 .unwrap_or("http://localhost:11434"),
                         )?;
                         cfg.embedding_endpoint = Some(LightMemConfig::normalize_ollama_url(&ep));
-                        cfg.embedding_model =
-                            value("Ollama embedding model", &cfg.embedding_model)?;
+                        cfg.embedding_model = value(
+                            "Ollama embedding model",
+                            if cfg.embedding_model.is_empty() || cfg.embedding_model == "bge-small"
+                            {
+                                "nomic-embed-text"
+                            } else {
+                                &cfg.embedding_model
+                            },
+                        )?;
+                        break;
                     }
                     "5" | "custom" => {
                         cfg.backend = "onnx".to_string();
@@ -677,36 +682,20 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                             cfg.onnx_model.as_deref().unwrap_or("~/.lightmem/models"),
                         )?;
                         cfg.onnx_model = Some(dir);
+                        break;
                     }
                     "6" | "hash" => {
                         cfg.backend = "hash".to_string();
                         cfg.embedding_model = "hash".to_string();
+                        break;
                     }
                     "onnx" => {
-                        let m = value(
-                            "Model: bge-small, minilm, nomic, or custom directory",
-                            cfg.onnx_model.as_deref().unwrap_or("bge-small"),
-                        )?;
-                        match m.trim() {
-                            "1" | "bge-small" => {
-                                cfg.onnx_model = Some("bge-small".to_string());
-                                cfg.embedding_model = "bge-small".to_string();
-                            }
-                            "2" | "minilm" => {
-                                cfg.onnx_model = Some("minilm".to_string());
-                                cfg.embedding_model = "minilm".to_string();
-                            }
-                            "3" | "nomic" => {
-                                cfg.onnx_model = Some("nomic".to_string());
-                                cfg.embedding_model = "nomic".to_string();
-                            }
-                            other => {
-                                cfg.onnx_model = Some(other.to_string());
-                                cfg.embedding_model = other.to_string();
-                            }
-                        }
+                        cfg.backend = "onnx".to_string();
+                        cfg.onnx_model = Some("bge-small".to_string());
+                        cfg.embedding_model = "bge-small".to_string();
+                        break;
                     }
-                    _ => bail!("Choose onnx, ollama, or hash. No settings changed."),
+                    _ => bail!("Choose 1-6, onnx, ollama, or hash. No settings changed."),
                 }
             }
             "2" => {
@@ -794,35 +783,47 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 );
                 eprintln!();
 
-                let ans = value("Answer engine", &cfg.reranker)?;
+                let ans = value("Answer engine (select 1-10)", "1")?;
                 let trimmed = ans.trim();
                 match trimmed {
-                    "0" => {}
-                    "1" => cfg.apply_preset("local")?,
-                    "2" => cfg.apply_preset("ollama")?,
+                    "0" => continue,
+                    "1" => {
+                        cfg.apply_preset("local")?;
+                        break;
+                    }
+                    "2" => {
+                        cfg.apply_preset("ollama")?;
+                        break;
+                    }
                     "3" => {
                         cfg.apply_preset("groq")?;
                         prompt_key_if_missing(&mut cfg, "Groq")?;
+                        break;
                     }
                     "4" => {
                         cfg.apply_preset("openai")?;
                         prompt_key_if_missing(&mut cfg, "OpenAI")?;
+                        break;
                     }
                     "5" => {
                         cfg.apply_preset("gemini")?;
                         prompt_key_if_missing(&mut cfg, "Gemini")?;
+                        break;
                     }
                     "6" => {
                         cfg.apply_preset("deepseek")?;
                         prompt_key_if_missing(&mut cfg, "DeepSeek")?;
+                        break;
                     }
                     "7" => {
                         cfg.apply_preset("openrouter")?;
                         prompt_key_if_missing(&mut cfg, "OpenRouter")?;
+                        break;
                     }
                     "8" => {
                         cfg.apply_preset("mistral")?;
                         prompt_key_if_missing(&mut cfg, "Mistral")?;
+                        break;
                     }
                     "9" => {
                         let ep = value(
@@ -833,19 +834,25 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                         cfg.apply_preset("custom")?;
                         cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
                         prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
+                        break;
                     }
-                    "10" => cfg.apply_preset("demo")?,
+                    "10" => {
+                        cfg.apply_preset("demo")?;
+                        break;
+                    }
                     _ => {
                         let lower = trimmed.to_lowercase();
                         match lower.as_str() {
                             "local" | "offline" | "onnx" | "minilm-squad2" => {
-                                cfg.apply_preset("local")?
+                                cfg.apply_preset("local")?;
+                                break;
                             }
                             "openai" | "gemini" | "groq" | "openrouter" | "ollama" | "deepseek"
                             | "mistral" | "demo" | "top1" => {
                                 cfg.apply_preset(&lower)?;
                                 let prov_name = CliView::model_provider_name(&cfg);
                                 prompt_key_if_missing(&mut cfg, prov_name)?;
+                                break;
                             }
                             "custom" => {
                                 let ep = value(
@@ -855,6 +862,8 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                 http_url(&ep)?;
                                 cfg.apply_preset("custom")?;
                                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
+                                prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
+                                break;
                             }
                             _ => {
                                 if let Some((prov, specific_model)) = trimmed.split_once(':') {
@@ -874,18 +883,23 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                             format!("{}:{}", prov_lower, specific_model.trim());
                                         let prov_name = CliView::model_provider_name(&cfg);
                                         prompt_key_if_missing(&mut cfg, prov_name)?;
+                                        break;
                                     } else {
                                         cfg.reranker = super::parse_reranker_setting(trimmed)?;
+                                        break;
                                     }
                                 } else {
                                     cfg.reranker = super::parse_reranker_setting(trimmed)?;
-                                }
-                                if cfg.reranker.starts_with("ollama") && !cfg.reranker.contains(':')
-                                {
-                                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
-                                        "Ollama service URL",
-                                        &cfg.ollama_url,
-                                    )?);
+                                    if cfg.reranker.starts_with("ollama")
+                                        && !cfg.reranker.contains(':')
+                                    {
+                                        cfg.ollama_url =
+                                            LightMemConfig::normalize_ollama_url(&value(
+                                                "Ollama service URL",
+                                                &cfg.ollama_url,
+                                            )?);
+                                    }
+                                    break;
                                 }
                             }
                         }
@@ -925,15 +939,23 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                     CliView::slate("Back to main menu")
                 );
                 eprintln!();
-                let mode = value(
-                    "Entity extraction: on, off, or <provider>:<model>",
-                    &cfg.entity_extraction,
-                )?;
+                let default_ee = if cfg.entity_extraction.eq_ignore_ascii_case("off") {
+                    "2"
+                } else {
+                    "1"
+                };
+                let mode = value("Entity extraction (select 1-2)", default_ee)?;
                 let trimmed = mode.trim();
                 match trimmed {
-                    "0" => {}
-                    "1" => cfg.entity_extraction = "on".to_string(),
-                    "2" => cfg.entity_extraction = "off".to_string(),
+                    "0" => continue,
+                    "1" => {
+                        cfg.entity_extraction = "on".to_string();
+                        break;
+                    }
+                    "2" => {
+                        cfg.entity_extraction = "off".to_string();
+                        break;
+                    }
                     other => {
                         let lower = other.to_lowercase();
                         if lower == "off" || lower == "false" {
@@ -943,6 +965,7 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                         } else {
                             cfg.entity_extraction = other.to_string();
                         }
+                        break;
                     }
                 }
             }
@@ -982,23 +1005,27 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                     CliView::slate("Back to main menu")
                 );
                 eprintln!();
-                let url = value(
-                    "Remote URL (none = clear saved routing/key)",
-                    cfg.remote_url.as_deref().unwrap_or("none"),
-                )?;
+                let default_rem = if cfg.remote_url.is_none() { "1" } else { "2" };
+                let url = value("Remote routing (select 1-2)", default_rem)?;
                 let trimmed = url.trim();
-                if trimmed == "0" {
-                    // Keep current
-                } else if trimmed == "1" || trimmed.eq_ignore_ascii_case("none") {
-                    cfg.remote_url = None;
-                    cfg.api_key = None;
-                } else if trimmed == "2" {
-                    let target = value("Enter remote server URL", "http://localhost:8080")?;
-                    http_url(&target)?;
-                    cfg.remote_url = Some(target.trim_end_matches('/').into());
-                } else {
-                    http_url(trimmed)?;
-                    cfg.remote_url = Some(trimmed.trim_end_matches('/').into());
+                match trimmed {
+                    "0" => continue,
+                    "1" | "local" | "none" => {
+                        cfg.remote_url = None;
+                        cfg.api_key = None;
+                        break;
+                    }
+                    "2" => {
+                        let target = value("Enter remote server URL", "http://localhost:8080")?;
+                        http_url(&target)?;
+                        cfg.remote_url = Some(target.trim_end_matches('/').into());
+                        break;
+                    }
+                    other => {
+                        http_url(other)?;
+                        cfg.remote_url = Some(other.trim_end_matches('/').into());
+                        break;
+                    }
                 }
             }
             "5" => {
@@ -1053,27 +1080,26 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 )?
                 .as_str()
                 {
-                    "0" => {}
+                    "0" => continue,
                     "1" => {
                         let present = cfg.effective_ollama_api_key().is_some();
                         credential(&mut cfg.ollama_api_key, "model service", present)?;
+                        break;
                     }
                     "2" => {
                         let present = cfg.effective_api_key().is_some();
                         credential(&mut cfg.api_key, "remote LightMem", present)?;
+                        break;
                     }
                     "3" => {
                         let present = cfg.effective_embedding_api_key().is_some();
                         credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
+                        break;
                     }
                     _ => bail!("Invalid credential choice. No settings changed."),
                 }
             }
             _ => bail!("Invalid choice. No settings changed."),
-        }
-
-        if serde_json::to_value(previous)? != serde_json::to_value(&cfg)? {
-            break;
         }
     }
     if serde_json::to_value(previous)? == serde_json::to_value(&cfg)? {

@@ -131,6 +131,41 @@ class TerminalPrompts(unittest.TestCase):
         self.assertEqual(model_val, 'minilm-squad2')
         self.assertFalse(self.db.exists())
 
+    def test_config_answer_prompt_takes_recommended_default_on_enter(self):
+        self.demo()
+        code, output = self.interact(['config', '--edit'], [
+            ('Choose [1-5]', '2\n'), ('Answer engine', '\n'),
+            ('Save these shared settings', 'y\n'),
+        ])
+        self.assertEqual(code, 0, output)
+        cfg = json.loads(self.config.read_text())
+        model_val = cfg.get('openai_model') or cfg.get('reranker')
+        self.assertEqual(model_val, 'minilm-squad2')
+        self.assertFalse(self.db.exists())
+
+    def test_config_search_prompt_takes_recommended_default_on_enter(self):
+        self.demo()
+        code, output = self.interact(['config', '--edit'], [
+            ('Choose [1-5]', '1\n'), ('Search embedder', '\n'),
+            ('Save these shared settings', 'y\n'),
+        ])
+        self.assertEqual(code, 0, output)
+        cfg = json.loads(self.config.read_text())
+        self.assertEqual(cfg.get('backend'), 'onnx')
+        self.assertEqual(cfg.get('embedding_model'), 'bge-small')
+        self.assertFalse(self.db.exists())
+
+    def test_config_submenu_back_to_main_menu(self):
+        self.demo()
+        before = self.config.read_bytes()
+        code, output = self.interact(['config', '--edit'], [
+            ('Choose [1-5]', '2\n'), ('Answer engine', '0\n'),
+            ('Choose [1-5]', '0\n'),
+        ])
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertFalse(self.db.exists())
+
     def test_cancel_and_invalid_choice_preserve_existing_config(self):
         self.demo()
         before = self.config.read_bytes()
