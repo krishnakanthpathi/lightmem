@@ -122,7 +122,8 @@ pub fn handle_links(
 ) -> Result<()> {
     let lm = open_controller(effective_db, global, connection)?;
     let links = lm.get_links(&id)?;
-    CliView::render_links_list(&id, &links, json)
+    let resolved_term = lm.get(&id)?.map(|m| m.id).unwrap_or(id);
+    CliView::render_links_list(&resolved_term, &links, json)
 }
 
 pub fn handle_tags(

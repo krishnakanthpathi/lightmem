@@ -1,7 +1,8 @@
 use crate::models::{
     compute_sha256_hex, encode_base64, extract_wikilinks, AttachmentInput, AttachmentMetadata,
-    EntityRecord, GraphEdge, GraphNode, GraphSnapshot, MemoryLink, MemoryRecord, MemoryStatus,
-    MemoryType, PaginatedMemories, RelatedMemory, StorageStats,
+    EntityFilter, EntityRecord, EntitySummary, GraphEdge, GraphNode, GraphSnapshot, ListSort,
+    MemoryLink, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory,
+    StorageStats,
 };
 use crate::services::embeddings::{
     cosine_similarity, validate_vector, EmbeddingProvider, MultimodalInput,
@@ -920,6 +921,42 @@ impl Storage {
         embedder: Option<&dyn EmbeddingProvider>,
         identity: Option<&str>,
     ) -> Result<MemoryRecord> {
+        self.update_memory_full(
+            term,
+            new_content,
+            new_title,
+            new_category,
+            new_tags,
+            &[],
+            &[],
+            new_confidence,
+            None,
+            None,
+            None,
+            &[],
+            embedder,
+            identity,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_memory_full(
+        &self,
+        term: &str,
+        new_content: Option<&str>,
+        new_title: Option<&str>,
+        new_category: Option<MemoryType>,
+        replace_tags: Option<&[String]>,
+        add_tags: &[String],
+        remove_tags: &[String],
+        new_confidence: Option<f32>,
+        new_provenance: Option<&str>,
+        new_expired_at: Option<Option<DateTime<Utc>>>,
+        new_entities: Option<&[EntityRecord]>,
+        new_attachments: &[AttachmentInput],
+        embedder: Option<&dyn EmbeddingProvider>,
+        identity: Option<&str>,
+    ) -> Result<MemoryRecord> {
         let mut conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let id = resolve_id_or_title(&conn, term)?
@@ -936,13 +973,13 @@ impl Storage {
         record.attachments = load_attachments_for_id(&tx, &id)?;
         record.entities = load_entities_for_id(&tx, &id)?;
 
-        let mut changed_text = false;
+        let mut changed_card = false;
         if let Some(c) = new_content {
             let trimmed = c.trim();
             anyhow::ensure!(!trimmed.is_empty(), "Memory content cannot be blank");
             if record.content != trimmed {
                 record.content = trimmed.to_string();
-                changed_text = true;
+                changed_card = true;
             }
         }
         if let Some(t) = new_title {
@@ -950,26 +987,48 @@ impl Storage {
             anyhow::ensure!(!trimmed.is_empty(), "Memory title cannot be blank");
             if record.title != trimmed {
                 record.title = trimmed.to_string();
-                changed_text = true;
+                changed_card = true;
             }
         }
         if let Some(cat) = new_category {
             if record.category != cat {
                 record.category = cat;
-                changed_text = true;
+                changed_card = true;
             }
         }
-        if let Some(tags) = new_tags {
-            let clean_tags: Vec<String> = tags
-                .iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if record.tags != clean_tags {
-                record.tags = clean_tags;
-                changed_text = true;
+
+        let old_tags = record.tags.clone();
+        if let Some(tags) = replace_tags {
+            let mut clean_tags = Vec::new();
+            for s in tags {
+                let t = s.trim();
+                if !t.is_empty()
+                    && !clean_tags
+                        .iter()
+                        .any(|ex: &String| ex.eq_ignore_ascii_case(t))
+                {
+                    clean_tags.push(t.to_string());
+                }
+            }
+            record.tags = clean_tags;
+        }
+        for s in add_tags {
+            let t = s.trim();
+            if !t.is_empty() && !record.tags.iter().any(|ex| ex.eq_ignore_ascii_case(t)) {
+                record.tags.push(t.to_string());
             }
         }
+        if !remove_tags.is_empty() {
+            record.tags.retain(|ex| {
+                !remove_tags
+                    .iter()
+                    .any(|rm| !rm.trim().is_empty() && ex.eq_ignore_ascii_case(rm.trim()))
+            });
+        }
+        if record.tags != old_tags {
+            changed_card = true;
+        }
+
         if let Some(conf) = new_confidence {
             anyhow::ensure!(
                 conf.is_finite() && (0.0..=1.0).contains(&conf),
@@ -977,28 +1036,85 @@ impl Storage {
             );
             record.confidence = conf;
         }
+        if let Some(prov) = new_provenance {
+            let trimmed = prov.trim();
+            anyhow::ensure!(!trimmed.is_empty(), "Provenance cannot be blank");
+            record.provenance = trimmed.to_string();
+        }
+        if let Some(exp_opt) = new_expired_at {
+            record.expired_at = exp_opt;
+        }
+
+        for att in new_attachments {
+            if !record
+                .attachments
+                .iter()
+                .any(|existing| existing.sha256 == att.metadata.sha256)
+            {
+                write_attachment(&tx, &record.id, att)?;
+                changed_card = true;
+            }
+        }
+        if !new_attachments.is_empty() {
+            record.attachments = load_attachments_for_id(&tx, &record.id)?;
+        }
+
+        if let Some(ents) = new_entities {
+            tx.execute(
+                "DELETE FROM memory_entities WHERE memory_id=?1",
+                [&record.id],
+            )?;
+            let now_str = Utc::now().to_rfc3339();
+            let mut seen_ent = std::collections::HashSet::new();
+            for ent in ents {
+                let n = ent.name.trim().to_lowercase();
+                let v = ent.val.trim().to_string();
+                if !n.is_empty() && !v.is_empty() && seen_ent.insert((n.clone(), v.clone())) {
+                    tx.execute(
+                        "INSERT INTO memory_entities (memory_id, entity_name, entity_val, created_at) VALUES (?1, ?2, ?3, ?4)",
+                        params![record.id, n, v, now_str],
+                    )?;
+                }
+            }
+            record.entities = load_entities_for_id(&tx, &record.id)?;
+            changed_card = true;
+        }
 
         record.updated_at = Utc::now();
         let final_dedup_key = duplicate_key_for_record(&record);
 
         tx.execute(
-            "UPDATE memories SET category=?1, title=?2, content=?3, tags=?4, confidence=?5, updated_at=?6, dedup_key=?7 WHERE id=?8",
+            "UPDATE memories SET category=?1, title=?2, content=?3, tags=?4, confidence=?5, provenance=?6, expired_at=?7, updated_at=?8, dedup_key=?9 WHERE id=?10",
             params![
                 record.category.as_str(),
                 record.title,
                 record.content,
                 serde_json::to_string(&record.tags)?,
                 record.confidence,
+                record.provenance,
+                record.expired_at.map(|t| t.to_rfc3339()),
                 record.updated_at.to_rfc3339(),
                 final_dedup_key,
                 record.id,
             ],
         )?;
 
-        if changed_text {
+        if changed_card {
             if let Some(embedder) = embedder {
                 let card_text = record.to_card_text();
-                let vector = embedder.embed(&card_text)?;
+                let vector = if embedder.supports_multimodal() {
+                    match load_primary_multimodal_payload(&tx, &record.id)? {
+                        Some((Some(img), _)) => embedder.embed_multimodal(
+                            &MultimodalInput::with_image(&card_text, img.as_str()),
+                        )?,
+                        Some((_, Some(aud))) => embedder.embed_multimodal(
+                            &MultimodalInput::with_audio(&card_text, aud.as_str()),
+                        )?,
+                        _ => embedder.embed(&card_text)?,
+                    }
+                } else {
+                    embedder.embed(&card_text)?
+                };
                 validate_vector(&vector)?;
                 if let Some(identity) = identity {
                     bind_identity(&tx, identity, vector.len())?;
@@ -1013,6 +1129,54 @@ impl Storage {
 
         tx.commit()?;
         Ok(record)
+    }
+
+    pub fn list_all_entities(&self, name_filter: Option<&str>) -> Result<Vec<EntitySummary>> {
+        let conn = self.lock_conn()?;
+        let _ = expire_due_conn(&conn);
+        let filter_norm = name_filter
+            .map(|n| n.trim().to_lowercase())
+            .filter(|n| !n.is_empty());
+        let rows = if let Some(ref nf) = filter_norm {
+            let mut stmt = conn.prepare(
+                "SELECT e.entity_name, e.entity_val, COUNT(*) as cnt
+                 FROM memory_entities e
+                 INNER JOIN memories m ON m.id = e.memory_id
+                 WHERE m.status = 'active' AND e.entity_name = ?1
+                 GROUP BY e.entity_name, e.entity_val
+                 ORDER BY cnt DESC, e.entity_name ASC, e.entity_val ASC",
+            )?;
+            let collected = stmt
+                .query_map([nf], |r| {
+                    Ok(EntitySummary {
+                        name: r.get(0)?,
+                        val: r.get(1)?,
+                        count: r.get::<_, i64>(2)?.max(0) as usize,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT e.entity_name, e.entity_val, COUNT(*) as cnt
+                 FROM memory_entities e
+                 INNER JOIN memories m ON m.id = e.memory_id
+                 WHERE m.status = 'active'
+                 GROUP BY e.entity_name, e.entity_val
+                 ORDER BY cnt DESC, e.entity_name ASC, e.entity_val ASC",
+            )?;
+            let collected = stmt
+                .query_map([], |r| {
+                    Ok(EntitySummary {
+                        name: r.get(0)?,
+                        val: r.get(1)?,
+                        count: r.get::<_, i64>(2)?.max(0) as usize,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        };
+        Ok(rows)
     }
 
     pub fn get_all_tags(&self) -> Result<Vec<(String, usize)>> {
@@ -2374,10 +2538,10 @@ impl Storage {
         Ok(total_created)
     }
 
-    pub fn forget_memory(&self, id: &str, hard_delete: bool) -> Result<bool> {
+    pub fn forget_memory(&self, term: &str, hard_delete: bool) -> Result<bool> {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let Some(id) = resolve_id(&tx, id)? else {
+        let Some(id) = resolve_id_or_unique_title(&tx, term, hard_delete)? else {
             return Ok(false);
         };
         let rows = if hard_delete {
@@ -2424,66 +2588,40 @@ impl Storage {
         media: Option<&str>,
         tag: Option<&str>,
     ) -> Result<usize> {
+        let tags: Vec<String> = tag.map(|t| vec![t.to_string()]).unwrap_or_default();
+        self.count_memories_filtered_full(
+            category, status, as_of, on_date, media, &tags, None, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn count_memories_filtered_full(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+    ) -> Result<usize> {
         let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let mut query = String::from("SELECT COUNT(*) FROM memories WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if let Some(cat) = category {
-            params_vec.push(Box::new(cat.as_str().to_string()));
-            query.push_str(&format!(" AND category = ?{}", params_vec.len()));
-        }
-
-        if let Some(as_of_dt) = as_of {
-            let as_of_str = as_of_dt.to_rfc3339();
-            params_vec.push(Box::new(as_of_str.clone()));
-            query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
-            params_vec.push(Box::new(as_of_str));
-            query.push_str(&format!(
-                " AND ((status = 'active' AND expired_at IS NULL) OR (expired_at IS NOT NULL AND expired_at > ?{}))",
-                params_vec.len()
-            ));
-        } else if let Some(st) = status {
-            params_vec.push(Box::new(st.as_str().to_string()));
-            query.push_str(&format!(" AND status = ?{}", params_vec.len()));
-        }
-
-        if let Some(d) = on_date {
-            let day_str = d.format("%Y-%m-%d").to_string();
-            params_vec.push(Box::new(day_str.clone()));
-            let p1 = params_vec.len();
-            params_vec.push(Box::new(day_str));
-            let p2 = params_vec.len();
-            query.push_str(&format!(
-                " AND (substr(created_at, 1, 10) = ?{} OR substr(updated_at, 1, 10) = ?{})",
-                p1, p2
-            ));
-        }
-
-        if let Some(m) = media {
-            let clean_m = m.trim().to_lowercase();
-            if clean_m == "any" || clean_m == "all" {
-                query.push_str(" AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id)");
-            } else {
-                params_vec.push(Box::new(clean_m));
-                query.push_str(&format!(
-                    " AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id AND a.media_kind = ?{})",
-                    params_vec.len()
-                ));
-            }
-        }
-
-        if let Some(t) = tag {
-            let clean_t = t.trim().to_lowercase();
-            params_vec.push(Box::new(clean_t.clone()));
-            let p1 = params_vec.len();
-            params_vec.push(Box::new(clean_t));
-            let p2 = params_vec.len();
-            query.push_str(&format!(
-                " AND (CASE WHEN json_valid(tags) THEN EXISTS(SELECT 1 FROM json_each(tags) WHERE LOWER(json_each.value) = ?{}) ELSE instr(',' || replace(LOWER(tags), ' ', '') || ',', ',' || ?{} || ',') > 0 END)",
-                p1, p2
-            ));
-        }
+        append_memory_filters_sql(
+            &mut query,
+            &mut params_vec,
+            category,
+            status,
+            as_of,
+            on_date,
+            media,
+            tags,
+            session_id,
+            entity,
+        );
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
         let total: i64 = conn.query_row(&query, param_refs.as_slice(), |r| r.get(0))?;
@@ -2513,72 +2651,61 @@ impl Storage {
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedMemories> {
-        let total = self.count_memories_filtered(category, status, as_of, on_date, media, tag)?;
+        let tags: Vec<String> = tag.map(|t| vec![t.to_string()]).unwrap_or_default();
+        self.list_memories_filtered_full(
+            category,
+            status,
+            as_of,
+            on_date,
+            media,
+            &tags,
+            None,
+            None,
+            ListSort::Newest,
+            limit,
+            offset,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_memories_filtered_full(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+        sort: ListSort,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
+        let total = self.count_memories_filtered_full(
+            category, status, as_of, on_date, media, tags, session_id, entity,
+        )?;
 
         let conn = self.lock_conn()?;
         let mut query = String::from(
-            "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE 1=1"
+            "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        append_memory_filters_sql(
+            &mut query,
+            &mut params_vec,
+            category,
+            status,
+            as_of,
+            on_date,
+            media,
+            tags,
+            session_id,
+            entity,
         );
 
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-        if let Some(cat) = category {
-            params_vec.push(Box::new(cat.as_str().to_string()));
-            query.push_str(&format!(" AND category = ?{}", params_vec.len()));
-        }
-
-        if let Some(as_of_dt) = as_of {
-            let as_of_str = as_of_dt.to_rfc3339();
-            params_vec.push(Box::new(as_of_str.clone()));
-            query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
-            params_vec.push(Box::new(as_of_str));
-            query.push_str(&format!(
-                " AND ((status = 'active' AND expired_at IS NULL) OR (expired_at IS NOT NULL AND expired_at > ?{}))",
-                params_vec.len()
-            ));
-        } else if let Some(st) = status {
-            params_vec.push(Box::new(st.as_str().to_string()));
-            query.push_str(&format!(" AND status = ?{}", params_vec.len()));
-        }
-
-        if let Some(d) = on_date {
-            let day_str = d.format("%Y-%m-%d").to_string();
-            params_vec.push(Box::new(day_str.clone()));
-            let p1 = params_vec.len();
-            params_vec.push(Box::new(day_str));
-            let p2 = params_vec.len();
-            query.push_str(&format!(
-                " AND (substr(created_at, 1, 10) = ?{} OR substr(updated_at, 1, 10) = ?{})",
-                p1, p2
-            ));
-        }
-
-        if let Some(m) = media {
-            let clean_m = m.trim().to_lowercase();
-            if clean_m == "any" || clean_m == "all" {
-                query.push_str(" AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id)");
-            } else {
-                params_vec.push(Box::new(clean_m));
-                query.push_str(&format!(
-                    " AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id AND a.media_kind = ?{})",
-                    params_vec.len()
-                ));
-            }
-        }
-
-        if let Some(t) = tag {
-            let clean_t = t.trim().to_lowercase();
-            params_vec.push(Box::new(clean_t.clone()));
-            let p1 = params_vec.len();
-            params_vec.push(Box::new(clean_t));
-            let p2 = params_vec.len();
-            query.push_str(&format!(
-                " AND (CASE WHEN json_valid(tags) THEN EXISTS(SELECT 1 FROM json_each(tags) WHERE LOWER(json_each.value) = ?{}) ELSE instr(',' || replace(LOWER(tags), ' ', '') || ',', ',' || ?{} || ',') > 0 END)",
-                p1, p2
-            ));
-        }
-
-        query.push_str(" ORDER BY created_at DESC");
+        query.push(' ');
+        query.push_str(sort.order_by_sql());
 
         if limit > 0 {
             params_vec.push(Box::new(limit as i64));
@@ -3100,6 +3227,107 @@ fn all_records(conn: &Connection) -> Result<Vec<MemoryRecord>> {
     Ok(records)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_memory_filters_sql(
+    query: &mut String,
+    params_vec: &mut Vec<Box<dyn rusqlite::ToSql>>,
+    category: Option<MemoryType>,
+    status: Option<MemoryStatus>,
+    as_of: Option<DateTime<Utc>>,
+    on_date: Option<NaiveDate>,
+    media: Option<&str>,
+    tags: &[String],
+    session_id: Option<&str>,
+    entity: Option<&EntityFilter>,
+) {
+    if let Some(cat) = category {
+        params_vec.push(Box::new(cat.as_str().to_string()));
+        query.push_str(&format!(" AND category = ?{}", params_vec.len()));
+    }
+
+    if let Some(as_of_dt) = as_of {
+        let as_of_str = as_of_dt.to_rfc3339();
+        params_vec.push(Box::new(as_of_str.clone()));
+        query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
+        params_vec.push(Box::new(as_of_str));
+        query.push_str(&format!(
+            " AND ((status = 'active' AND expired_at IS NULL) OR (expired_at IS NOT NULL AND expired_at > ?{}))",
+            params_vec.len()
+        ));
+    } else if let Some(st) = status {
+        params_vec.push(Box::new(st.as_str().to_string()));
+        query.push_str(&format!(" AND status = ?{}", params_vec.len()));
+    }
+
+    if let Some(d) = on_date {
+        let day_str = d.format("%Y-%m-%d").to_string();
+        params_vec.push(Box::new(day_str.clone()));
+        let p1 = params_vec.len();
+        params_vec.push(Box::new(day_str));
+        let p2 = params_vec.len();
+        query.push_str(&format!(
+            " AND (substr(created_at, 1, 10) = ?{} OR substr(updated_at, 1, 10) = ?{})",
+            p1, p2
+        ));
+    }
+
+    if let Some(m) = media {
+        let clean_m = m.trim().to_lowercase();
+        if clean_m == "any" || clean_m == "all" {
+            query.push_str(
+                " AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id)",
+            );
+        } else {
+            params_vec.push(Box::new(clean_m));
+            query.push_str(&format!(
+                " AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id AND a.media_kind = ?{})",
+                params_vec.len()
+            ));
+        }
+    }
+
+    for tag in tags {
+        let clean_t = tag.trim().to_lowercase();
+        if clean_t.is_empty() {
+            continue;
+        }
+        params_vec.push(Box::new(clean_t.clone()));
+        let p1 = params_vec.len();
+        params_vec.push(Box::new(clean_t));
+        let p2 = params_vec.len();
+        query.push_str(&format!(
+            " AND (CASE WHEN json_valid(tags) THEN EXISTS(SELECT 1 FROM json_each(tags) WHERE LOWER(json_each.value) = ?{}) ELSE instr(',' || replace(LOWER(tags), ' ', '') || ',', ',' || ?{} || ',') > 0 END)",
+            p1, p2
+        ));
+    }
+
+    if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        params_vec.push(Box::new(sid.to_string()));
+        query.push_str(&format!(
+            " AND context_json IS NOT NULL AND json_valid(context_json) AND json_extract(context_json, '$.session_id') = ?{}",
+            params_vec.len()
+        ));
+    }
+
+    if let Some(ef) = entity {
+        params_vec.push(Box::new(ef.name.trim().to_lowercase()));
+        let p_name = params_vec.len();
+        if let Some(ref v) = ef.val {
+            params_vec.push(Box::new(v.trim().to_lowercase()));
+            let p_val = params_vec.len();
+            query.push_str(&format!(
+                " AND EXISTS(SELECT 1 FROM memory_entities e WHERE e.memory_id = memories.id AND e.entity_name = ?{} AND LOWER(e.entity_val) = ?{})",
+                p_name, p_val
+            ));
+        } else {
+            query.push_str(&format!(
+                " AND EXISTS(SELECT 1 FROM memory_entities e WHERE e.memory_id = memories.id AND e.entity_name = ?{})",
+                p_name
+            ));
+        }
+    }
+}
+
 fn resolve_id(conn: &Connection, id: &str) -> Result<Option<String>> {
     anyhow::ensure!(!id.trim().is_empty(), "Memory ID cannot be empty");
     if let Some(exact) = conn
@@ -3122,13 +3350,39 @@ fn resolve_id(conn: &Connection, id: &str) -> Result<Option<String>> {
     Ok(ids.into_iter().next())
 }
 
+fn resolve_id_or_unique_title(
+    conn: &Connection,
+    term: &str,
+    include_inactive: bool,
+) -> Result<Option<String>> {
+    let clean = term.trim();
+    if let Some(id) = resolve_id(conn, clean)? {
+        return Ok(Some(id));
+    }
+    let sql = if include_inactive {
+        "SELECT id FROM memories WHERE LOWER(title) = LOWER(?1) ORDER BY id LIMIT 2"
+    } else {
+        "SELECT id FROM memories WHERE LOWER(title) = LOWER(?1) AND status = 'active' ORDER BY id LIMIT 2"
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let ids = stmt
+        .query_map([clean], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        ids.len() <= 1,
+        "Multiple memories match title '{}'; use an exact memory ID",
+        clean
+    );
+    Ok(ids.into_iter().next())
+}
+
 fn resolve_id_or_title(conn: &Connection, term: &str) -> Result<Option<String>> {
     let clean = term.trim();
     if clean.is_empty() {
         return Ok(None);
     }
-    // 1. Try resolve_id (exact UUID or unique ID prefix)
-    if let Ok(Some(id)) = resolve_id(conn, clean) {
+    // 1. Try resolve_id (exact UUID or unique ID prefix); propagate ambiguity errors.
+    if let Some(id) = resolve_id(conn, clean)? {
         return Ok(Some(id));
     }
     // 2. Exact title match (case-insensitive)

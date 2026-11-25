@@ -77,7 +77,7 @@ from lmem import LightMem
 # Initialize local vault (defaults to ~/.lightmem/memories.db)
 lm = LightMem()
 
-# 1. Store a memory (category auto-infers across 13 types if omitted)
+# 1. Store a memory (category auto-infers across 14 types if omitted)
 memory = lm.remember(
     "PostgreSQL primary runs on port 5432 with WAL archiving enabled",
     category="fact",
@@ -118,7 +118,7 @@ lm.bundle_import("my-vault.zip", mode="replace")  # or mode="merge"
 ## ✦ Core CLI Quickstart
 
 ```bash
-# 1. Store a memory
+# 1. Store a memory (or pass `-` to read content from stdin)
 lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" \
   -t fact \
   --title "Postgres Port" \
@@ -128,22 +128,23 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
 
 # 2. Recall memories (hybrid vector + full-text search)
 lmem recall "postgres port" --limit 5
-lmem recall "postgres" --tag database              # Tag filter
+lmem recall "postgres" --tag database --entity port=5432  # Filter by tags & entities
 
-# 3. List and paginate memories
-lmem list --limit 10 --page 1                      # Paginated chronological view
-lmem list --tag postgres                           # Filter by tag
-lmem list --status expired                         # View archived records
+# 3. List, sort, and paginate memories
+lmem list --limit 10 --page 1 --sort confidence    # Sort: newest|oldest|updated|confidence
+lmem list --tag postgres --session chat-123        # Filter by tag and session ID
+lmem list --status all                             # active | expired | all
 
 # 4. Neural Extractive QA
 lmem answer "what port does postgres use?"
 
 # 5. In-place memory update
 lmem update <MEMORY_ID> --content "New text"       # Updates content and re-embeds
-lmem update <MEMORY_ID> --title "Postgres 16"      # Update metadata in-place
+lmem update <MEMORY_ID> --title "Postgres 16" --add-tag v16 --ttl 30d
 
 # 6. Inspect memory record, entities, and links
 lmem inspect <MEMORY_ID>
+lmem entities                                      # List extracted entities & counts
 
 # 7. Knowledge graph and tags
 lmem links <MEMORY_ID>                             # Direct incoming/outgoing links
@@ -155,7 +156,7 @@ lmem conflicts                                     # Semantic conflict review
 lmem conflicts --yes                               # Auto-merge detected duplicates
 
 # 9. Lifecycle, archival & restore
-lmem forget <MEMORY_ID>                            # Soft-retire (status -> expired)
+lmem forget <ID1> <ID2>                            # Soft-retire one or more records
 lmem forget <MEMORY_ID> --hard                     # Permanent purge (DB + vector + FTS)
 lmem restore <MEMORY_ID>                           # Restore expired memory
 lmem clear --yes                                   # Wipe entire database (requires --yes)
@@ -168,23 +169,28 @@ lmem clear --yes                                   # Wipe entire database (requi
 LightMem uses unified, straightforward configuration settings stored in `~/.lightmem/config.json`.
 
 ```bash
-# View active settings
+# View active settings or inspect/set individual fields
 lmem config
+lmem config path
+lmem config get reranker
+lmem config set entity_extraction on
 
 # Quick Setup Presets
-lmem config --preset local        # 100% offline local ONNX search + answers (zero setup)
+lmem config --preset local        # 100% offline local ONNX search + answers
 lmem config --preset ollama       # Local ONNX embeddings + local Ollama LLM
 lmem config --preset openai       # Local ONNX embeddings + OpenAI (gpt-4o-mini)
+lmem config --preset gemini       # Also available: groq, openrouter, deepseek, mistral, custom
 lmem config --preset demo         # Deterministic hash search (no model downloads)
 
 # Custom Configuration
 lmem config --backend onnx|ollama|hash        # Set search embedding backend
 lmem config --embedding-model <model>         # Set vector embedding model (e.g. bge-small)
-lmem config --openai-model <model>            # Set chat/QA model (e.g. gpt-4o-mini, ollama:qwen2.5:0.5b)
+lmem config --answer-model <model>            # Set chat/QA model (e.g. gpt-4o-mini, ollama:qwen2.5:3b)
 lmem config --entity-extraction on|off        # Toggle entity extraction
-lmem config --endpoint <url>                  # Set OpenAI-compatible endpoint URL
-lmem config --api-key <key>                   # Set API key for model service
+lmem config --endpoint <url>                  # Set OpenAI-compatible answer endpoint URL
+lmem config --model-api-key <key>             # Set API key for model service (--api-key is remote server auth)
 lmem config reload                            # Reload settings directly from config.json
+lmem config reset --yes                       # Reset config.json to defaults
 lmem doctor                                   # Run diagnostic health check
 ```
 
@@ -192,10 +198,10 @@ lmem doctor                                   # Run diagnostic health check
 ```json
 {
   "backend": "onnx",
-  "embedding_model": "bge-small",
-  "openai_model": "ollama:qwen2.5:0.5b",
-  "openai_endpoint": "http://localhost:11434",
-  "openai_api_key": "optional-key-here",
+  "onnx_model": "bge-small",
+  "embedding_model": "nomic-embed-text",
+  "ollama_url": "http://localhost:11434",
+  "reranker": "ollama:qwen2.5:3b",
   "entity_extraction": "on"
 }
 ```
@@ -219,9 +225,10 @@ lmem inspect <ID1> <ID2> --paths
 # Open attachment in default OS viewer
 lmem inspect <MEMORY_ID> --open
 lmem recall "architecture" -m image -l 1 --open
+lmem list --media document -l 5 --open
 
 # Filter recall by media kind
-lmem recall "diagram" --media image      # image | audio | video | document | any
+lmem recall "diagram" --media image      # image | audio | video | document | code | archive | binary | any
 ```
 
 ---
@@ -285,12 +292,12 @@ lmem bundle import my-vault.zip --merge       # Merge into existing memories
 Run LightMem as a centralized memory backend for all your workstations and agent runners:
 
 ```bash
-# Start server in foreground
-lmem serve --host 0.0.0.0 --port 8080 --api-key "secret-token"
+# Start server locally in foreground (pass --host 0.0.0.0 for LAN/remote access)
+lmem serve --host 127.0.0.1 --port 8080 --api-key "secret-token"
 
 # Run as background daemon
 lmem serve -d --host 0.0.0.0 --port 8080 --api-key "secret-token"
-lmem serve --status
+lmem serve --status --json
 lmem serve --stop
 
 # Connect client CLI to remote instance
@@ -355,20 +362,32 @@ lmem connect cursor --mcp   # Configure Cursor only
 | :--- | :--- |
 | `context` | Show active user, agent, harness, memory scope, and database path. |
 | `remember` | Store persistent facts, preferences, decisions, or architectural notes with tags and files. |
-| `recall` | Hybrid semantic + keyword retrieval with optional category, media kind, and multi-hop expansion. |
-| `list` | Chronological paginated memory listing with category, tag, and status filters. |
+| `recall` | Hybrid semantic + keyword retrieval with category, tag, entity, session, media, and multi-hop filters. |
+| `list` | Chronological paginated memory listing with category, tag, entity, session, sort, and status filters. |
 | `inspect` | Deep inspection of memory record, attachments, and knowledge graph links by ID or title. |
-| `update` | In-place update of memory content, title, category, tags, or confidence. |
-| `answer` | Neural Extractive QA: returns precise answer spans from vault memories. |
+| `update` | In-place update of memory content, title, category, tags, TTL, provenance, confidence, or attachments. |
+| `answer` | Neural Extractive QA: returns precise answer spans with optional category, tag, entity, and session filters. |
 | `link` | Connect two memories in the knowledge graph with custom relations and weights. |
 | `unlink` | Remove directional link between two memories. |
+| `links` | List incoming and outgoing relationship links for a memory. |
 | `graph` | Retrieve full or focused knowledge graph nodes and edges. |
 | `graph_related` | Multi-hop relationship traversal around a given memory node. |
 | `tags` | List all distinct tags in the active vault and their memory counts. |
+| `entities` | List extracted entities or query memories matching an entity. |
+| `deduplicate` | Merge identical or near-duplicate active memories and rebuild merged index cards. |
+| `autolink` | Automatically discover and link related memories via mentions, shared tags, and similarity. |
 | `conflicts` | Detect and review contradictory or duplicate memories. |
-| `forget` | Deactivate or archive outdated memories safely (soft or hard). |
+| `observe` | Extract atomic candidate memories from text or transcripts, optionally saving directly. |
+| `forget` | Deactivate or archive one or more memories safely (soft or hard). |
 | `restore` | Recover an archived or expired memory by ID, prefix, or title. |
-| `config` | View or adjust active settings and presets. |
+| `clear` | Soft-retire or permanently wipe all memories in the active vault (`yes: true`). |
+| `export` | Export vault memories (optionally filtered) to lossless JSON backup or OKF Markdown. |
+| `import` | Import memories from JSON, JSONL, Markdown/OKF file or directory. |
+| `bundle_export` | Export database and media attachments into a compressed `.zip` transfer bundle. |
+| `bundle_import` | Import a `.zip`/`.lmbundle` transfer bundle. |
+| `bundle_info` | Inspect a transfer bundle manifest without unpacking. |
+| `history` | Inspect recent CLI command execution history. |
+| `config` | View or adjust active settings, models, entity extraction, and presets. |
 | `stats` | Inspect total memory count, vector distribution, and vault disk footprint. |
 
 ---
@@ -401,6 +420,7 @@ lmem docs --port 8085 --no-browser
 | `artifact` | File paths, schemas, build outputs | `0.90 - 1.00` | `validated` |
 | `event` | Incidents, deployments, migrations | `0.85 - 0.95` | `validated` |
 | `relationship` | Ownership, team mapping, service dependencies | `0.85 - 0.95` | `explicit_statement` |
+| `observation` | Patterns, behavioral signals, recurring observed context | `0.85 - 0.95` | `observed` |
 | `error` | Crash signatures, stack traces, regression postmortems | `0.90 - 1.00` | `validated` / `corrected` |
 | `context` | Current workspace state, active branch, session notes | `0.80 - 0.95` | `validated` |
 | `password` | Credentials, DSNs with embedded auth, secret references | `0.95 - 1.00` | `explicit_statement` |

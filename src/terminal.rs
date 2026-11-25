@@ -486,6 +486,12 @@ fn prompt_key_if_missing(cfg: &mut LightMemConfig, provider_name: &str) -> Resul
     Ok(())
 }
 
+fn set_answer_provider(cfg: &mut LightMemConfig, new_reranker: &str) {
+    let (_, prev_default_url, _) = cfg.active_provider();
+    cfg.reranker = new_reranker.to_string();
+    cfg.align_provider_endpoint(Some(prev_default_url), None);
+}
+
 pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemConfig>> {
     require_terminal()?;
     let mut cfg = previous.clone();
@@ -787,40 +793,40 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 match trimmed {
                     "0" => continue,
                     "1" => {
-                        cfg.apply_preset("local")?;
+                        set_answer_provider(&mut cfg, "minilm-squad2");
                         break;
                     }
                     "2" => {
-                        cfg.apply_preset("ollama")?;
+                        set_answer_provider(&mut cfg, "ollama");
                         break;
                     }
                     "3" => {
-                        cfg.apply_preset("groq")?;
+                        set_answer_provider(&mut cfg, "groq:llama-3.3-70b-versatile");
                         prompt_key_if_missing(&mut cfg, "Groq")?;
                         break;
                     }
                     "4" => {
-                        cfg.apply_preset("openai")?;
+                        set_answer_provider(&mut cfg, "openai:gpt-4o-mini");
                         prompt_key_if_missing(&mut cfg, "OpenAI")?;
                         break;
                     }
                     "5" => {
-                        cfg.apply_preset("gemini")?;
+                        set_answer_provider(&mut cfg, "gemini:gemini-1.5-flash");
                         prompt_key_if_missing(&mut cfg, "Gemini")?;
                         break;
                     }
                     "6" => {
-                        cfg.apply_preset("deepseek")?;
+                        set_answer_provider(&mut cfg, "deepseek:deepseek-chat");
                         prompt_key_if_missing(&mut cfg, "DeepSeek")?;
                         break;
                     }
                     "7" => {
-                        cfg.apply_preset("openrouter")?;
+                        set_answer_provider(&mut cfg, "openrouter:anthropic/claude-3.5-sonnet");
                         prompt_key_if_missing(&mut cfg, "OpenRouter")?;
                         break;
                     }
                     "8" => {
-                        cfg.apply_preset("mistral")?;
+                        set_answer_provider(&mut cfg, "mistral:mistral-small-latest");
                         prompt_key_if_missing(&mut cfg, "Mistral")?;
                         break;
                     }
@@ -830,25 +836,42 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                             "http://localhost:8000/v1",
                         )?;
                         http_url(&ep)?;
-                        cfg.apply_preset("custom")?;
+                        cfg.reranker = "custom".to_string();
                         cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
                         prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
                         break;
                     }
                     "10" => {
-                        cfg.apply_preset("demo")?;
+                        set_answer_provider(&mut cfg, "top1");
                         break;
                     }
                     _ => {
                         let lower = trimmed.to_lowercase();
                         match lower.as_str() {
                             "local" | "offline" | "onnx" | "minilm-squad2" => {
-                                cfg.apply_preset("local")?;
+                                set_answer_provider(&mut cfg, "minilm-squad2");
+                                break;
+                            }
+                            "tinyroberta-squad2" | "tinyroberta" => {
+                                set_answer_provider(&mut cfg, "tinyroberta-squad2");
+                                break;
+                            }
+                            "demo" | "top1" => {
+                                set_answer_provider(&mut cfg, "top1");
                                 break;
                             }
                             "openai" | "gemini" | "groq" | "openrouter" | "ollama" | "deepseek"
-                            | "mistral" | "demo" | "top1" => {
-                                cfg.apply_preset(&lower)?;
+                            | "mistral" => {
+                                let default_spec = match lower.as_str() {
+                                    "openai" => "openai:gpt-4o-mini",
+                                    "gemini" => "gemini:gemini-1.5-flash",
+                                    "groq" => "groq:llama-3.3-70b-versatile",
+                                    "openrouter" => "openrouter:anthropic/claude-3.5-sonnet",
+                                    "deepseek" => "deepseek:deepseek-chat",
+                                    "mistral" => "mistral:mistral-small-latest",
+                                    _ => "ollama",
+                                };
+                                set_answer_provider(&mut cfg, default_spec);
                                 let prov_name = CliView::model_provider_name(&cfg);
                                 prompt_key_if_missing(&mut cfg, prov_name)?;
                                 break;
@@ -859,49 +882,24 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                     "http://localhost:8000/v1",
                                 )?;
                                 http_url(&ep)?;
-                                cfg.apply_preset("custom")?;
+                                cfg.reranker = "custom".to_string();
                                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
                                 prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
                                 break;
                             }
                             _ => {
-                                if let Some((prov, specific_model)) = trimmed.split_once(':') {
-                                    let prov_lower = prov.trim().to_lowercase();
-                                    if matches!(
-                                        prov_lower.as_str(),
-                                        "openai"
-                                            | "gemini"
-                                            | "groq"
-                                            | "openrouter"
-                                            | "deepseek"
-                                            | "mistral"
-                                            | "ollama"
-                                    ) {
-                                        cfg.apply_preset(&prov_lower)?;
-                                        cfg.reranker =
-                                            format!("{}:{}", prov_lower, specific_model.trim());
-                                        let prov_name = CliView::model_provider_name(&cfg);
-                                        prompt_key_if_missing(&mut cfg, prov_name)?;
-                                        break;
-                                    } else {
-                                        cfg.reranker =
-                                            crate::commands::config::parse_reranker_setting(
-                                                trimmed,
-                                            )?;
-                                        break;
-                                    }
+                                let parsed = LightMemConfig::parse_reranker_setting(trimmed)?;
+                                set_answer_provider(&mut cfg, &parsed);
+                                let prov_name = CliView::model_provider_name(&cfg);
+                                if parsed.starts_with("ollama") && !parsed.contains(':') {
+                                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&value(
+                                        "Ollama service URL",
+                                        &cfg.ollama_url,
+                                    )?);
                                 } else {
-                                    cfg.reranker =
-                                        crate::commands::config::parse_reranker_setting(trimmed)?;
-                                    if cfg.reranker.starts_with("ollama")
-                                        && !cfg.reranker.contains(':')
-                                    {
-                                        cfg.ollama_url = LightMemConfig::normalize_ollama_url(
-                                            &value("Ollama service URL", &cfg.ollama_url)?,
-                                        );
-                                    }
-                                    break;
+                                    prompt_key_if_missing(&mut cfg, prov_name)?;
                                 }
+                                break;
                             }
                         }
                     }
@@ -958,14 +956,7 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                         break;
                     }
                     other => {
-                        let lower = other.to_lowercase();
-                        if lower == "off" || lower == "false" {
-                            cfg.entity_extraction = "off".to_string();
-                        } else if lower == "on" || lower == "true" {
-                            cfg.entity_extraction = "on".to_string();
-                        } else {
-                            cfg.entity_extraction = other.to_string();
-                        }
+                        cfg.entity_extraction = LightMemConfig::parse_entity_extraction(other)?;
                         break;
                     }
                 }

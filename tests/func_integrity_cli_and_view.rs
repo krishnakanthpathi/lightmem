@@ -620,11 +620,21 @@ fn func_cli_subcommands_observe_export_import_connect_completions_reindex_forget
     assert!(comp_out.status.success());
     assert!(!comp_out.stdout.is_empty());
 
-    // 6. Forget (`--all`) & Clear (`--json`)
-    let forget_out = run_lmem(&cfg_dir, &db_path, &["forget", "--all", "--json"]);
+    // 6. Forget (`--all`) & Clear (`--json`) require explicit `--yes` confirmation
+    let forget_missing_yes = run_lmem(&cfg_dir, &db_path, &["forget", "--all", "--json"]);
+    assert!(
+        !forget_missing_yes.status.success(),
+        "forget --all --json without --yes must fail safely"
+    );
+    let forget_out = run_lmem(&cfg_dir, &db_path, &["forget", "--all", "--yes", "--json"]);
     assert!(forget_out.status.success());
 
-    let clear_out = run_lmem(&cfg_dir, &db_path, &["clear", "--json"]);
+    let clear_missing_yes = run_lmem(&cfg_dir, &db_path, &["clear", "--json"]);
+    assert!(
+        !clear_missing_yes.status.success(),
+        "clear --json without --yes must fail safely"
+    );
+    let clear_out = run_lmem(&cfg_dir, &db_path, &["clear", "--yes", "--json"]);
     assert!(clear_out.status.success());
 }
 

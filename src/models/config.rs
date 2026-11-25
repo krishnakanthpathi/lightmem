@@ -343,6 +343,263 @@ impl LightMemConfig {
         }
     }
 
+    /// Returns true when `url` matches one of the built-in provider default base URLs.
+    pub fn is_known_provider_default_url(url: &str) -> bool {
+        let norm = Self::normalize_ollama_url(url);
+        matches!(
+            norm.as_str(),
+            "http://localhost:11434"
+                | "https://api.openai.com"
+                | "https://openrouter.ai/api"
+                | "https://generativelanguage.googleapis.com/v1beta/openai"
+                | "https://api.groq.com/openai"
+                | "https://api.deepseek.com"
+                | "https://api.mistral.ai"
+        )
+    }
+
+    /// Aligns `ollama_url` when switching reranker/chat providers unless a custom endpoint was set or preserved.
+    pub fn align_provider_endpoint(
+        &mut self,
+        previous_default_url: Option<&str>,
+        explicit_url: Option<&str>,
+    ) {
+        if let Some(url) = explicit_url {
+            self.ollama_url = Self::normalize_ollama_url(url);
+            return;
+        }
+        let (_new_prov, new_default_url, _) = self.active_provider();
+        if new_default_url.is_empty() {
+            return;
+        }
+        let current = Self::normalize_ollama_url(&self.ollama_url);
+        let prev_matches = previous_default_url
+            .filter(|p| !p.is_empty())
+            .map(|p| current == p)
+            .unwrap_or(false);
+        if self.ollama_url.trim().is_empty()
+            || current == "http://localhost:11434"
+            || prev_matches
+            || Self::is_known_provider_default_url(&current)
+        {
+            self.ollama_url = new_default_url.to_string();
+        }
+    }
+
+    /// Validates and normalizes an answer engine (`reranker`) specification string.
+    pub fn parse_reranker_setting(raw: &str) -> Result<String> {
+        let trimmed = raw.trim();
+        let lower = trimmed.to_lowercase();
+        if let Some(model) = lower.strip_prefix("onnx:") {
+            anyhow::ensure!(
+                matches!(
+                    model,
+                    "minilm-squad2" | "tinyroberta-squad2" | "minilm" | "tinyroberta"
+                ),
+                "Unknown ONNX answer model: {}",
+                model
+            );
+        }
+        anyhow::ensure!(
+            matches!(
+                lower.as_str(),
+                "onnx"
+                    | "qa"
+                    | "precision"
+                    | "ollama"
+                    | "openai"
+                    | "openrouter"
+                    | "gemini"
+                    | "groq"
+                    | "deepseek"
+                    | "mistral"
+                    | "llm"
+                    | "top1"
+                    | "custom"
+                    | "minilm-squad2"
+                    | "tinyroberta-squad2"
+            ) || lower.starts_with("onnx:")
+                || lower.starts_with("custom:")
+                || lower.contains(':'),
+            "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or a model spec like ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>, deepseek:<model>, mistral:<model>, custom:<model>.",
+            raw
+        );
+        let normalized = Self::normalize_reranker(trimmed, None);
+        anyhow::ensure!(
+            !normalized.ends_with(':'),
+            "Answer engine needs a model after ':'"
+        );
+        Ok(normalized)
+    }
+
+    /// Validates an entity extraction toggle value strictly (`on|true|1|yes` or `off|false|0|no`).
+    pub fn parse_entity_extraction(raw: &str) -> Result<String> {
+        match raw.trim().to_lowercase().as_str() {
+            "on" | "true" | "1" | "yes" => Ok("on".to_string()),
+            "off" | "false" | "0" | "no" => Ok("off".to_string()),
+            _ => anyhow::bail!(
+                "Invalid entity_extraction mode '{}'. Use 'on' or 'off'.",
+                raw.trim()
+            ),
+        }
+    }
+
+    /// Validates an embedding backend name (`onnx`, `ollama`, or `hash`).
+    pub fn parse_embedding_backend(raw: &str) -> Result<String> {
+        let lower = raw.trim().to_lowercase();
+        anyhow::ensure!(
+            matches!(lower.as_str(), "onnx" | "ollama" | "hash"),
+            "Invalid backend '{}'. Use 'onnx', 'ollama', or 'hash'.",
+            raw.trim()
+        );
+        Ok(lower)
+    }
+
+    fn normalize_optional_value(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    /// Canonical field names accepted by `config get`.
+    pub fn valid_field_names() -> &'static [&'static str] {
+        &[
+            "backend",
+            "onnx_model",
+            "embedding_model",
+            "embedding_endpoint",
+            "embedding_api_key",
+            "reranker",
+            "ollama_url",
+            "ollama_api_key",
+            "entity_extraction",
+            "remote_url",
+            "api_key",
+            "provider",
+            "endpoint",
+            "effective_embedding_url",
+        ]
+    }
+
+    /// Reads a configuration field (redacting secrets) using canonical names or common aliases.
+    pub fn get_field(&self, key: &str) -> Result<serde_json::Value> {
+        let redacted = self.redacted_json()?;
+        let normalized = key.trim().to_lowercase();
+        let canonical = match normalized.as_str() {
+            "backend" | "embedding_backend" => "backend",
+            "onnx_model" => "onnx_model",
+            "embedding_model" => "embedding_model",
+            "embedding_endpoint" | "embedding_url" => "embedding_endpoint",
+            "effective_embedding_url" => "effective_embedding_url",
+            "embedding_api_key" => {
+                return Ok(redacted
+                    .get("embedding_api_key")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+            "embedding_api_key_configured" => "embedding_api_key_configured",
+            "reranker" | "model" | "answer_model" | "chat_model" | "openai_model" => "reranker",
+            "ollama_url" | "url" | "openai_endpoint" | "openai_url" => "ollama_url",
+            "endpoint" => "endpoint",
+            "ollama_api_key" | "model_api_key" | "openai_api_key" | "openai_key" => {
+                return Ok(redacted
+                    .get("ollama_api_key")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+            "ollama_api_key_configured" | "openai_api_key_configured" => {
+                "ollama_api_key_configured"
+            }
+            "entity_extraction" => "entity_extraction",
+            "remote_url" | "remote" => {
+                return Ok(redacted
+                    .get("remote_url")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+            "api_key" | "remote_api_key" => {
+                return Ok(redacted
+                    .get("api_key")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
+            }
+            "api_key_configured" => "api_key_configured",
+            "provider" => "provider",
+            other => anyhow::bail!(
+                "Unknown config key '{}'. Valid keys: {}",
+                other,
+                Self::valid_field_names().join(", ")
+            ),
+        };
+        Ok(redacted
+            .get(canonical)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Updates a mutable configuration field using canonical names or common aliases.
+    pub fn set_field(&mut self, key: &str, value: &str) -> Result<()> {
+        let normalized = key.trim().to_lowercase();
+        match normalized.as_str() {
+            "preset" => self.apply_preset(value.trim())?,
+            "backend" | "embedding_backend" => {
+                self.backend = Self::parse_embedding_backend(value)?;
+            }
+            "onnx_model" => {
+                let opt = Self::normalize_optional_value(value);
+                if let Some(ref m) = opt {
+                    self.embedding_model = m.clone();
+                }
+                self.onnx_model = opt;
+            }
+            "embedding_model" => {
+                let trimmed = value.trim();
+                anyhow::ensure!(!trimmed.is_empty(), "embedding_model cannot be empty");
+                self.embedding_model = trimmed.to_string();
+                if self.backend == "onnx" {
+                    self.onnx_model = Some(trimmed.to_string());
+                }
+            }
+            "embedding_endpoint" | "embedding_url" => {
+                self.embedding_endpoint =
+                    Self::normalize_optional_value(value).map(|u| Self::normalize_ollama_url(&u));
+            }
+            "embedding_api_key" => {
+                self.embedding_api_key = Self::normalize_optional_value(value);
+            }
+            "ollama_url" | "url" | "endpoint" | "openai_endpoint" | "openai_url" => {
+                self.ollama_url = Self::normalize_ollama_url(value);
+            }
+            "ollama_api_key" | "model_api_key" | "openai_api_key" | "openai_key" => {
+                self.ollama_api_key = Self::normalize_optional_value(value);
+            }
+            "reranker" | "model" | "answer_model" | "chat_model" | "openai_model" => {
+                let (_, prev_default_url, _) = self.active_provider();
+                let parsed = Self::parse_reranker_setting(value)?;
+                self.reranker = parsed;
+                self.align_provider_endpoint(Some(prev_default_url), None);
+            }
+            "entity_extraction" => {
+                self.entity_extraction = Self::parse_entity_extraction(value)?;
+            }
+            "remote_url" | "remote" => {
+                self.remote_url = Self::normalize_optional_value(value)
+                    .map(|u| u.trim_end_matches('/').to_string());
+            }
+            "api_key" | "remote_api_key" => {
+                self.api_key = Self::normalize_optional_value(value);
+            }
+            other => anyhow::bail!(
+                "Unknown or read-only config key '{}'. Mutable keys: preset, backend, onnx_model, embedding_model, embedding_endpoint, embedding_api_key, reranker, ollama_url, ollama_api_key, entity_extraction, remote_url, api_key",
+                other
+            ),
+        }
+        Ok(())
+    }
+
     /// Resolves the effective base URL for Ollama / OpenAI-compatible endpoints:
     /// Respects custom configured URL; otherwise defaults to active provider's default URL.
     pub fn effective_ollama_url(&self) -> String {
@@ -499,13 +756,6 @@ impl LightMemConfig {
             .map(str::trim)
             .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
             .is_some()
-            || (self.remote_url.is_none()
-                && self
-                    .api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
-                    .is_some())
         {
             "configured (secret)".to_string()
         } else if let Some(env_name) = key_env {
@@ -1098,5 +1348,78 @@ mod tests {
             LightMemConfig::normalize_reranker("groq:mixtral", None),
             "groq:mixtral"
         );
+    }
+
+    #[test]
+    fn test_endpoint_alignment_field_access_and_parsers() {
+        let mut cfg = LightMemConfig {
+            reranker: "groq:llama-3.3-70b-versatile".to_string(),
+            ollama_url: "https://api.openai.com".to_string(),
+            ..Default::default()
+        };
+        cfg.align_provider_endpoint(Some("https://api.openai.com"), None);
+        assert_eq!(cfg.ollama_url, "https://api.groq.com/openai");
+
+        // Custom URL must never be overwritten when switching provider
+        cfg.ollama_url = "https://custom-proxy.internal".to_string();
+        cfg.reranker = "openai:gpt-4o".to_string();
+        cfg.align_provider_endpoint(Some("https://api.groq.com/openai"), None);
+        assert_eq!(cfg.ollama_url, "https://custom-proxy.internal");
+
+        // Remote api_key must not count as LLM credential in provider summary
+        cfg.ollama_url = "https://api.openai.com".to_string();
+        cfg.reranker = "openai:gpt-4o-mini".to_string();
+        cfg.api_key = Some("remote-server-key".to_string());
+        cfg.ollama_api_key = None;
+        let summary_without_model_key = cfg.active_provider_summary();
+        cfg.ollama_api_key = Some("llm-provider-key".to_string());
+        let summary_with_model_key = cfg.active_provider_summary();
+        assert_ne!(summary_without_model_key.1, summary_with_model_key.1);
+        assert!(
+            summary_without_model_key.1.contains("credential: none"),
+            "unexpected summary without model key: {:?}",
+            summary_without_model_key
+        );
+        assert!(
+            !summary_with_model_key.1.contains("credential: none"),
+            "unexpected summary with model key: {:?}",
+            summary_with_model_key
+        );
+
+        // Strict parsers
+        assert_eq!(LightMemConfig::parse_entity_extraction("on").unwrap(), "on");
+        assert_eq!(
+            LightMemConfig::parse_entity_extraction("true").unwrap(),
+            "on"
+        );
+        assert_eq!(
+            LightMemConfig::parse_entity_extraction("off").unwrap(),
+            "off"
+        );
+        assert!(LightMemConfig::parse_entity_extraction("invalid-mode").is_err());
+
+        assert_eq!(
+            LightMemConfig::parse_embedding_backend("onnx").unwrap(),
+            "onnx"
+        );
+        assert_eq!(
+            LightMemConfig::parse_embedding_backend("HASH").unwrap(),
+            "hash"
+        );
+        assert!(LightMemConfig::parse_embedding_backend("pinecone").is_err());
+
+        assert_eq!(
+            LightMemConfig::parse_reranker_setting("tinyroberta-squad2").unwrap(),
+            "tinyroberta-squad2"
+        );
+        assert!(LightMemConfig::parse_reranker_setting("   ").is_err());
+
+        // Dynamic get_field / set_field
+        assert!(cfg.set_field("entity_extraction", "on").is_ok());
+        assert_eq!(cfg.get_field("entity_extraction").unwrap(), "on");
+        assert!(cfg.set_field("backend", "hash").is_ok());
+        assert_eq!(cfg.get_field("backend").unwrap(), "hash");
+        assert!(cfg.get_field("nonexistent_key").is_err());
+        assert!(cfg.set_field("nonexistent_key", "val").is_err());
     }
 }

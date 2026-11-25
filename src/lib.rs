@@ -19,21 +19,24 @@ pub use models::{
     compute_sha256_hex, decode_base64, detect_memory_conflict,
     detect_memory_conflict_with_similarity, detect_mime_and_kind, encode_base64,
     extract_meaningful_tokens, parse_ttl_duration, AttachmentInput, AttachmentMetadata,
-    EntityRecord, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
-    ModelError, PaginatedMemories, ScoredMemory, StorageStats,
+    EntityFilter, EntityRecord, EntitySummary, LightMemConfig, ListSort, MemoryConflict,
+    MemoryRecord, MemoryStatus, MemoryType, ModelError, PaginatedMemories, ScoredMemory,
+    StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]
 pub use services::McpServer;
 pub use services::{
-    serve_api, serve_docs, AnswerRequest, AnswerResult, AttachmentPayload, BundleAttachmentEntry,
-    BundleImportResult, BundleManifest, BundleService, BundleStats, ClearPayload,
-    CommandHistoryEntry, ConnectResult, ConnectService, DocsOptions, EmbeddingProvider, Exporter,
-    ForgetPayload, HashEmbeddingProvider, HistoryService, HybridSearchEngine, ImportCandidate,
-    JsonMemoryImporter, LinkRequest, LinkResult, LlmReranker, MemoryImporter, MultimodalInput,
-    ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
+    serve_api, serve_docs, AnswerRequest, AnswerResult, AttachmentPayload, AutolinkRequest,
+    BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleService, BundleStats,
+    ClearPayload, CommandHistoryEntry, ConflictsRequest, ConnectResult, ConnectService,
+    DocsOptions, EmbeddingProvider, ExportFilter, Exporter, ForgetPayload, HashEmbeddingProvider,
+    HistoryService, HybridSearchEngine, ImportCandidate, JsonMemoryImporter, LinkRequest,
+    LinkResult, LlmReranker, MemoryImporter, MultimodalInput, ObserveRequest, ObservedCandidate,
+    ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
     OnnxEmbeddingProvider, OnnxQaReranker, PlatformInfo, PrecisionReranker, RecallRequest,
     RememberRequest, RemoteClient, Reranker, ServerOptions, Top1Reranker, UnlinkRequest,
+    UpdateRequest,
 };
 
 pub use views::{CliErrorCard, CliView};

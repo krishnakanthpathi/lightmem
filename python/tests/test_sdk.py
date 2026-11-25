@@ -36,8 +36,8 @@ class TestLightMemSDK(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_package_exports(self):
-        self.assertEqual(lmem.__version__, "0.10.0")
-        self.assertEqual(lightmem.__version__, "0.10.0")
+        self.assertEqual(lmem.__version__, "0.11.0")
+        self.assertEqual(lightmem.__version__, "0.11.0")
         self.assertTrue(callable(lmem.LightMem))
         self.assertTrue(callable(lightmem.LightMem))
         self.assertTrue(Path(self.client.binary_path).is_file())
@@ -289,6 +289,130 @@ class TestLightMemSDK(unittest.TestCase):
         self.assertEqual(updated["default_vault"]["db_exists"], True)
         self.assertEqual(updated["default_vault"]["active_memories"], 1)
 
+    def test_v0110_update_filters_export_config_history_and_identity(self):
+        import json
+        import os
+        from unittest import mock
+
+        cfg_dir = Path(self.temp_dir.name) / "isolated_cfg"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+
+        with mock.patch.dict(os.environ, {"LIGHTMEM_CONFIG_DIR": str(cfg_dir)}):
+            self.client.config(preset="demo", yes=True)
+            m1 = self.client.remember(
+                "Primary DB port is 5432",
+                category="fact",
+                title="Primary DB",
+                tags=["db", "postgres"],
+                confidence=0.80,
+                session="sess-alpha",
+            )
+            m2 = self.client.remember(
+                "Secondary replica port is 5433",
+                category="fact",
+                title="Replica DB",
+                tags=["db", "replica"],
+                confidence=0.95,
+                session="sess-beta",
+            )
+
+            # In-place update (add/remove tags, confidence, ttl/clear_ttl, provenance)
+            insp = self.client.update(
+                m1.id,
+                title="Primary DB v2",
+                add_tags=["critical"],
+                remove_tags=["postgres"],
+                confidence=0.99,
+                ttl="24h",
+                provenance="validated",
+            )
+            self.assertEqual(insp.memory.title, "Primary DB v2")
+            self.assertIn("critical", insp.memory.tags)
+            self.assertNotIn("postgres", insp.memory.tags)
+            self.assertIsNotNone(insp.memory.expired_at)
+
+            insp_cleared = self.client.update(m1.id, clear_ttl=True)
+            self.assertIsNone(insp_cleared.memory.expired_at)
+
+            # Link + links() inspection
+            self.client.link(m1.id, m2.id, relation="replicates_to", weight=1.0)
+            links = self.client.links(m1.id)
+            self.assertEqual(len(links), 1)
+            self.assertEqual(links[0]["relation"], "replicates_to")
+
+            # Tags, entities, list sort & session filters, recall & answer filters
+            tags = self.client.tags("crit")
+            self.assertTrue(any(t["tag"] == "critical" for t in tags))
+            self.assertIsInstance(self.client.entities(), list)
+
+            listed_beta = self.client.list(session="sess-beta", tag="replica", sort="confidence")
+            self.assertEqual([x.id for x in listed_beta.items], [m2.id])
+
+            sorted_all = self.client.list(status="all", sort="confidence")
+            self.assertGreaterEqual(sorted_all.items[0].confidence, sorted_all.items[-1].confidence)
+
+            recalled_alpha = self.client.recall("DB port", session="sess-alpha", tag=["db", "critical"])
+            self.assertEqual([x.memory.id for x in recalled_alpha], [m1.id])
+
+            ans = self.client.answer("Which port?", session="sess-beta", reranker="top1")
+            self.assertIn(m2.id, [ans.selected_memory.id] if ans.selected_memory else [])
+
+            # Export & import_file round-trip + clear & restore
+            out_json = Path(self.temp_dir.name) / "filtered.json"
+            exp = self.client.export(output=out_json, fmt="json", tags=["critical"], session="sess-alpha")
+            self.assertTrue(out_json.is_file())
+            self.assertEqual(exp["status"], "ok")
+            exported_payload = json.loads(out_json.read_text(encoding="utf-8"))
+            self.assertEqual(len(exported_payload["memories"]), 1)
+            self.assertEqual(exported_payload["memories"][0]["id"], m1.id)
+
+            self.client.forget(m1.id)
+            restored = self.client.restore(m1.id)
+            self.assertEqual(restored.memory.status, "active")
+
+            cleared = self.client.clear(soft=True, yes=True)
+            self.assertFalse(cleared["hard_deleted"])
+            self.assertEqual(cleared["removed"], 2)
+            self.assertEqual(self.client.list(status="active").total, 0)
+            self.assertEqual(self.client.list(status="all").total, 2)
+
+            with self.assertRaises(RuntimeError):
+                self.client.import_file(out_json)
+            imp = self.client.import_file(out_json, replace=True)
+            self.assertGreaterEqual(imp.get("imported", 0) + imp.get("updated", 0) + imp.get("skipped", 0), 1)
+
+            # Config get/set, doctor, model, history
+            self.client.config(set_key="entity_extraction", set_value="on")
+            got = self.client.config(get="entity_extraction")
+            self.assertEqual(got["value"], "on")
+            self.client.config(set_key="entity_extraction", set_value="off")
+
+            doc = self.client.doctor()
+            self.assertIsInstance(doc, dict)
+            mod = self.client.model()
+            self.assertIsInstance(mod, dict)
+            hist = self.client.history(limit=5)
+            self.assertIsInstance(hist, list)
+
+            # Identity CRUD: add, update_connection, remove_*
+            self.client.register_user("u_sdk", name="SDK User")
+            self.client.register_agent("a_sdk", user_id="u_sdk")
+            self.client.register_harness("h_sdk", name="SDK Harness")
+            self.client.register_connection(
+                "c_sdk",
+                user_id="u_sdk",
+                agent_id="a_sdk",
+                harness_id="h_sdk",
+                project_id="proj_a",
+                scope="project",
+            )
+            upd_conn = self.client.update_connection("c_sdk", scope="agent", project_id="proj_b")
+            self.assertEqual(upd_conn["scope"], "agent")
+            self.assertEqual(upd_conn["project_id"], "proj_b")
+            self.assertTrue(self.client.remove_connection("c_sdk")["removed"])
+            self.assertTrue(self.client.remove_agent("a_sdk")["removed"])
+            self.assertTrue(self.client.remove_harness("h_sdk")["removed"])
+            self.assertTrue(self.client.remove_user("u_sdk")["removed"])
 
 
 if __name__ == "__main__":

@@ -1,17 +1,52 @@
 use anyhow::{Context, Result};
 use colored::*;
-use lightmem::{CliErrorCard, CliView, RemoteClient};
-use std::io::{IsTerminal, Write};
-use std::path::Path;
+use lightmem::{CliErrorCard, CliView, EntityFilter, PaginatedMemories, RemoteClient};
+use std::io::{self, IsTerminal, Read, Write};
+use std::path::{Path, PathBuf};
 
 use super::context::AlreadyHandledError;
-use crate::{BundleCommand, Commands};
+use crate::{parse_tag_list, BundleCommand, Commands};
+
+fn encode_attachments(files: &[PathBuf]) -> Result<Option<Vec<lightmem::AttachmentPayload>>> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut payloads = Vec::with_capacity(files.len());
+    for fpath in files {
+        let data = std::fs::read(fpath)
+            .with_context(|| format!("Failed to read attachment file: {}", fpath.display()))?;
+        let fname = fpath
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let (mime, _) = lightmem::detect_mime_and_kind(&fname, &data);
+        payloads.push(lightmem::AttachmentPayload {
+            name: fname,
+            mime: Some(mime),
+            data_base64: lightmem::encode_base64(&data),
+        });
+    }
+    Ok(Some(payloads))
+}
+
+fn format_entity_filter(entity: Option<&EntityFilter>) -> Option<String> {
+    entity.map(|e| match &e.val {
+        Some(v) => format!("{}={}", e.name, v),
+        None => e.name.clone(),
+    })
+}
 
 pub fn handle_remote_command(
     client: &RemoteClient,
     command: &Commands,
+    session: Option<&str>,
     json: bool,
 ) -> Result<bool> {
+    let clean_session = session
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
     match command {
         Commands::Remember {
             content,
@@ -31,41 +66,34 @@ pub fn handle_remote_command(
                 !extract && reranker.is_none(),
                 "Remote remember does not support --extract or --reranker. Configure extraction on the server or omit these options."
             );
-            let mut attachment_payloads = Vec::new();
-            for fpath in files {
-                let data = std::fs::read(fpath).with_context(|| {
-                    format!("Failed to read attachment file: {}", fpath.display())
-                })?;
-                let fname = fpath
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file")
-                    .to_string();
-                let (mime, _) = lightmem::detect_mime_and_kind(&fname, &data);
-                let data_base64 = lightmem::encode_base64(&data);
-                attachment_payloads.push(lightmem::AttachmentPayload {
-                    name: fname,
-                    mime: Some(mime),
-                    data_base64,
-                });
-            }
+            let resolved_content = if content.as_deref() == Some("-")
+                || (content.is_none() && files.is_empty() && !io::stdin().is_terminal())
+            {
+                let mut buf = String::new();
+                io::stdin().read_to_string(&mut buf)?;
+                let trimmed = buf.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            } else {
+                content.clone()
+            };
+            let attachment_payloads = encode_attachments(files)?;
             let req = lightmem::RememberRequest {
-                content: content.clone(),
+                content: resolved_content,
                 category: *category,
                 tags: tags
                     .as_ref()
-                    .map(|t| t.split(',').map(|s| s.trim().to_string()).collect()),
+                    .map(|t| parse_tag_list(std::slice::from_ref(t))),
                 source: provenance.clone(),
                 title: title.clone(),
                 ttl: ttl.map(|d| format!("{}ms", d.num_milliseconds())),
                 confidence: Some(*confidence),
                 supersede: *supersede,
                 no_entities: Some(*no_entities),
-                attachments: if attachment_payloads.is_empty() {
-                    None
-                } else {
-                    Some(attachment_payloads)
-                },
+                attachments: attachment_payloads,
             };
             let response = client.remember_detailed(&req)?;
             if json {
@@ -83,7 +111,8 @@ pub fn handle_remote_command(
             query,
             image,
             category,
-            tag: _,
+            tag,
+            entity,
             media,
             as_of,
             date,
@@ -99,6 +128,8 @@ pub fn handle_remote_command(
                 image.is_none() && save_to.is_none() && !path && !open,
                 "Remote recall does not support --image, --save-to, --path, or --open. Use local mode to download attachments."
             );
+            let tags = parse_tag_list(tag);
+            let entity_str = format_entity_filter(entity.as_ref());
             if *precision {
                 anyhow::ensure!(
                     media.is_none() && !multi_hop && min_similarity.is_none(),
@@ -107,6 +138,9 @@ pub fn handle_remote_command(
                 let answer = match client.answer(&lightmem::AnswerRequest {
                     question: query.clone(),
                     category: *category,
+                    tags,
+                    session: clean_session,
+                    entity: entity_str,
                     as_of: *as_of,
                     date: *date,
                     limit: *limit,
@@ -114,8 +148,9 @@ pub fn handle_remote_command(
                 }) {
                     Ok(ans) => ans,
                     Err(err) => {
+                        let msg = err.to_string();
                         CliView::render_llm_or_error(&err, json);
-                        return Err(AlreadyHandledError.into());
+                        return Err(AlreadyHandledError::new(msg).into());
                     }
                 };
                 CliView::render_answer(&answer, json)?;
@@ -124,6 +159,9 @@ pub fn handle_remote_command(
             let req = lightmem::RecallRequest {
                 query: query.clone(),
                 category: *category,
+                tags,
+                session: clean_session,
+                entity: entity_str,
                 media: media.clone(),
                 as_of: *as_of,
                 date: *date,
@@ -146,6 +184,8 @@ pub fn handle_remote_command(
             precision,
             reranker,
             category,
+            tag,
+            entity,
             as_of,
             date,
             limit,
@@ -155,6 +195,9 @@ pub fn handle_remote_command(
                 precision: *precision,
                 reranker: reranker.clone(),
                 category: *category,
+                tags: parse_tag_list(tag),
+                session: clean_session,
+                entity: format_entity_filter(entity.as_ref()),
                 as_of: *as_of,
                 date: *date,
                 limit: *limit,
@@ -162,8 +205,9 @@ pub fn handle_remote_command(
             let result = match client.answer(&req) {
                 Ok(ans) => ans,
                 Err(err) => {
+                    let msg = err.to_string();
                     CliView::render_llm_or_error(&err, json);
-                    return Err(AlreadyHandledError.into());
+                    return Err(AlreadyHandledError::new(msg).into());
                 }
             };
             CliView::render_answer(&result, json)?;
@@ -172,9 +216,11 @@ pub fn handle_remote_command(
 
         Commands::List {
             category,
-            tag: _,
+            tag,
+            entity,
             media,
             status,
+            sort,
             as_of,
             date,
             limit,
@@ -182,20 +228,28 @@ pub fn handle_remote_command(
             page,
             save_to,
             path,
+            open,
         } => {
             anyhow::ensure!(
-                save_to.is_none() && !path,
-                "Remote list does not support --save-to or --path. Use local mode to download attachments."
+                save_to.is_none() && !path && !open,
+                "Remote list does not support --save-to, --path, or --open. Use local mode to download attachments."
             );
-            let paginated = client.list(
+            let tags = parse_tag_list(tag);
+            let entity_str = format_entity_filter(entity.as_ref());
+            let paginated = client.list_filtered(
                 *limit,
                 *offset,
                 *page,
                 *category,
-                Some(*status),
+                status.into_memory_status(),
+                matches!(status, crate::ListStatusFilter::All),
                 media.clone(),
                 *date,
                 *as_of,
+                &tags,
+                clean_session.as_deref(),
+                entity_str.as_deref(),
+                *sort,
             )?;
             CliView::render_paginated_list(&paginated, Path::new(&client.base_url), json)?;
             Ok(true)
@@ -227,6 +281,22 @@ pub fn handle_remote_command(
                     }
                 }
             }
+            if inspected.is_empty() {
+                if json {
+                    if terms.len() > 1 {
+                        println!("[]");
+                    } else {
+                        println!("null");
+                    }
+                } else {
+                    eprintln!("Memory not found: {}", terms.join(", "));
+                }
+                return Err(AlreadyHandledError::new(format!(
+                    "Memory not found: {}",
+                    terms.join(", ")
+                ))
+                .into());
+            }
             if json {
                 let value = if terms.len() > 1 {
                     serde_json::json!(inspected)
@@ -241,37 +311,135 @@ pub fn handle_remote_command(
             Ok(true)
         }
 
-        Commands::Forget { id, all, hard, yes } => {
-            if *all && !*yes && !json {
-                if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
-                    let action = if *hard {
-                        "permanently delete"
-                    } else {
-                        "expire"
-                    };
-                    eprint!(
-                        "Are you sure you want to {} all memories on remote server '{}'? [y/N]: ",
-                        action, client.base_url
-                    );
-                    std::io::stderr().flush()?;
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-                        eprintln!("Operation cancelled.");
-                        return Ok(true);
-                    }
-                } else {
-                    anyhow::bail!("Refusing to forget all remote memories without confirmation. Pass --yes (or -y) to proceed non-interactively.");
-                }
+        Commands::Update {
+            id,
+            content,
+            title,
+            category,
+            tags,
+            add_tags,
+            remove_tags,
+            confidence,
+            ttl,
+            clear_ttl,
+            provenance,
+            files,
+            refresh_entities,
+        } => {
+            let attachments = encode_attachments(files)?;
+            let req = lightmem::UpdateRequest {
+                id: id.clone(),
+                content: content.clone(),
+                title: title.clone(),
+                category: *category,
+                tags: tags
+                    .as_ref()
+                    .map(|t| parse_tag_list(std::slice::from_ref(t))),
+                add_tags: parse_tag_list(add_tags),
+                remove_tags: parse_tag_list(remove_tags),
+                confidence: *confidence,
+                provenance: provenance.clone(),
+                ttl: ttl.map(|d| format!("{}ms", d.num_milliseconds())),
+                clear_ttl: *clear_ttl,
+                attachments,
+                refresh_entities: *refresh_entities,
+            };
+            let updated = client.update(&req)?;
+            let links = client.links(&updated.id)?;
+            if !json {
+                println!(
+                    "\n  {} {}",
+                    CliView::emerald_bold("✓"),
+                    CliView::emerald_bold("Memory updated in-place")
+                );
             }
-            let ok = client.forget(id.as_deref(), *all, *hard)?;
-            CliView::render_forget(id.as_deref().unwrap_or("*"), ok, *hard, json)?;
+            CliView::render_inspect(&updated, &links, Path::new(&client.base_url), json)?;
+            Ok(true)
+        }
+
+        Commands::Deduplicate => {
+            let merged = client.deduplicate()?;
+            CliView::render_dedup(merged, json)?;
+            Ok(true)
+        }
+
+        Commands::Forget {
+            ids,
+            all,
+            hard,
+            yes,
+        } => {
+            if *all {
+                if !*yes {
+                    if !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+                        let action = if *hard {
+                            "permanently delete"
+                        } else {
+                            "expire"
+                        };
+                        eprint!(
+                            "Are you sure you want to {} all memories on remote server '{}'? [y/N]: ",
+                            action, client.base_url
+                        );
+                        std::io::stderr().flush()?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input)?;
+                        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+                            eprintln!("Operation cancelled.");
+                            return Ok(true);
+                        }
+                    } else {
+                        anyhow::bail!("Refusing to forget all remote memories without confirmation. Pass --yes (or -y) to proceed non-interactively.");
+                    }
+                }
+                let deleted = client.forget_all(*hard)?;
+                CliView::render_clear(deleted, *hard, Path::new(&client.base_url), json)?;
+            } else if ids.len() == 1 {
+                let target_id = &ids[0];
+                let ok = client.forget(Some(target_id), false, *hard)?;
+                CliView::render_forget(target_id, ok, *hard, json)?;
+                if !ok {
+                    return Err(AlreadyHandledError::new(format!(
+                        "Memory '{}' not found",
+                        target_id
+                    ))
+                    .into());
+                }
+            } else if ids.len() > 1 {
+                let mut results = Vec::with_capacity(ids.len());
+                let mut all_ok = true;
+                for target_id in ids {
+                    let ok = client.forget(Some(target_id), false, *hard)?;
+                    if !ok {
+                        all_ok = false;
+                    }
+                    if json {
+                        results.push(serde_json::json!({
+                            "id": target_id,
+                            "success": ok,
+                            "hard_deleted": *hard,
+                        }));
+                    } else {
+                        CliView::render_forget(target_id, ok, *hard, false)?;
+                    }
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&results)?);
+                }
+                if !all_ok {
+                    return Err(
+                        AlreadyHandledError::new("One or more memories were not found").into(),
+                    );
+                }
+            } else {
+                anyhow::bail!("Provide a memory <ID> or pass '--all' to forget all memories.");
+            }
             Ok(true)
         }
 
         Commands::Clear { soft, yes } => {
-            if !*yes && !json {
-                if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+            if !*yes {
+                if !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
                     let action = if !*soft {
                         "permanently clear"
                     } else {
@@ -336,6 +504,55 @@ pub fn handle_remote_command(
             Ok(true)
         }
 
+        Commands::Tags { query } => {
+            let tags = client.tags(Some(query.as_str()))?;
+            CliView::render_tags(&tags, json)?;
+            Ok(true)
+        }
+
+        Commands::Entities {
+            name,
+            val,
+            memories,
+        } => {
+            let (parsed_name, parsed_val) = match (name.clone(), val.clone()) {
+                (Some(raw), explicit_val) => {
+                    if let Some(v) = explicit_val {
+                        (Some(raw), Some(v))
+                    } else if let Some((k, v)) = raw.split_once('=') {
+                        (Some(k.trim().to_string()), Some(v.trim().to_string()))
+                    } else {
+                        (Some(raw), None)
+                    }
+                }
+                (None, Some(v)) => {
+                    anyhow::bail!("--val '{}' requires an entity name argument", v);
+                }
+                (None, None) => (None, None),
+            };
+            if parsed_val.is_some() || *memories {
+                let target_name = parsed_name
+                    .as_deref()
+                    .context("Provide an entity name when using --memories or --val")?;
+                let records = client.find_by_entity(target_name, parsed_val.as_deref())?;
+                let total = records.len();
+                let paginated = PaginatedMemories {
+                    items: records,
+                    total,
+                    limit: total.max(1),
+                    offset: 0,
+                    page: 1,
+                    total_pages: 1,
+                    has_more: false,
+                };
+                CliView::render_paginated_list(&paginated, Path::new(&client.base_url), json)?;
+            } else {
+                let list = client.entities(parsed_name.as_deref())?;
+                CliView::render_entities(&list, json)?;
+            }
+            Ok(true)
+        }
+
         Commands::Related { id, hops } => {
             let results = client.related(id, *hops)?;
             CliView::render_related(id, &results, json)?;
@@ -345,6 +562,81 @@ pub fn handle_remote_command(
         Commands::Graph { focus, hops } => {
             let snapshot = client.graph(focus.as_deref(), Some(*hops))?;
             CliView::render_graph(&snapshot, json)?;
+            Ok(true)
+        }
+
+        Commands::Autolink { min_similarity } => {
+            let (new_links, nodes, edges) = client.autolink(Some(*min_similarity))?;
+            CliView::render_autolink(new_links, nodes, edges, json)?;
+            Ok(true)
+        }
+
+        Commands::Conflicts {
+            yes,
+            reranker,
+            min_similarity,
+        } => {
+            let conflicts = client.conflicts(*yes, *min_similarity, reranker.as_deref())?;
+            CliView::render_conflicts(&conflicts, *yes, Path::new(&client.base_url), json)?;
+            Ok(true)
+        }
+
+        Commands::Observe {
+            input,
+            file,
+            yes,
+            dry_run,
+            category,
+            tags,
+            confidence,
+            reranker,
+        } => {
+            let raw_text = if let Some(ref path) = file {
+                std::fs::read_to_string(path).with_context(|| {
+                    format!("Failed to read conversation file: {}", path.display())
+                })?
+            } else if let Some(ref arg) = input {
+                if arg == "-" {
+                    let mut buf = String::new();
+                    io::stdin().read_to_string(&mut buf)?;
+                    buf
+                } else if Path::new(arg).is_file() {
+                    std::fs::read_to_string(arg)
+                        .with_context(|| format!("Failed to read file: {}", arg))?
+                } else {
+                    arg.clone()
+                }
+            } else if !io::stdin().is_terminal() {
+                let mut buf = String::new();
+                io::stdin().read_to_string(&mut buf)?;
+                buf
+            } else {
+                anyhow::bail!(
+                    "Provide conversation text, a file path, or pipe via stdin: `lmem observe \"User: ...\"`"
+                );
+            };
+            let should_save = *yes && !*dry_run;
+            let req = lightmem::ObserveRequest {
+                text: raw_text,
+                category: *category,
+                tags: tags
+                    .as_ref()
+                    .map(|t| parse_tag_list(std::slice::from_ref(t))),
+                confidence: Some(*confidence),
+                reranker: reranker.clone(),
+                dry_run: !should_save,
+            };
+            let (candidates, saved) = client.observe(&req)?;
+            if should_save {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&saved)?);
+                } else {
+                    CliView::render_observed_candidates(&candidates, false, false)?;
+                    CliView::render_observed_summary(saved.len(), 0, false, false)?;
+                }
+            } else {
+                CliView::render_observed_candidates(&candidates, true, json)?;
+            }
             Ok(true)
         }
 
@@ -446,17 +738,18 @@ pub fn handle_remote_command(
                     action: BundleCommand::Import { .. },
                     ..
                 } => "bundle import",
-                Commands::Clear { .. } => "clear",
                 Commands::Restore { .. } => "restore",
-                Commands::Inspect { .. } => "inspect",
                 Commands::Import { .. } => "import",
                 Commands::Export { .. } => "export",
-                Commands::Conflicts { .. } => "conflicts",
-                Commands::Autolink { .. } => "autolink",
+                Commands::Reindex { .. } => "reindex",
                 Commands::Connect { mcp: true, .. } => "connect --mcp",
+                #[cfg(feature = "mcp")]
+                Commands::Mcp => "mcp",
                 _ => "this command",
             };
-            let reason_msg = format!("This command ('{cmd_name}') is not supported in remote mode. No local vault was opened.");
+            let reason_msg = format!(
+                "This command ('{cmd_name}') is not supported in remote mode. No local vault was opened."
+            );
             if json {
                 eprintln!(
                     "{}",
@@ -489,7 +782,7 @@ pub fn handle_remote_command(
                     false,
                 );
             }
-            std::process::exit(1);
+            Err(AlreadyHandledError::new(reason_msg).into())
         }
     }
 }

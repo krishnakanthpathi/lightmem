@@ -62,8 +62,28 @@ class LightMem:
             args.extend(["--db", self.db_path])
         return args
 
-    def _call(self, subcommand: str, extra_args: List[str], input_text: Optional[str] = None) -> Any:
-        full_args = self._build_base_args() + [subcommand, "--json"] + extra_args
+    def _call(
+        self,
+        subcommand: str,
+        extra_args: List[str],
+        input_text: Optional[str] = None,
+        session_override: Optional[str] = None,
+        extra_json_flag: str = "--json",
+    ) -> Any:
+        base_args = self._build_base_args()
+        if session_override and session_override != self.session:
+            filtered: List[str] = []
+            skip = False
+            for a in base_args:
+                if skip:
+                    skip = False
+                    continue
+                if a == "--session":
+                    skip = True
+                    continue
+                filtered.append(a)
+            base_args = filtered + ["--session", session_override]
+        full_args = base_args + [subcommand, extra_json_flag] + extra_args
         code, stdout, stderr = execute_lmem(full_args, input_text=input_text)
         # Exit 1 with a machine-readable miss is distinct from an operational error.
         # For get/inspect with missing IDs, the CLI exits 1 with empty/null output.
@@ -89,11 +109,17 @@ class LightMem:
             args.extend(["--name", name])
         return self._call("identity", args)
 
+    def remove_user(self, user_id: str) -> Dict[str, Any]:
+        return self._call("identity", ["user-remove", user_id])
+
     def register_agent(self, agent_id: str, user_id: str, name: Optional[str] = None) -> Dict[str, Any]:
         args = ["agent-add", agent_id, "--user", user_id]
         if name is not None:
             args.extend(["--name", name])
         return self._call("identity", args)
+
+    def remove_agent(self, agent_id: str) -> Dict[str, Any]:
+        return self._call("identity", ["agent-remove", agent_id])
 
     def register_harness(self, harness_id: str, path: Optional[str | Path] = None, name: Optional[str] = None) -> Dict[str, Any]:
         args = ["harness-add", harness_id]
@@ -103,6 +129,9 @@ class LightMem:
             args.extend(["--name", name])
         return self._call("identity", args)
 
+    def remove_harness(self, harness_id: str) -> Dict[str, Any]:
+        return self._call("identity", ["harness-remove", harness_id])
+
     def register_connection(self, connection_id: str, user_id: str, agent_id: str, harness_id: str,
                             project_id: Optional[str] = None, scope: str = "user") -> Dict[str, Any]:
         args = ["connection-add", connection_id, "--user", user_id, "--agent", agent_id,
@@ -110,6 +139,25 @@ class LightMem:
         if project_id is not None:
             args.extend(["--project", project_id])
         return self._call("identity", args)
+
+    def update_connection(
+        self,
+        connection_id: str,
+        scope: Optional[str] = None,
+        project_id: Optional[str] = None,
+        clear_project: bool = False,
+    ) -> Dict[str, Any]:
+        args = ["connection-update", connection_id]
+        if scope is not None:
+            args.extend(["--memory-scope", scope])
+        if clear_project:
+            args.append("--clear-project")
+        elif project_id is not None:
+            args.extend(["--project", project_id])
+        return self._call("identity", args)
+
+    def remove_connection(self, connection_id: str) -> Dict[str, Any]:
+        return self._call("identity", ["connection-remove", connection_id])
 
     def identities(self, kind: str = "connections") -> List[Dict[str, Any]]:
         return self._call("identity", ["list", kind])
@@ -136,6 +184,7 @@ class LightMem:
         extract: bool = False,
         reranker: Optional[str] = None,
         no_entities: bool = False,
+        session: Optional[str] = None,
     ) -> Memory:
         args: List[str] = []
         if category:
@@ -158,13 +207,13 @@ class LightMem:
         if extract:
             args.append("--extract")
         if reranker:
-            args.extend(["-r", reranker])
+            args.extend(["--model", reranker])
         if no_entities:
             args.append("--no-entities")
         if content is not None and (content or not files):
             args.extend(["--", content])
 
-        data = self._call("remember", args)
+        data = self._call("remember", args, session_override=session)
         return Memory.from_dict(data)
 
     # 2. Hybrid Recall
@@ -173,6 +222,9 @@ class LightMem:
         query: str,
         limit: int = 5,
         category: Optional[str] = None,
+        tag: Optional[str | List[str]] = None,
+        entity: Optional[str] = None,
+        session: Optional[str] = None,
         media: Optional[str] = None,
         min_similarity: Optional[float] = None,
         multi_hop: bool = False,
@@ -184,6 +236,12 @@ class LightMem:
         args = ["-l", str(limit)]
         if category:
             args.extend(["-t", category])
+        if tag:
+            tag_items = [tag] if isinstance(tag, str) else list(tag)
+            for item in tag_items:
+                args.extend(["--tag", item])
+        if entity:
+            args.extend(["--entity", entity])
         if media:
             args.extend(["--media", media])
         if min_similarity is not None:
@@ -200,7 +258,7 @@ class LightMem:
             args.append("--path")
 
         args.extend(["--", query])
-        data = self._call("recall", args)
+        data = self._call("recall", args, session_override=session)
         if path:
             return [str(p) for p in data] if isinstance(data, list) else []
         if isinstance(data, list):
@@ -212,6 +270,9 @@ class LightMem:
         self,
         question: str,
         category: Optional[str] = None,
+        tag: Optional[str | List[str]] = None,
+        entity: Optional[str] = None,
+        session: Optional[str] = None,
         reranker: Optional[str] = None,
         limit: int = 10,
         as_of: Optional[str] = None,
@@ -220,15 +281,21 @@ class LightMem:
         args = ["-l", str(limit)]
         if category:
             args.extend(["-t", category])
+        if tag:
+            tag_items = [tag] if isinstance(tag, str) else list(tag)
+            for item in tag_items:
+                args.extend(["--tag", item])
+        if entity:
+            args.extend(["--entity", entity])
         if reranker:
-            args.extend(["-r", reranker])
+            args.extend(["--model", reranker])
         if as_of:
             args.extend(["--as-of", as_of])
         if date:
             args.extend(["--date", date])
 
         args.extend(["--", question])
-        data = self._call("answer", args)
+        data = self._call("answer", args, session_override=session)
         return AnswerResult.from_dict(data)
 
     # 4. List
@@ -238,20 +305,30 @@ class LightMem:
         limit: int = 20,
         offset: int = 0,
         category: Optional[str] = None,
+        tag: Optional[str | List[str]] = None,
+        entity: Optional[str] = None,
+        session: Optional[str] = None,
         media: Optional[str] = None,
         status: str = "active",
+        sort: str = "newest",
         as_of: Optional[str] = None,
         date: Optional[str] = None,
         save_to: Optional[str | Path] = None,
         path: bool = False,
     ) -> PaginatedList | List[str]:
-        args = ["-l", str(limit), "--status", status]
+        args = ["-l", str(limit), "--status", status, "--sort", sort]
         if page is not None:
             args.extend(["--page", str(page)])
         elif offset > 0:
             args.extend(["--offset", str(offset)])
         if category:
             args.extend(["-t", category])
+        if tag:
+            tag_items = [tag] if isinstance(tag, str) else list(tag)
+            for item in tag_items:
+                args.extend(["--tag", item])
+        if entity:
+            args.extend(["--entity", entity])
         if media:
             args.extend(["--media", media])
         if as_of:
@@ -263,7 +340,7 @@ class LightMem:
         if path:
             args.append("--path")
 
-        data = self._call("list", args)
+        data = self._call("list", args, session_override=session)
         if path:
             return [str(p) for p in data] if isinstance(data, list) else []
         items = [Memory.from_dict(item) for item in data.get("items", [])]
@@ -314,13 +391,106 @@ class LightMem:
             return [] if len(terms) > 1 else None
         return MemoryInspection.from_dict(data)
 
-    # 6. Forget (Soft or Hard)
-    def forget(self, memory_id: str, hard: bool = False) -> bool:
+    # 6. Forget (Soft or Hard) & Update / Restore / Clear
+    def update(
+        self,
+        memory_id: str,
+        *,
+        content: Optional[str] = None,
+        title: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        add_tags: Optional[List[str]] = None,
+        remove_tags: Optional[List[str]] = None,
+        confidence: Optional[float] = None,
+        ttl: Optional[str] = None,
+        clear_ttl: bool = False,
+        provenance: Optional[str] = None,
+        files: Optional[List[str | Path]] = None,
+        refresh_entities: bool = False,
+    ) -> MemoryInspection:
+        args = [memory_id]
+        if content is not None:
+            args.extend(["--content", content])
+        if title is not None:
+            args.extend(["--title", title])
+        if category is not None:
+            args.extend(["-t", category])
+        if tags is not None:
+            args.extend(["--tags", ",".join(tags)])
+        if add_tags:
+            for t in add_tags:
+                args.extend(["--add-tag", t])
+        if remove_tags:
+            for t in remove_tags:
+                args.extend(["--remove-tag", t])
+        if confidence is not None:
+            args.extend(["--confidence", str(confidence)])
+        if clear_ttl:
+            args.append("--clear-ttl")
+        elif ttl is not None:
+            args.extend(["--ttl", ttl])
+        if provenance is not None:
+            args.extend(["--provenance", provenance])
+        if files:
+            for f in files:
+                args.extend(["-f", str(f)])
+        if refresh_entities:
+            args.append("--refresh-entities")
+        data = self._call("update", args)
+        return MemoryInspection.from_dict(data)
+
+    def restore(self, term: str) -> MemoryInspection:
+        data = self._call("restore", [term])
+        return MemoryInspection.from_dict(data)
+
+    def forget(self, memory_id: str | List[str], hard: bool = False) -> bool | List[Dict[str, Any]]:
+        if isinstance(memory_id, (list, tuple)):
+            args = list(str(m) for m in memory_id)
+            if hard:
+                args.append("--hard")
+            data = self._call("forget", args)
+            return data if isinstance(data, list) else []
         args = [memory_id]
         if hard:
             args.append("--hard")
         data = self._call("forget", args)
         return bool(data.get("success", False))
+
+    def clear(self, soft: bool = False, yes: bool = True) -> Dict[str, Any]:
+        args: List[str] = []
+        if soft:
+            args.append("--soft")
+        if yes:
+            args.append("--yes")
+        return self._call("clear", args)
+
+    def links(self, memory_id: str) -> List[Dict[str, Any]]:
+        data = self._call("links", [memory_id])
+        return data if isinstance(data, list) else []
+
+    def tags(self, query: Optional[str] = None) -> List[Dict[str, Any]]:
+        args = [query] if query else []
+        data = self._call("tags", args)
+        return data if isinstance(data, list) else []
+
+    def entities(
+        self,
+        name: Optional[str] = None,
+        val: Optional[str] = None,
+        memories: bool = False,
+    ) -> List[Any]:
+        args: List[str] = []
+        if name:
+            args.append(name)
+        if val:
+            args.extend(["--val", val])
+        if memories:
+            args.append("--memories")
+        data = self._call("entities", args)
+        if (val is not None or memories) and isinstance(data, dict):
+            return [Memory.from_dict(item) for item in data.get("items", [])]
+        return data if isinstance(data, list) else []
 
     # 7. Deduplicate & Merge
     def deduplicate(self) -> int:
@@ -338,8 +508,10 @@ class LightMem:
         if yes:
             args.append("--yes")
         if reranker:
-            args.extend(["-r", reranker])
+            args.extend(["--model", reranker])
         data = self._call("conflicts", args)
+        if isinstance(data, dict) and isinstance(data.get("conflicts"), list):
+            return data["conflicts"]
         return data if isinstance(data, list) else []
 
     # 9. Knowledge Graph Links
@@ -426,7 +598,7 @@ class LightMem:
         if confidence is not None:
             args.extend(["-c", str(confidence)])
         if reranker:
-            args.extend(["-r", reranker])
+            args.extend(["--model", reranker])
 
         data = self._call("observe", args)
         if isinstance(data, list):
@@ -466,3 +638,157 @@ class LightMem:
             err = stderr.strip() or stdout.strip()
             raise RuntimeError(f"lmem bundle info failed (exit code {code}): {err}")
         return json.loads(stdout)
+
+    # 17. Export / Import & Diagnostics / History / Config
+    def export(
+        self,
+        output: Optional[str | Path] = None,
+        fmt: str = "json",
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        status: Optional[str] = None,
+        session: Optional[str] = None,
+        entity: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        args = ["--format", fmt]
+        if output is not None:
+            args.extend(["-o", str(output)])
+        if category:
+            args.extend(["-t", category])
+        if tags:
+            for t in tags:
+                args.extend(["--tag", t])
+        if status:
+            args.extend(["--status", status])
+        if entity:
+            args.extend(["--entity", entity])
+        return self._call("export", args, session_override=session)
+
+    def import_file(
+        self,
+        file_path: str | Path,
+        replace: bool = False,
+        merge: bool = False,
+    ) -> Dict[str, Any]:
+        args = [str(file_path)]
+        if replace:
+            args.append("--replace")
+        if merge:
+            args.append("--merge")
+        return self._call("import", args)
+
+    def history(
+        self,
+        query: Optional[str] = None,
+        limit: int = 20,
+        status: Optional[str] = None,
+        clear: bool = False,
+    ) -> Any:
+        args = ["-l", str(limit)]
+        if query:
+            args.append(query)
+        if status:
+            args.extend(["--status", status])
+        if clear:
+            args.append("--clear")
+        return self._call("history", args)
+
+    def doctor(self) -> Dict[str, Any]:
+        return self._call("doctor", [])
+
+    def config(
+        self,
+        *,
+        get: Optional[str] = None,
+        set_key: Optional[str] = None,
+        set_value: Optional[str] = None,
+        preset: Optional[str] = None,
+        backend: Optional[str] = None,
+        onnx_model: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        embedding_endpoint: Optional[str] = None,
+        reranker: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        entity_extraction: Optional[str] = None,
+        dry_run: bool = False,
+        test: bool = False,
+        yes: bool = False,
+        reset: bool = False,
+        reload: bool = False,
+    ) -> Dict[str, Any]:
+        args: List[str] = []
+        if reload:
+            args.append("reload")
+        elif reset:
+            args.append("reset")
+        elif get:
+            args.extend(["get", get])
+        elif set_key is not None and set_value is not None:
+            args.extend(["set", set_key, set_value])
+        if preset:
+            args.extend(["--preset", preset])
+        if backend:
+            args.extend(["--backend", backend])
+        if onnx_model:
+            args.extend(["--onnx-model", onnx_model])
+        if embedding_model:
+            args.extend(["--embedding-model", embedding_model])
+        if embedding_endpoint:
+            args.extend(["--embedding-endpoint", embedding_endpoint])
+        if reranker:
+            args.extend(["--answer-model", reranker])
+        if endpoint:
+            args.extend(["--endpoint", endpoint])
+        if entity_extraction:
+            args.extend(["--entity-extraction", entity_extraction])
+        if dry_run:
+            args.append("--dry-run")
+        if test:
+            args.append("--test")
+        if yes:
+            args.append("--yes")
+        return self._call("config", args)
+
+    def setup(
+        self,
+        *,
+        preset: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        entity_extraction: Optional[str] = None,
+        dry_run: bool = False,
+        yes: bool = False,
+    ) -> Dict[str, Any]:
+        args: List[str] = []
+        if preset:
+            args.extend(["--preset", preset])
+        if endpoint:
+            args.extend(["--endpoint", endpoint])
+        if model:
+            args.extend(["--model", model])
+        if api_key:
+            args.extend(["--api-key", api_key])
+        if entity_extraction:
+            args.extend(["--entity-extraction", entity_extraction])
+        if dry_run:
+            args.append("--dry-run")
+        if yes:
+            args.append("--yes")
+        return self._call("setup", args)
+
+    def model(
+        self,
+        provider_or_model: Optional[str] = None,
+        *,
+        api_key: Optional[str] = None,
+        endpoint: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        args: List[str] = []
+        if provider_or_model:
+            args.append(provider_or_model)
+        if api_key:
+            args.extend(["--api-key", api_key])
+        if endpoint:
+            args.extend(["--endpoint", endpoint])
+        return self._call("model", args)

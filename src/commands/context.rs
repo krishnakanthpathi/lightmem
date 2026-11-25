@@ -8,12 +8,37 @@ pub fn open_controller(
     global: bool,
     connection: Option<&ResolvedConnection>,
 ) -> Result<LightMem> {
+    open_controller_with_session(db_path, global, connection, None)
+}
+
+pub fn open_controller_with_session(
+    db_path: Option<&Path>,
+    global: bool,
+    connection: Option<&ResolvedConnection>,
+    session: Option<&str>,
+) -> Result<LightMem> {
     if let Some(connection) = connection {
         return LightMem::open_resolved(connection);
     }
-    if let Some(path) = db_path {
-        let config = LightMemConfig::try_load()?;
-        LightMem::open_at(path, config)
+    let resolved_path = db_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+    let config = LightMemConfig::try_load()?;
+    if let Some(sid) = session.map(str::trim).filter(|s| !s.is_empty()) {
+        lightmem::models::identity::validate_id(sid)?;
+        let context = lightmem::MemoryContext {
+            connection_id: "default".to_string(),
+            user_id: "default".to_string(),
+            agent_id: "default".to_string(),
+            harness_id: "cli".to_string(),
+            project_id: None,
+            scope: lightmem::MemoryScope::User,
+            session_id: Some(sid.to_string()),
+        };
+        return LightMem::open_at_with_context(&resolved_path, config, context);
+    }
+    if db_path.is_some() {
+        LightMem::open_at(&resolved_path, config)
     } else {
         LightMem::open_default(global)
     }
@@ -41,7 +66,11 @@ pub fn remove_db_files(db_path: &Path) {
     }
 }
 
-pub fn handle_remote_network_error(remote_url: &str, err: &anyhow::Error, json: bool) -> ! {
+pub fn handle_remote_network_error(
+    remote_url: &str,
+    err: &anyhow::Error,
+    json: bool,
+) -> anyhow::Error {
     let err_str = format!("{err:#}");
     let is_auth = err_str.contains("401")
         || err_str.contains("Unauthorized")
@@ -67,7 +96,7 @@ pub fn handle_remote_network_error(remote_url: &str, err: &anyhow::Error, json: 
             })
         };
         eprintln!("{payload}");
-        std::process::exit(1);
+        return AlreadyHandledError::new(err_str).into();
     }
 
     if is_auth {
@@ -146,7 +175,7 @@ pub fn handle_remote_network_error(remote_url: &str, err: &anyhow::Error, json: 
         );
         eprintln!();
     }
-    std::process::exit(1);
+    AlreadyHandledError::new(err_str).into()
 }
 
 pub fn open_file_in_default_app(path: &Path) -> Result<()> {
@@ -183,11 +212,17 @@ pub fn open_files_in_default_app(paths: &[PathBuf]) {
 }
 
 #[derive(Debug)]
-pub struct AlreadyHandledError;
+pub struct AlreadyHandledError(pub String);
+
+impl AlreadyHandledError {
+    pub fn new(msg: impl Into<String>) -> Self {
+        Self(msg.into())
+    }
+}
 
 impl std::fmt::Display for AlreadyHandledError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "")
+        write!(f, "{}", self.0)
     }
 }
 

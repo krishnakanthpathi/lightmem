@@ -9,7 +9,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use super::context::open_controller;
+use super::context::{open_controller, AlreadyHandledError};
 use crate::{terminal, Cli, IdentityCommand};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -72,16 +72,37 @@ pub fn handle_identity(action: &IdentityCommand, json: bool, default_db: PathBuf
         }
         IdentityCommand::UserAdd { id, name } => {
             let value = serde_json::to_value(registry.add_user(id, name.as_deref())?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_identity_entry("Registered user", &value, json)?;
+        }
+        IdentityCommand::UserRemove { id } => {
+            let removed = registry.remove_user(id)?;
+            CliView::render_identity_removed("user", id, removed, json)?;
+            if !removed {
+                return Err(AlreadyHandledError::new(format!("User '{}' not found", id)).into());
+            }
         }
         IdentityCommand::AgentAdd { id, user, name } => {
             let value = serde_json::to_value(registry.add_agent(id, user, name.as_deref())?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_identity_entry("Registered agent", &value, json)?;
+        }
+        IdentityCommand::AgentRemove { id } => {
+            let removed = registry.remove_agent(id)?;
+            CliView::render_identity_removed("agent", id, removed, json)?;
+            if !removed {
+                return Err(AlreadyHandledError::new(format!("Agent '{}' not found", id)).into());
+            }
         }
         IdentityCommand::HarnessAdd { id, path, name } => {
             let value =
                 serde_json::to_value(registry.add_harness(id, path.clone(), name.as_deref())?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_identity_entry("Registered harness", &value, json)?;
+        }
+        IdentityCommand::HarnessRemove { id } => {
+            let removed = registry.remove_harness(id)?;
+            CliView::render_identity_removed("harness", id, removed, json)?;
+            if !removed {
+                return Err(AlreadyHandledError::new(format!("Harness '{}' not found", id)).into());
+            }
         }
         IdentityCommand::ConnectionAdd {
             id,
@@ -99,15 +120,42 @@ pub fn handle_identity(action: &IdentityCommand, json: bool, default_db: PathBuf
                 project.clone(),
                 memory_scope.clone(),
             )?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_identity_entry("Registered connection", &value, json)?;
+        }
+        IdentityCommand::ConnectionUpdate {
+            id,
+            project,
+            clear_project,
+            memory_scope,
+        } => {
+            let proj_arg = if *clear_project {
+                Some(None)
+            } else {
+                project.as_ref().map(|p| Some(p.clone()))
+            };
+            let value = serde_json::to_value(registry.update_connection(
+                id,
+                memory_scope.clone(),
+                proj_arg,
+            )?)?;
+            CliView::render_identity_entry("Updated connection", &value, json)?;
+        }
+        IdentityCommand::ConnectionRemove { id } => {
+            let removed = registry.remove_connection(id)?;
+            CliView::render_identity_removed("connection", id, removed, json)?;
+            if !removed {
+                return Err(
+                    AlreadyHandledError::new(format!("Connection '{}' not found", id)).into(),
+                );
+            }
         }
         IdentityCommand::List { kind } => {
             let value = registry.list(kind)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_identity_list(kind, &value, json)?;
         }
         IdentityCommand::Show { id } => {
             let value = serde_json::to_value(registry.resolve(id, None, None)?)?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            CliView::render_identity_entry("Connection", &value, json)?;
         }
     }
     Ok(())
@@ -181,6 +229,7 @@ pub fn handle_serve(
     daemon: bool,
     stop: bool,
     status: bool,
+    json: bool,
     effective_db: Option<&Path>,
     global: bool,
     connection: Option<&ResolvedConnection>,
@@ -191,10 +240,17 @@ pub fn handle_serve(
 
     if stop {
         if !pid_file.exists() {
-            println!(
-                "{}",
-                "LightMem server daemon is not running (no PID file found).".dimmed()
-            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "status": "not_running", "pid": null })
+                );
+            } else {
+                println!(
+                    "{}",
+                    "LightMem server daemon is not running (no PID file found).".dimmed()
+                );
+            }
             return Ok(());
         }
         let content = std::fs::read_to_string(&pid_file)?;
@@ -210,11 +266,15 @@ pub fn handle_serve(
         if is_pid_alive(pid) {
             if terminate_pid(pid) {
                 let _ = std::fs::remove_file(&pid_file);
-                println!(
-                    "  {} LightMem server daemon stopped (PID: {}).",
-                    "✓".green().bold(),
-                    pid
-                );
+                if json {
+                    println!("{}", serde_json::json!({ "status": "stopped", "pid": pid }));
+                } else {
+                    println!(
+                        "  {} LightMem server daemon stopped (PID: {}).",
+                        "✓".green().bold(),
+                        pid
+                    );
+                }
             } else {
                 anyhow::bail!(
                     "Failed to terminate LightMem server process with PID {}",
@@ -223,20 +283,34 @@ pub fn handle_serve(
             }
         } else {
             let _ = std::fs::remove_file(&pid_file);
-            println!(
-                "{}",
-                format!(
-                    "LightMem server daemon was not running (cleaned up stale PID file: {}).",
-                    pid
-                )
-                .dimmed()
-            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "status": "not_running", "stale_pid": pid })
+                );
+            } else {
+                println!(
+                    "{}",
+                    format!(
+                        "LightMem server daemon was not running (cleaned up stale PID file: {}).",
+                        pid
+                    )
+                    .dimmed()
+                );
+            }
         }
         return Ok(());
     }
 
     if status {
         if !pid_file.exists() {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "status": "stopped", "running": false, "pid": null })
+                );
+                return Ok(());
+            }
             println!(
                 "  {}  {}",
                 "❖".red().bold(),
@@ -273,6 +347,22 @@ pub fn handle_serve(
                 .timeout(std::time::Duration::from_millis(500))
                 .call()
                 .is_ok();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "running",
+                        "running": true,
+                        "healthy": responding,
+                        "pid": pid,
+                        "host": host_str,
+                        "port": port_num,
+                        "started_at": started,
+                        "log_file": LightMemConfig::config_dir().join("server.log"),
+                    })
+                );
+                return Ok(());
+            }
             println!(
                 "\n  {}  {}",
                 "❖".green().bold(),
@@ -330,6 +420,17 @@ pub fn handle_serve(
             println!("  {} Stop:          lmem serve --stop\n", "▸".dimmed());
         } else {
             let _ = std::fs::remove_file(&pid_file);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "stopped",
+                        "running": false,
+                        "stale_pid": pid,
+                    })
+                );
+                return Ok(());
+            }
             println!(
                 "  {}  {}",
                 "❖".red().bold(),
@@ -508,7 +609,9 @@ pub fn handle_serve(
                     "lmem serve --stop".yellow()
                 );
                 eprintln!();
-                std::process::exit(1);
+                return Err(
+                    AlreadyHandledError::new(format!("Port {} is already in use", port)).into(),
+                );
             }
             anyhow::bail!(
                 "LightMem server daemon failed to start (process exited immediately).\nLogs:\n{}",
@@ -910,8 +1013,16 @@ pub fn print_completions(shell: clap_complete::Shell) -> Result<()> {
             a.value_parser(PossibleValuesParser::new([
                 "demo",
                 "local",
-                "ollama-cloud",
+                "ollama",
                 "ollama-local",
+                "ollama-cloud",
+                "openai",
+                "openrouter",
+                "gemini",
+                "groq",
+                "deepseek",
+                "mistral",
+                "custom",
             ]))
         })
         .mut_arg("backend", |a| {
@@ -942,6 +1053,12 @@ pub fn print_completions(shell: clap_complete::Shell) -> Result<()> {
                 "ollama:qwen2.5:3b",
                 "ollama:qwen2.5:1.5b",
                 "ollama:llama3.2:1b",
+                "openai:gpt-4o-mini",
+                "gemini:gemini-1.5-flash",
+                "groq:llama-3.3-70b-versatile",
+                "openrouter:anthropic/claude-3.5-sonnet",
+                "deepseek:deepseek-chat",
+                "mistral:mistral-small-latest",
                 "top1",
             ]))
         })
@@ -951,8 +1068,16 @@ pub fn print_completions(shell: clap_complete::Shell) -> Result<()> {
             a.value_parser(PossibleValuesParser::new([
                 "demo",
                 "local",
+                "ollama",
                 "ollama-local",
                 "ollama-cloud",
+                "openai",
+                "openrouter",
+                "gemini",
+                "groq",
+                "deepseek",
+                "mistral",
+                "custom",
             ]))
         })
         .mut_arg("model", |a| {
@@ -961,6 +1086,12 @@ pub fn print_completions(shell: clap_complete::Shell) -> Result<()> {
                 "tinyroberta-squad2",
                 "ollama",
                 "ollama:qwen2.5:3b",
+                "openai:gpt-4o-mini",
+                "gemini:gemini-1.5-flash",
+                "groq:llama-3.3-70b-versatile",
+                "openrouter:anthropic/claude-3.5-sonnet",
+                "deepseek:deepseek-chat",
+                "mistral:mistral-small-latest",
                 "top1",
             ]))
         })
@@ -971,6 +1102,12 @@ pub fn print_completions(shell: clap_complete::Shell) -> Result<()> {
                 "onnx",
                 "ollama",
                 "ollama:bonsai-2:2b",
+                "openai:gpt-4o-mini",
+                "gemini:gemini-1.5-flash",
+                "groq:llama-3.3-70b-versatile",
+                "openrouter:anthropic/claude-3.5-sonnet",
+                "deepseek:deepseek-chat",
+                "mistral:mistral-small-latest",
                 "top1",
                 "minilm-squad2",
                 "tinyroberta-squad2",
@@ -982,6 +1119,8 @@ pub fn print_completions(shell: clap_complete::Shell) -> Result<()> {
             a.value_parser(PossibleValuesParser::new([
                 "onnx",
                 "ollama",
+                "openai:gpt-4o-mini",
+                "gemini:gemini-1.5-flash",
                 "top1",
                 "minilm-squad2",
                 "tinyroberta-squad2",

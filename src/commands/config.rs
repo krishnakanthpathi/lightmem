@@ -8,47 +8,7 @@ use super::context::{open_controller, remove_db_files};
 use crate::terminal;
 
 pub fn parse_reranker_setting(raw: &str) -> Result<String> {
-    let lower = raw.trim().to_lowercase();
-    if let Some(model) = lower.strip_prefix("onnx:") {
-        anyhow::ensure!(
-            matches!(
-                model,
-                "minilm-squad2" | "tinyroberta-squad2" | "minilm" | "tinyroberta"
-            ),
-            "Unknown ONNX answer model: {}",
-            model
-        );
-    }
-    anyhow::ensure!(
-        matches!(
-            lower.as_str(),
-            "onnx"
-                | "qa"
-                | "precision"
-                | "ollama"
-                | "openai"
-                | "openrouter"
-                | "gemini"
-                | "groq"
-                | "deepseek"
-                | "mistral"
-                | "llm"
-                | "top1"
-                | "custom"
-                | "minilm-squad2"
-                | "tinyroberta-squad2"
-        ) || lower.starts_with("onnx:")
-            || lower.starts_with("custom:")
-            || lower.contains(':'),
-        "Invalid answer engine '{}'. Use minilm-squad2, tinyroberta-squad2, top1, or a model spec like ollama:<model>, openai:<model>, openrouter:<model>, gemini:<model>, groq:<model>, custom:<model>.",
-        raw
-    );
-    let normalized = LightMemConfig::normalize_reranker(raw, None);
-    anyhow::ensure!(
-        !normalized.ends_with(':'),
-        "Answer engine needs a model after ':'"
-    );
-    Ok(normalized)
+    LightMemConfig::parse_reranker_setting(raw)
 }
 
 /// Read the selected vault without creating it or applying schema migrations.
@@ -365,26 +325,9 @@ pub fn handle_model(
                 cfg.apply_preset("custom")?;
             }
             _ => {
-                if let Some((prov, specific_model)) = target.split_once(':') {
-                    let prov_lower = prov.trim().to_lowercase();
-                    if matches!(
-                        prov_lower.as_str(),
-                        "openai"
-                            | "gemini"
-                            | "groq"
-                            | "openrouter"
-                            | "deepseek"
-                            | "mistral"
-                            | "ollama"
-                    ) {
-                        cfg.apply_preset(&prov_lower)?;
-                        cfg.reranker = format!("{}:{}", prov_lower, specific_model.trim());
-                    } else {
-                        cfg.reranker = parse_reranker_setting(&target)?;
-                    }
-                } else {
-                    cfg.reranker = parse_reranker_setting(&target)?;
-                }
+                let (_, prev_default_url, _) = cfg.active_provider();
+                cfg.reranker = parse_reranker_setting(&target)?;
+                cfg.align_provider_endpoint(Some(prev_default_url), endpoint.as_deref());
             }
         }
     }
@@ -437,6 +380,8 @@ pub fn handle_model(
 pub fn handle_config(
     reload: bool,
     action: Option<String>,
+    action_key: Option<String>,
+    action_value: Option<String>,
     edit: bool,
     preset: Option<String>,
     backend: Option<String>,
@@ -461,6 +406,12 @@ pub fn handle_config(
     global: bool,
     connection: Option<&ResolvedConnection>,
 ) -> Result<()> {
+    let path = connection.map(|c| c.db_path.clone()).unwrap_or_else(|| {
+        effective_db
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| LightMemConfig::resolve_db_path(global))
+    });
+
     let is_reload = reload
         || action
             .as_deref()
@@ -479,15 +430,105 @@ pub fn handle_config(
         }
         return Ok(());
     }
+
     if let Some(act) = action.as_deref() {
-        anyhow::bail!(
-            "Unknown action '{}'. Did you mean 'lmem config reload' or 'lmem config --help'?",
-            act
-        );
+        let lower_act = act.trim().to_lowercase();
+        match lower_act.as_str() {
+            "path" => {
+                let cfg_dir = LightMemConfig::config_dir();
+                let cfg_file = LightMemConfig::config_file();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "config_dir": cfg_dir,
+                            "config_file": cfg_file,
+                            "db_path": path,
+                        })
+                    );
+                } else {
+                    println!("Config dir:  {}", cfg_dir.display());
+                    println!("Config file: {}", cfg_file.display());
+                    println!("Active DB:   {}", path.display());
+                }
+                return Ok(());
+            }
+            "get" => {
+                let key = action_key.context("Usage: lmem config get <KEY>")?;
+                let cfg_loaded = LightMemConfig::try_load()?;
+                let val = cfg_loaded.get_field(&key)?;
+                if json {
+                    println!("{}", serde_json::json!({ "key": key, "value": val }));
+                } else if let Some(s) = val.as_str() {
+                    println!("{s}");
+                } else {
+                    println!("{val}");
+                }
+                return Ok(());
+            }
+            "set" => {
+                let key = action_key.context("Usage: lmem config set <KEY> <VALUE>")?;
+                let val = action_value.context("Usage: lmem config set <KEY> <VALUE>")?;
+                let previous = LightMemConfig::try_load()?;
+                let mut cfg = previous.clone();
+                cfg.set_field(&key, &val)?;
+                terminal::validate(&cfg)?;
+                if dry_run {
+                    let plan = configuration_plan(&previous, &cfg, &path)?;
+                    return CliView::render_configuration_plan(&cfg, &plan, json);
+                }
+                if !apply_configuration(&previous, &cfg, &path, yes, json)? {
+                    return Ok(());
+                }
+                if json {
+                    CliView::render_config(&cfg, true, true, effective_db, global)?;
+                } else {
+                    terminal::render_config(&cfg, true, effective_db, global)?;
+                }
+                return Ok(());
+            }
+            "reset" => {
+                let previous = LightMemConfig::try_load()?;
+                let cfg = LightMemConfig::default();
+                terminal::validate(&cfg)?;
+                if dry_run {
+                    let plan = configuration_plan(&previous, &cfg, &path)?;
+                    return CliView::render_configuration_plan(&cfg, &plan, json);
+                }
+                if !yes {
+                    if !json && io::stdin().is_terminal() && io::stderr().is_terminal() {
+                        anyhow::ensure!(
+                            terminal::confirm(
+                                "Reset shared configuration to defaults? (Vault memories are preserved)",
+                                false,
+                            )?,
+                            "Reset cancelled. Configuration was not changed."
+                        );
+                    } else {
+                        anyhow::bail!(
+                            "Refusing to reset configuration without confirmation. Pass --yes to proceed."
+                        );
+                    }
+                }
+                if !apply_configuration(&previous, &cfg, &path, yes, json)? {
+                    return Ok(());
+                }
+                if json {
+                    CliView::render_config(&cfg, true, true, effective_db, global)?;
+                } else {
+                    terminal::render_config(&cfg, true, effective_db, global)?;
+                }
+                return Ok(());
+            }
+            _ => {
+                anyhow::bail!(
+                    "Unknown action '{}'. Valid actions: reload, refresh, path, get <KEY>, set <KEY> <VALUE>, reset.",
+                    act
+                );
+            }
+        }
     }
-    let path = effective_db
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
+
     let cfg_loaded = LightMemConfig::try_load()?;
     if edit {
         anyhow::ensure!(
@@ -562,6 +603,7 @@ pub fn handle_config(
         return Ok(());
     }
 
+    let had_download = download.is_some();
     if let Some(ref dl) = download {
         match dl.to_lowercase().as_str() {
             "all" => {
@@ -628,14 +670,7 @@ pub fn handle_config(
         changed = true;
     }
     if let Some(mode) = entity_extraction {
-        let trimmed = mode.trim();
-        let normalized =
-            if trimmed.eq_ignore_ascii_case("off") || trimmed.eq_ignore_ascii_case("false") {
-                "off".to_string()
-            } else {
-                "on".to_string()
-            };
-        cfg.entity_extraction = normalized;
+        cfg.entity_extraction = LightMemConfig::parse_entity_extraction(&mode)?;
         changed = true;
     }
     if let Some(ref key) = ollama_api_key {
@@ -664,7 +699,11 @@ pub fn handle_config(
         cfg.backend = b.clone();
         changed = true;
     }
+    let onnx_model_was_set = onnx_model.is_some();
     if let Some(om) = onnx_model {
+        if cfg.backend == "onnx" && model.is_none() {
+            cfg.embedding_model = om.clone();
+        }
         cfg.onnx_model = Some(om);
         changed = true;
     }
@@ -681,8 +720,9 @@ pub fn handle_config(
         changed = true;
     }
     if let Some(m) = model {
-        let lower = m.trim().to_lowercase();
-        let is_local_switch = lower == "local" || lower == "offline" || lower == "onnx";
+        let trimmed = m.trim();
+        anyhow::ensure!(!trimmed.is_empty(), "Embedding model cannot be blank");
+        let lower = trimmed.to_lowercase();
         let has_provider_prefix = lower.starts_with("openai:")
             || lower.starts_with("openrouter:")
             || lower.starts_with("gemini:")
@@ -691,38 +731,34 @@ pub fn handle_config(
             || lower.starts_with("mistral:")
             || lower.starts_with("ollama:")
             || lower.starts_with("llm:")
-            || lower.starts_with("onnx:");
+            || lower.starts_with("custom:")
+            || lower.starts_with("onnx:")
+            || matches!(
+                lower.as_str(),
+                "top1" | "minilm-squad2" | "tinyroberta-squad2"
+            );
 
-        if is_local_switch {
-            cfg.apply_preset("local")?;
-            changed = true;
-        } else if has_provider_prefix
-            || (reranker.is_none()
-                && cfg.backend != "ollama"
-                && backend.as_deref() != Some("ollama"))
+        if reranker.is_none()
+            && has_provider_prefix
+            && cfg.backend != "ollama"
+            && backend.as_deref() != Some("ollama")
         {
-            cfg.reranker = parse_reranker_setting(&m)?;
-            if cfg.entity_extraction != "off" && !cfg.entity_extraction.is_empty() {
-                cfg.entity_extraction = "on".to_string();
-            }
+            let (_, prev_default_url, _) = cfg.active_provider();
+            cfg.reranker = parse_reranker_setting(trimmed)?;
+            cfg.align_provider_endpoint(Some(prev_default_url), url.as_deref());
             changed = true;
         } else {
-            cfg.embedding_model = m;
+            cfg.embedding_model = trimmed.to_string();
+            if cfg.backend == "onnx" && !onnx_model_was_set {
+                cfg.onnx_model = Some(trimmed.to_string());
+            }
             changed = true;
         }
     }
     if let Some(r) = reranker {
-        if let Some((prov, _)) = r.split_once(':') {
-            let prov_lower = prov.trim().to_lowercase();
-            if matches!(
-                prov_lower.as_str(),
-                "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
-            ) && url.is_none()
-            {
-                let _ = cfg.apply_preset(&prov_lower);
-            }
-        }
+        let (_, prev_default_url, _) = cfg.active_provider();
         cfg.reranker = parse_reranker_setting(&r)?;
+        cfg.align_provider_endpoint(Some(prev_default_url), url.as_deref());
         changed = true;
     }
 
@@ -738,19 +774,11 @@ pub fn handle_config(
     if let Some(k) = api_key {
         let trimmed = k.trim();
         let is_clear = trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none");
-        if ollama_api_key.is_some() || remote.is_some() || cfg.remote_url.is_some() {
-            cfg.api_key = if is_clear {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
+        cfg.api_key = if is_clear {
+            None
         } else {
-            cfg.ollama_api_key = if is_clear {
-                None
-            } else {
-                Some(trimmed.to_string())
-            };
-        }
+            Some(trimmed.to_string())
+        };
         changed = true;
     }
     if clear_remote {
@@ -767,8 +795,14 @@ pub fn handle_config(
     if changed && !apply_configuration(&previous, &cfg, &path, yes, json)? {
         return Ok(());
     }
+    if !changed && had_download && !json {
+        println!(
+            "\n  {} Downloaded ONNX model assets.",
+            CliView::emerald_bold("✓")
+        );
+    }
     if json {
-        CliView::render_config(&cfg, changed, true, effective_db, global)?;
+        CliView::render_config(&cfg, changed || had_download, true, effective_db, global)?;
     } else {
         terminal::render_config(&cfg, changed, effective_db, global)?;
     }
@@ -804,11 +838,13 @@ pub fn handle_setup(
         );
         cfg = terminal::setup_configuration(&previous)?;
     }
-    if let Some(url) = url {
-        cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
+    if let Some(ref u) = url {
+        cfg.ollama_url = LightMemConfig::normalize_ollama_url(u);
     }
     if let Some(model) = model {
+        let (_, prev_default_url, _) = cfg.active_provider();
         cfg.reranker = parse_reranker_setting(&model)?;
+        cfg.align_provider_endpoint(Some(prev_default_url), url.as_deref());
     }
     if let Some(key) = api_key {
         let trimmed = key.trim();
@@ -819,14 +855,7 @@ pub fn handle_setup(
         };
     }
     if let Some(mode) = entity_extraction {
-        let trimmed = mode.trim();
-        let normalized =
-            if trimmed.eq_ignore_ascii_case("off") || trimmed.eq_ignore_ascii_case("false") {
-                "off".to_string()
-            } else {
-                "on".to_string()
-            };
-        cfg.entity_extraction = normalized;
+        cfg.entity_extraction = LightMemConfig::parse_entity_extraction(&mode)?;
     }
     let path = effective_db
         .map(Path::to_path_buf)

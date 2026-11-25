@@ -1,17 +1,21 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
-use lightmem::{encode_base64, CliView, MemoryType, MultimodalInput, ResolvedConnection};
+use lightmem::{
+    encode_base64, CliView, EntityFilter, MemoryType, MultimodalInput, ResolvedConnection,
+};
 use std::path::{Path, PathBuf};
 
 use super::config::migrate_embeddings;
 use super::context::{open_controller, open_files_in_default_app, AlreadyHandledError};
+use crate::parse_tag_list;
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_recall(
     query: String,
     image: Option<PathBuf>,
     category: Option<MemoryType>,
-    tag: Option<String>,
+    tag: Vec<String>,
+    entity: Option<EntityFilter>,
     media: Option<String>,
     as_of: Option<DateTime<Utc>>,
     date: Option<NaiveDate>,
@@ -22,11 +26,13 @@ pub fn handle_recall(
     save_to: Option<PathBuf>,
     path: bool,
     open: bool,
+    session: Option<&str>,
     json: bool,
     effective_db: Option<&Path>,
     global: bool,
     connection: Option<&ResolvedConnection>,
 ) -> Result<()> {
+    let tags = parse_tag_list(&tag);
     if precision {
         anyhow::ensure!(
             image.is_none()
@@ -51,11 +57,22 @@ pub fn handle_recall(
             !query.trim().is_empty(),
             "Search query cannot be blank with --precision"
         );
-        let result = match lm.answer_with_options(&query, cat, as_of_dt, date, limit, None) {
+        let result = match lm.answer_with_filters(
+            &query,
+            cat,
+            as_of_dt,
+            date,
+            &tags,
+            session,
+            entity.as_ref(),
+            limit,
+            None,
+        ) {
             Ok(ans) => ans,
             Err(err) => {
+                let msg = err.to_string();
                 CliView::render_llm_or_error(&err, json);
-                return Err(AlreadyHandledError.into());
+                return Err(AlreadyHandledError::new(msg).into());
             }
         };
         CliView::render_answer(&result, json)?;
@@ -84,11 +101,14 @@ pub fn handle_recall(
         } else {
             MultimodalInput::text_only(&query)
         };
-        let mut results = lm.recall_multimodal_expanded(
+        let mut results = lm.recall_multimodal_filtered(
             &mm_input,
             cat,
             as_of_dt,
             date,
+            &tags,
+            session,
+            entity.as_ref(),
             fetch_limit,
             min_similarity,
             multi_hop,
@@ -105,15 +125,6 @@ pub fn handle_recall(
                         }))
             });
             results.truncate(limit);
-        }
-        if let Some(ref t) = tag {
-            let clean_t = t.trim().to_lowercase();
-            results.retain(|r| {
-                r.memory
-                    .tags
-                    .iter()
-                    .any(|existing| existing.eq_ignore_ascii_case(&clean_t))
-            });
         }
         let ids: Vec<String> = results.iter().map(|r| r.memory.id.clone()).collect();
         let display_query = if query.trim().is_empty() {

@@ -1108,6 +1108,97 @@ impl EntityRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntitySummary {
+    pub name: String,
+    pub val: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntityFilter {
+    pub name: String,
+    pub val: Option<String>,
+}
+
+impl EntityFilter {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("Entity filter cannot be empty (use name or name=val)".to_string());
+        }
+        if let Some((name, val)) = trimmed.split_once('=') {
+            let n = name.trim().to_lowercase();
+            let v = val.trim();
+            if n.is_empty() || v.is_empty() {
+                return Err("Entity filter with '=' must be '<name>=<value>'".to_string());
+            }
+            Ok(Self {
+                name: n,
+                val: Some(v.to_string()),
+            })
+        } else {
+            Ok(Self {
+                name: trimmed.to_lowercase(),
+                val: None,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ListSort {
+    #[default]
+    Newest,
+    Oldest,
+    Updated,
+    Confidence,
+}
+
+impl ListSort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ListSort::Newest => "newest",
+            ListSort::Oldest => "oldest",
+            ListSort::Updated => "updated",
+            ListSort::Confidence => "confidence",
+        }
+    }
+
+    pub fn order_by_sql(&self) -> &'static str {
+        match self {
+            ListSort::Newest => "ORDER BY created_at DESC, id ASC",
+            ListSort::Oldest => "ORDER BY created_at ASC, id ASC",
+            ListSort::Updated => "ORDER BY updated_at DESC, id ASC",
+            ListSort::Confidence => "ORDER BY confidence DESC, created_at DESC, id ASC",
+        }
+    }
+}
+
+impl fmt::Display for ListSort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for ListSort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "newest" | "created" => Ok(ListSort::Newest),
+            "oldest" => Ok(ListSort::Oldest),
+            "updated" => Ok(ListSort::Updated),
+            "confidence" => Ok(ListSort::Confidence),
+            other => Err(format!(
+                "Unknown sort '{}'. Must be newest, oldest, updated, or confidence",
+                other
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1185,6 +1276,52 @@ impl MemoryRecord {
             out.push_str(&format!("\n\nTags: {}", self.tags.join(", ")));
         }
         out
+    }
+
+    pub fn matches_metadata_filters(
+        &self,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+    ) -> bool {
+        if !tags.is_empty() {
+            for req in tags {
+                let clean_req = req.trim();
+                if !clean_req.is_empty()
+                    && !self
+                        .tags
+                        .iter()
+                        .any(|mt| mt.trim().eq_ignore_ascii_case(clean_req))
+                {
+                    return false;
+                }
+            }
+        }
+        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let matches_sid = self
+                .context
+                .as_ref()
+                .and_then(|c| c.session_id.as_deref())
+                .map(|s| s == sid)
+                .unwrap_or(false);
+            if !matches_sid {
+                return false;
+            }
+        }
+        if let Some(ef) = entity {
+            let matches_ent = self.entities.iter().any(|e| {
+                e.name.eq_ignore_ascii_case(&ef.name)
+                    && ef
+                        .val
+                        .as_deref()
+                        .map(|v| e.val.eq_ignore_ascii_case(v))
+                        .unwrap_or(true)
+            });
+            if !matches_ent {
+                return false;
+            }
+        }
+        true
     }
 }
 

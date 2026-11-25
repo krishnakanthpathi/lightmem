@@ -285,6 +285,103 @@ impl IdentityRegistry {
         self.resolve_context(context)
     }
 
+    pub fn update_connection(
+        &self,
+        id: &str,
+        scope: Option<MemoryScope>,
+        project: Option<Option<String>>,
+    ) -> Result<ResolvedConnection> {
+        validate_id(id)?;
+        let raw: String = self
+            .conn
+            .query_row("SELECT context FROM connections WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .with_context(|| format!("Unknown connection '{id}'"))?;
+        let mut context: MemoryContext = serde_json::from_str(&raw)?;
+        if let Some(scope) = scope {
+            context.scope = scope;
+        }
+        if let Some(proj_opt) = project {
+            if let Some(ref p) = proj_opt {
+                validate_id(p)?;
+            }
+            context.project_id = proj_opt;
+        }
+        let resolved = self.resolve_context(context.clone())?;
+        self.conn.execute(
+            "UPDATE connections SET context=?1 WHERE id=?2",
+            params![serde_json::to_string(&context)?, id],
+        )?;
+        Ok(resolved)
+    }
+
+    pub fn remove_connection(&self, id: &str) -> Result<bool> {
+        validate_id(id)?;
+        let rows = self
+            .conn
+            .execute("DELETE FROM connections WHERE id=?1", [id])?;
+        Ok(rows > 0)
+    }
+
+    pub fn remove_user(&self, id: &str) -> Result<bool> {
+        validate_id(id)?;
+        let agent_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM agents WHERE user_id=?1", [id], |r| {
+                    r.get(0)
+                })?;
+        anyhow::ensure!(
+            agent_count == 0,
+            "Cannot remove user '{}': {} agent(s) still reference it",
+            id,
+            agent_count
+        );
+        let in_connections = self
+            .list_resolved_connections()?
+            .into_iter()
+            .any(|c| c.context.user_id == id);
+        anyhow::ensure!(
+            !in_connections,
+            "Cannot remove user '{}': still referenced by an existing connection",
+            id
+        );
+        let rows = self.conn.execute("DELETE FROM users WHERE id=?1", [id])?;
+        Ok(rows > 0)
+    }
+
+    pub fn remove_agent(&self, id: &str) -> Result<bool> {
+        validate_id(id)?;
+        let in_connections = self
+            .list_resolved_connections()?
+            .into_iter()
+            .any(|c| c.context.agent_id == id);
+        anyhow::ensure!(
+            !in_connections,
+            "Cannot remove agent '{}': still referenced by an existing connection",
+            id
+        );
+        let rows = self.conn.execute("DELETE FROM agents WHERE id=?1", [id])?;
+        Ok(rows > 0)
+    }
+
+    pub fn remove_harness(&self, id: &str) -> Result<bool> {
+        validate_id(id)?;
+        let in_connections = self
+            .list_resolved_connections()?
+            .into_iter()
+            .any(|c| c.context.harness_id == id);
+        anyhow::ensure!(
+            !in_connections,
+            "Cannot remove harness '{}': still referenced by an existing connection",
+            id
+        );
+        let rows = self
+            .conn
+            .execute("DELETE FROM harnesses WHERE id=?1", [id])?;
+        Ok(rows > 0)
+    }
+
     pub fn resolve(
         &self,
         id: &str,
@@ -426,5 +523,57 @@ impl IdentityRegistry {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::to_value(entries)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identity_update_and_reference_guarded_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = IdentityRegistry::open(dir.path().to_path_buf()).unwrap();
+
+        reg.add_user("alice", Some("Alice")).unwrap();
+        reg.add_agent("coder", "alice", Some("Coder")).unwrap();
+        reg.add_harness("custom_harness", None, Some("CustomHarness"))
+            .unwrap();
+        reg.add_connection(
+            "c1",
+            "alice",
+            "coder",
+            "custom_harness",
+            Some("proj1".to_string()),
+            MemoryScope::Project,
+        )
+        .unwrap();
+
+        // Removing user, agent, or harness while still referenced must fail
+        assert!(reg.remove_user("alice").is_err());
+        assert!(reg.remove_agent("coder").is_err());
+        assert!(reg.remove_harness("custom_harness").is_err());
+
+        // Updating connection works and rejects clearing project while project-scoped
+        assert!(reg.update_connection("c1", None, Some(None)).is_err());
+        let updated = reg
+            .update_connection(
+                "c1",
+                Some(MemoryScope::Agent),
+                Some(Some("proj2".to_string())),
+            )
+            .unwrap();
+        assert_eq!(updated.context.project_id.as_deref(), Some("proj2"));
+        assert_eq!(updated.context.scope, MemoryScope::Agent);
+
+        let cleared_proj = reg.update_connection("c1", None, Some(None)).unwrap();
+        assert_eq!(cleared_proj.context.project_id, None);
+
+        // Removing in dependency order succeeds
+        assert!(reg.remove_connection("c1").unwrap());
+        assert!(reg.remove_agent("coder").unwrap());
+        assert!(reg.remove_harness("custom_harness").unwrap());
+        assert!(reg.remove_user("alice").unwrap());
+        assert!(!reg.remove_user("alice").unwrap());
     }
 }

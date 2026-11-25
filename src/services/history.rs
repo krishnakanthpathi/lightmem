@@ -216,6 +216,20 @@ impl HistoryService {
         Ok(deleted)
     }
 
+    fn is_secret_flag(flag: &str) -> bool {
+        matches!(
+            flag,
+            "--api-key"
+                | "--ollama-api-key"
+                | "--openai-api-key"
+                | "--model-api-key"
+                | "--remote-api-key"
+                | "--embedding-api-key"
+                | "--server-key"
+                | "--key"
+        )
+    }
+
     /// Sanitize CLI arguments to redact any secrets / API keys before storing.
     pub fn sanitize_args(args: &[String]) -> String {
         if args.is_empty() {
@@ -231,19 +245,11 @@ impl HistoryService {
                 skip_next = false;
                 continue;
             }
-            if arg == "--api-key"
-                || arg == "--ollama-api-key"
-                || arg == "--openai-api-key"
-                || arg == "--model-api-key"
-            {
+            if Self::is_secret_flag(arg) {
                 sanitized.push(arg.clone());
                 skip_next = true;
             } else if let Some((flag, _val)) = arg.split_once('=') {
-                if flag == "--api-key"
-                    || flag == "--ollama-api-key"
-                    || flag == "--openai-api-key"
-                    || flag == "--model-api-key"
-                {
+                if Self::is_secret_flag(flag) {
                     sanitized.push(format!("{flag}=[REDACTED]"));
                 } else if arg.contains(' ') || arg.contains('\t') {
                     sanitized.push(format!("\"{}\"", arg.replace('\"', "\\\"")));
@@ -284,10 +290,17 @@ mod tests {
             "lmem".to_string(),
             "config".to_string(),
             "--api-key=secret_pass".to_string(),
+            "--remote-api-key".to_string(),
+            "remote_tok".to_string(),
+            "--embedding-api-key=emb_tok".to_string(),
+            "--server-key".to_string(),
+            "srv_tok".to_string(),
+            "--key".to_string(),
+            "mod_tok".to_string(),
         ];
         assert_eq!(
             HistoryService::sanitize_args(&raw_eq),
-            "lmem config --api-key=[REDACTED]"
+            "lmem config --api-key=[REDACTED] --remote-api-key [REDACTED] --embedding-api-key=[REDACTED] --server-key [REDACTED] --key [REDACTED]"
         );
 
         let raw_quotes = vec![

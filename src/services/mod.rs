@@ -16,8 +16,9 @@ pub mod search;
 pub mod workspace;
 
 pub use api_server::{
-    serve_api, AnswerRequest, AttachmentPayload, ClearPayload, ForgetPayload, LinkRequest,
-    RecallRequest, RememberRequest, ServerOptions, UnlinkRequest,
+    serve_api, AnswerRequest, AttachmentPayload, AutolinkRequest, ClearPayload, ConflictsRequest,
+    ForgetPayload, LinkRequest, ObserveRequest, RecallRequest, RememberRequest, ServerOptions,
+    UnlinkRequest, UpdateRequest,
 };
 pub use bundle::{
     BundleAttachmentEntry, BundleImportResult, BundleManifest, BundleProgress, BundleService,
@@ -32,7 +33,7 @@ pub use embeddings::{
     cosine_similarity, EmbeddingProvider, HashEmbeddingProvider, MultimodalInput,
     OllamaEmbeddingProvider, OnnxEmbeddingProvider,
 };
-pub use exporter::Exporter;
+pub use exporter::{ExportFilter, Exporter};
 pub use graph_view::render_terminal;
 pub use history::{CommandHistoryEntry, HistoryService};
 pub use importer::{

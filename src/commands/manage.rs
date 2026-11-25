@@ -1,14 +1,17 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use lightmem::{
-    CliView, HistoryService, IdentityRegistry, LightMemConfig, MemoryStatus, MemoryType,
-    ResolvedConnection,
+    AttachmentInput, CliView, EntityFilter, HistoryService, IdentityRegistry, LightMemConfig,
+    ListSort, MemoryStatus, MemoryType, ResolvedConnection,
 };
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use super::config::migrate_embeddings;
-use super::context::{open_controller, open_files_in_default_app, remove_db_files};
+use super::context::{
+    open_controller, open_files_in_default_app, remove_db_files, AlreadyHandledError,
+};
+use crate::parse_tag_list;
 
 pub fn handle_status(json: bool, default_db: PathBuf) -> Result<()> {
     let registry = IdentityRegistry::open_default()?;
@@ -39,9 +42,11 @@ pub fn handle_context(
 #[allow(clippy::too_many_arguments)]
 pub fn handle_list(
     category: Option<MemoryType>,
-    tag: Option<String>,
+    tag: Vec<String>,
+    entity: Option<EntityFilter>,
     media: Option<String>,
-    status: MemoryStatus,
+    status: Option<MemoryStatus>,
+    sort: ListSort,
     as_of: Option<DateTime<Utc>>,
     date: Option<NaiveDate>,
     limit: usize,
@@ -49,6 +54,8 @@ pub fn handle_list(
     page: Option<usize>,
     save_to: Option<PathBuf>,
     path: bool,
+    open: bool,
+    session: Option<&str>,
     json: bool,
     effective_db: Option<&Path>,
     global: bool,
@@ -56,9 +63,9 @@ pub fn handle_list(
 ) -> Result<()> {
     let lm = open_controller(effective_db, global, connection)?;
     let cat = category;
-    let st = Some(status);
+    let st = status;
     let as_of_dt = as_of;
-    let filter_attachments = media.is_some() || tag.is_some() || path || save_to.is_some();
+    let tags = parse_tag_list(&tag);
 
     let effective_offset = if let Some(p) = page {
         anyhow::ensure!(p > 0 && limit > 0, "Page and limit must be positive");
@@ -66,33 +73,33 @@ pub fn handle_list(
     } else {
         offset
     };
-    let paginated = if filter_attachments {
-        let m = media.as_deref().or_else(|| {
-            if path || save_to.is_some() {
-                Some("any")
-            } else {
-                None
-            }
-        });
-        lm.list_filtered_with_tag(
-            cat,
-            st,
-            as_of_dt,
-            date,
-            m,
-            tag.as_deref(),
-            limit,
-            effective_offset,
-        )?
-    } else if let Some(p) = page {
-        lm.list_page_with_date(cat, st, as_of_dt, date, p, limit)?
-    } else {
-        lm.list_paginated_with_date(cat, st, as_of_dt, date, limit, offset)?
-    };
+    let effective_media = media.as_deref().or_else(|| {
+        if path || save_to.is_some() || open {
+            Some("any")
+        } else {
+            None
+        }
+    });
+    let paginated = lm.list_filtered_full(
+        cat,
+        st,
+        as_of_dt,
+        date,
+        effective_media,
+        &tags,
+        session,
+        entity.as_ref(),
+        sort,
+        limit,
+        effective_offset,
+    )?;
 
     let ids: Vec<String> = paginated.items.iter().map(|m| m.id.clone()).collect();
     if path {
         let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
+        if open {
+            open_files_in_default_app(&all_paths);
+        }
         if json {
             println!("{}", serde_json::to_string_pretty(&all_paths)?);
         } else {
@@ -102,6 +109,9 @@ pub fn handle_list(
         }
     } else if let Some(ref target) = save_to {
         let all_saved = lm.save_memories_attachments_to(&ids, target)?;
+        if open {
+            open_files_in_default_app(&all_saved);
+        }
         if json {
             let mut val = serde_json::to_value(&paginated)?;
             if let Some(obj) = val.as_object_mut() {
@@ -141,6 +151,10 @@ pub fn handle_list(
             }
         }
     } else {
+        if open {
+            let all_paths = lm.materialize_memories_attachments(&ids, None)?;
+            open_files_in_default_app(&all_paths);
+        }
         CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
     }
     Ok(())
@@ -171,7 +185,11 @@ pub fn handle_inspect(
             } else {
                 eprintln!("Memory not found: {}", terms.join(", "));
             }
-            std::process::exit(1);
+            return Err(AlreadyHandledError::new(format!(
+                "Memory not found: {}",
+                terms.join(", ")
+            ))
+            .into());
         }
         let all_paths = lm.materialize_memories_attachments(&ids, save_to.as_deref())?;
         if open {
@@ -183,7 +201,11 @@ pub fn handle_inspect(
             } else {
                 eprintln!("No attachments found for: {}", terms.join(", "));
             }
-            std::process::exit(1);
+            return Err(AlreadyHandledError::new(format!(
+                "No attachments found for: {}",
+                terms.join(", ")
+            ))
+            .into());
         }
         if json {
             println!("{}", serde_json::to_string_pretty(&all_paths)?);
@@ -237,7 +259,7 @@ pub fn handle_inspect(
             } else {
                 eprintln!("Memory not found: {}", term);
             }
-            std::process::exit(1);
+            return Err(AlreadyHandledError::new(format!("Memory not found: {}", term)).into());
         }
     } else {
         let mut records = Vec::new();
@@ -252,7 +274,11 @@ pub fn handle_inspect(
             } else {
                 eprintln!("Memory not found: {}", terms.join(", "));
             }
-            std::process::exit(1);
+            return Err(AlreadyHandledError::new(format!(
+                "Memory not found: {}",
+                terms.join(", ")
+            ))
+            .into());
         }
         let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
         let all_saved = if let Some(ref target) = save_to {
@@ -316,13 +342,21 @@ pub fn handle_inspect(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_update(
     id: String,
     content: Option<String>,
     title: Option<String>,
     category: Option<MemoryType>,
     tags: Option<String>,
+    add_tags: Vec<String>,
+    remove_tags: Vec<String>,
     confidence: Option<f32>,
+    ttl: Option<chrono::Duration>,
+    clear_ttl: bool,
+    provenance: Option<String>,
+    files: Vec<PathBuf>,
+    refresh_entities: bool,
     json: bool,
     effective_db: Option<&Path>,
     global: bool,
@@ -332,19 +366,31 @@ pub fn handle_update(
     if !migrate_embeddings(&lm, false, json, false)? {
         return Ok(());
     }
-    let parsed_tags = tags.map(|t| {
-        t.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    let updated = lm.update_memory(
+    let parsed_tags = tags.map(|t| parse_tag_list(&[t]));
+    let parsed_add_tags = parse_tag_list(&add_tags);
+    let parsed_remove_tags = parse_tag_list(&remove_tags);
+    let new_expired_at = if clear_ttl {
+        Some(None)
+    } else {
+        ttl.map(|d| Some(Utc::now() + d))
+    };
+    let mut new_attachments = Vec::with_capacity(files.len());
+    for p in &files {
+        new_attachments.push(AttachmentInput::from_path(p)?);
+    }
+    let updated = lm.update_memory_full(
         &id,
         content.as_deref(),
         title.as_deref(),
         category,
         parsed_tags,
+        parsed_add_tags,
+        parsed_remove_tags,
         confidence,
+        provenance.as_deref(),
+        new_expired_at,
+        new_attachments,
+        refresh_entities,
     )?;
     let links = lm.get_links(&updated.id)?;
     if !json {
@@ -368,8 +414,9 @@ pub fn handle_dedup(
     CliView::render_dedup(merged, json)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_forget(
-    id: Option<String>,
+    ids: Vec<String>,
     all: bool,
     hard: bool,
     yes: bool,
@@ -381,8 +428,8 @@ pub fn handle_forget(
     let lm = open_controller(effective_db, global, connection)?;
     if all {
         let db_path = lm.db_path().to_path_buf();
-        if !yes && !json {
-            if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+        if !yes {
+            if !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
                 let action = if hard { "permanently delete" } else { "expire" };
                 eprint!(
                     "Are you sure you want to {} all memories in vault '{}'? [y/N]: ",
@@ -408,9 +455,39 @@ pub fn handle_forget(
             remove_db_files(&db_path);
         }
         CliView::render_clear(removed, hard, &db_path, json)?;
-    } else if let Some(target_id) = id {
-        let ok = lm.forget(&target_id, hard)?;
-        CliView::render_forget(&target_id, ok, hard, json)?;
+    } else if ids.len() == 1 {
+        let target_id = &ids[0];
+        let ok = lm.forget(target_id, hard)?;
+        CliView::render_forget(target_id, ok, hard, json)?;
+        if !ok {
+            return Err(
+                AlreadyHandledError::new(format!("Memory '{}' not found", target_id)).into(),
+            );
+        }
+    } else if ids.len() > 1 {
+        let mut results = Vec::with_capacity(ids.len());
+        let mut all_ok = true;
+        for target_id in &ids {
+            let ok = lm.forget(target_id, hard)?;
+            if !ok {
+                all_ok = false;
+            }
+            if json {
+                results.push(serde_json::json!({
+                    "id": target_id,
+                    "success": ok,
+                    "hard_deleted": hard,
+                }));
+            } else {
+                CliView::render_forget(target_id, ok, hard, false)?;
+            }
+        }
+        if json {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        }
+        if !all_ok {
+            return Err(AlreadyHandledError::new("One or more memories were not found").into());
+        }
     } else {
         anyhow::bail!("Provide a memory <ID> or pass '--all' to forget all memories.");
     }
@@ -444,8 +521,8 @@ pub fn handle_clear(
     let hard = !soft;
     let lm = open_controller(effective_db, global, connection)?;
     let db_path = lm.db_path().to_path_buf();
-    if !yes && !json {
-        if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+    if !yes {
+        if !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
             let action = if hard {
                 "permanently delete database"
             } else {
@@ -486,6 +563,54 @@ pub fn handle_stats(
     let lm = open_controller(effective_db, global, connection)?;
     let stats = lm.stats()?;
     CliView::render_stats(&stats, lm.db_path(), json)
+}
+
+pub fn handle_entities(
+    name: Option<String>,
+    val: Option<String>,
+    memories: bool,
+    json: bool,
+    effective_db: Option<&Path>,
+    global: bool,
+    connection: Option<&ResolvedConnection>,
+) -> Result<()> {
+    let lm = open_controller(effective_db, global, connection)?;
+    let (parsed_name, parsed_val) = match (name, val) {
+        (Some(raw), explicit_val) => {
+            if let Some(v) = explicit_val {
+                (Some(raw), Some(v))
+            } else if let Some((k, v)) = raw.split_once('=') {
+                (Some(k.trim().to_string()), Some(v.trim().to_string()))
+            } else {
+                (Some(raw), None)
+            }
+        }
+        (None, Some(v)) => {
+            anyhow::bail!("--val '{}' requires an entity name argument", v);
+        }
+        (None, None) => (None, None),
+    };
+    if parsed_val.is_some() || memories {
+        let target_name = parsed_name.as_deref().context(
+            "Provide an entity name when using --memories or --val (e.g. 'lmem entities role --memories')",
+        )?;
+        let records = lm.find_by_entity(target_name, parsed_val.as_deref())?;
+        let total = records.len();
+        let paginated = lightmem::PaginatedMemories {
+            items: records,
+            total,
+            limit: total.max(1),
+            offset: 0,
+            page: 1,
+            total_pages: 1,
+            has_more: false,
+        };
+        CliView::render_paginated_list(&paginated, lm.db_path(), json)?;
+    } else {
+        let list = lm.list_entities(parsed_name.as_deref())?;
+        CliView::render_entities(&list, json)?;
+    }
+    Ok(())
 }
 
 pub fn handle_history(

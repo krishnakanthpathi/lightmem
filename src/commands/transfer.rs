@@ -1,18 +1,24 @@
 use anyhow::Result;
-use lightmem::{CliView, ResolvedConnection};
+use lightmem::{CliView, EntityFilter, ExportFilter, MemoryStatus, MemoryType, ResolvedConnection};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::config::migrate_embeddings;
 use super::context::open_controller;
 use crate::terminal;
-use crate::BundleCommand;
+use crate::{parse_tag_list, BundleCommand};
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_export(
-    format: String,
+    format: Option<String>,
     okf: bool,
     bundle: bool,
     output: Option<PathBuf>,
+    category: Option<MemoryType>,
+    tags: Vec<String>,
+    status: Option<MemoryStatus>,
+    entity: Option<EntityFilter>,
+    session: Option<&str>,
     output_json: bool,
     json: bool,
     effective_db: Option<&Path>,
@@ -20,8 +26,9 @@ pub fn handle_export(
     connection: Option<&ResolvedConnection>,
 ) -> Result<()> {
     let lm = open_controller(effective_db, global, connection)?;
+    let fmt = format.unwrap_or_else(|| "json".to_string());
     let is_bundle = bundle
-        || format == "bundle"
+        || fmt == "bundle"
         || output
             .as_ref()
             .and_then(|p| p.extension())
@@ -29,18 +36,29 @@ pub fn handle_export(
             .map(|e| e.eq_ignore_ascii_case("zip") || e.eq_ignore_ascii_case("lmbundle"))
             .unwrap_or(false);
 
-    let is_okf = okf || format == "okf";
+    let is_okf = okf || fmt == "okf";
+    let filter = ExportFilter {
+        category,
+        status,
+        tags: parse_tag_list(&tags),
+        session_id: session.map(ToString::to_string),
+        entity,
+    };
+    anyhow::ensure!(
+        !(is_bundle && !filter.is_empty()),
+        "Filters (--type, --tag, --status, --session, --entity) are only supported for --format json and --format okf, not full vault .zip bundles."
+    );
 
     if is_bundle {
         let exported_path = lm.export_bundle(output.as_deref())?;
         let manifest = lm.inspect_bundle(&exported_path)?;
         CliView::render_bundle_export(&exported_path, &manifest, output_json || json)?;
     } else if is_okf {
-        let exported_path = lm.export_okf(output.as_deref())?;
+        let exported_path = lm.export_okf_filtered(output.as_deref(), &filter)?;
         CliView::render_export(&exported_path, false, output_json || json)?;
     } else {
         let target = output.unwrap_or_else(|| PathBuf::from("lightmem-backup.json"));
-        let exported_path = lm.export_json(&target)?;
+        let exported_path = lm.export_json_filtered(&target, &filter)?;
         CliView::render_export(&exported_path, true, output_json || json)?;
     }
     Ok(())
@@ -57,6 +75,10 @@ pub fn handle_import(
     connection: Option<&ResolvedConnection>,
 ) -> Result<()> {
     anyhow::ensure!(
+        !(replace && merge),
+        "--replace and --merge cannot be used together."
+    );
+    anyhow::ensure!(
         !enrich,
         "Import enrichment is not supported yet. Remove --enrich; use observe --dry-run to review extracted candidates."
     );
@@ -66,6 +88,10 @@ pub fn handle_import(
         let res = lm.import_bundle(&file, replace, merge)?;
         CliView::render_bundle_import(&res, json)?;
     } else {
+        anyhow::ensure!(
+            !merge,
+            "--merge is only supported for .zip / .lmbundle transfer bundles; JSON/OKF imports already merge into the active vault (use --replace to overwrite matching IDs)."
+        );
         if !migrate_embeddings(&lm, false, json, false)? {
             return Ok(());
         }

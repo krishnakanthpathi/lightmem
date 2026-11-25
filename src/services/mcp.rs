@@ -1,5 +1,9 @@
 use crate::controllers::LightMem;
-use crate::models::{parse_ttl_duration, LightMemConfig, MemoryType};
+use crate::models::{
+    parse_ttl_duration, AttachmentInput, EntityFilter, LightMemConfig, ListSort, MemoryContext,
+    MemoryScope, MemoryStatus, MemoryType,
+};
+use crate::services::{ExportFilter, HistoryService};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -122,15 +126,27 @@ impl McpServer {
                 | "conflicts"
                 | "config"
                 | "forget"
+                | "clear"
                 | "stats"
                 | "list"
                 | "inspect"
                 | "update"
                 | "link"
                 | "unlink"
+                | "links"
                 | "graph"
                 | "tags"
+                | "entities"
+                | "deduplicate"
+                | "autolink"
+                | "observe"
                 | "restore"
+                | "export"
+                | "import"
+                | "bundle_export"
+                | "bundle_import"
+                | "bundle_info"
+                | "history"
         )
     }
 
@@ -471,6 +487,23 @@ impl McpServer {
                         "date": {
                             "type": "string",
                             "description": "Filter to memories from a specific calendar day (YYYY-MM-DD)"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Filter by one or more tags"
+                        },
+                        "media": {
+                            "type": "string",
+                            "description": "Filter by attachment media kind (image, audio, video, document, code, archive, binary, or any)"
+                        },
+                        "session": {
+                            "type": "string",
+                            "description": "Filter by conversation/session ID"
+                        },
+                        "entity": {
+                            "type": "string",
+                            "description": "Filter by extracted entity ('name' or 'name=val')"
                         }
                     }
                 }
@@ -490,6 +523,27 @@ impl McpServer {
                             "type": "string",
                             "description": "Filter candidate memories by category"
                         },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Filter candidate memories by tag"
+                        },
+                        "session": {
+                            "type": "string",
+                            "description": "Filter candidate memories by session ID"
+                        },
+                        "entity": {
+                            "type": "string",
+                            "description": "Filter candidate memories by entity ('name' or 'name=val')"
+                        },
+                        "as_of": {
+                            "type": "string",
+                            "description": "Point-in-time view (YYYY-MM-DD or RFC3339)"
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": "Filter candidate memories by calendar day (YYYY-MM-DD)"
+                        },
                         "limit": {
                             "type": "integer",
                             "description": "Max candidate memories to retrieve for reranking (default: 10)"
@@ -500,7 +554,7 @@ impl McpServer {
                         },
                         "reranker": {
                             "type": "string",
-                            "description": "Override reranker mode ('onnx', 'ollama', 'ollama:<model>', or 'top1')"
+                            "description": "Override reranker mode ('onnx', 'openai:<model>', 'gemini:<model>', 'ollama:<model>', or 'top1')"
                         }
                     }
                 }
@@ -536,46 +590,67 @@ impl McpServer {
                         "resolve": {
                             "type": "boolean",
                             "description": "Auto-merge detected conflict pairs using the reranker (default: false)"
+                        },
+                        "reranker": {
+                            "type": "string",
+                            "description": "Override answer/merge model spec"
                         }
                     }
                 }
             }),
             json!({
                 "name": "config",
-                "description": "Inspect or update LightMem runtime configuration (backend engine, ONNX embedding model, reranker, Ollama URL, active database path)",
+                "description": "Inspect or update LightMem runtime configuration (backend engine, ONNX embedding model, answer reranker, URLs, presets, and entity extraction)",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "backend": {
                             "type": "string",
-                            "description": "Set backend engine: 'onnx', 'ollama', or 'hash'"
+                            "enum": ["onnx", "ollama", "hash"],
+                            "description": "Set embedding backend engine: 'onnx', 'ollama', or 'hash'"
                         },
                         "onnx_model": {
                             "type": "string",
-                            "description": "ONNX embedding model ('bge-small', 'minilm', 'nomic')"
+                            "description": "ONNX embedding model ('bge-small', 'minilm', 'nomic', or directory path)"
+                        },
+                        "embedding_model": {
+                            "type": "string",
+                            "description": "Embedding model name"
+                        },
+                        "embedding_endpoint": {
+                            "type": "string",
+                            "description": "Dedicated embedding endpoint URL (or 'none' to clear)"
                         },
                         "reranker": {
                             "type": "string",
-                            "description": "Reranker model/engine ('minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama', 'top1')"
+                            "description": "Answer model/engine ('minilm-squad2', 'tinyroberta-squad2', 'onnx', 'ollama:<model>', 'openai:<model>', 'top1', etc.)"
                         },
                         "url": {
                             "type": "string",
-                            "description": "Ollama server URL (e.g. http://localhost:11434)"
+                            "description": "Generative model endpoint URL (e.g. http://localhost:11434 or https://api.openai.com)"
                         },
                         "preset": {
                             "type": "string",
                             "description": "Apply setup preset: local, ollama, openai, gemini, groq, openrouter, deepseek, mistral, custom, or demo"
                         },
                         "entity_extraction": {
-                            "type": "string", "enum": ["off", "llm"],
-                            "description": "Opt in to sending new memory text to the configured LLM; off by default"
+                            "type": "string", "enum": ["off", "on"],
+                            "description": "Toggle entity extraction ('on' or 'off'); off by default"
+                        },
+                        "remote_url": {
+                            "type": "string",
+                            "description": "Remote LightMem server URL (or 'none' to clear)"
+                        },
+                        "clear_remote": {
+                            "type": "boolean",
+                            "description": "Clear remote server URL and API key"
                         }
                     }
                 }
             }),
             json!({
                 "name": "list",
-                "description": "List memories chronologically with pagination, category, tag, or status filters",
+                "description": "List memories chronologically with pagination, category, tag, media, session, entity, date, sort, or status filters",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -583,25 +658,32 @@ impl McpServer {
                         "offset": { "type": "integer", "description": "Records to skip (default: 0)" },
                         "page": { "type": "integer", "description": "Page number (1-indexed; overrides offset)" },
                         "category": { "type": "string", "description": "Filter by category" },
-                        "tag": { "type": "string", "description": "Filter by tag" },
-                        "status": { "type": "string", "enum": ["active", "expired"], "description": "Filter by status (default: active)" }
+                        "tag": { "type": "string", "description": "Filter by single tag" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Filter by multiple tags" },
+                        "media": { "type": "string", "description": "Filter by attachment media kind" },
+                        "session": { "type": "string", "description": "Filter by session ID" },
+                        "entity": { "type": "string", "description": "Filter by entity ('name' or 'name=val')" },
+                        "as_of": { "type": "string", "description": "Point-in-time view (YYYY-MM-DD or RFC3339)" },
+                        "date": { "type": "string", "description": "Filter to calendar day (YYYY-MM-DD)" },
+                        "status": { "type": "string", "enum": ["active", "expired", "all"], "description": "Filter by status (default: active)" },
+                        "sort": { "type": "string", "enum": ["newest", "oldest", "updated", "confidence"], "description": "Sort order (default: newest)" }
                     }
                 }
             }),
             json!({
                 "name": "inspect",
-                "description": "Deeply inspect a memory record by ID, prefix, or title, including attachments and knowledge graph links",
+                "description": "Deeply inspect one or more memory records by ID, prefix, or title, including attachments and knowledge graph links",
                 "inputSchema": {
                     "type": "object",
-                    "required": ["term"],
                     "properties": {
-                        "term": { "type": "string", "description": "Memory ID, prefix, or title" }
+                        "term": { "type": "string", "description": "Memory ID, prefix, or title" },
+                        "terms": { "type": "array", "items": { "type": "string" }, "description": "Multiple memory IDs, prefixes, or titles" }
                     }
                 }
             }),
             json!({
                 "name": "update",
-                "description": "Update an existing memory's content, title, category, tags, or confidence in-place",
+                "description": "Update an existing memory's content, title, category, tags, TTL, provenance, confidence, or attachments in-place",
                 "inputSchema": {
                     "type": "object",
                     "required": ["id"],
@@ -610,8 +692,15 @@ impl McpServer {
                         "content": { "type": "string", "description": "New text content" },
                         "title": { "type": "string", "description": "New title" },
                         "category": { "type": "string", "description": "New category" },
-                        "tags": { "type": "array", "items": { "type": "string" }, "description": "New tags" },
-                        "confidence": { "type": "number", "description": "New confidence score (0.0 to 1.0)" }
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Replace tags" },
+                        "add_tags": { "type": "array", "items": { "type": "string" }, "description": "Add tags incrementally" },
+                        "remove_tags": { "type": "array", "items": { "type": "string" }, "description": "Remove specific tags" },
+                        "confidence": { "type": "number", "description": "New confidence score (0.0 to 1.0)" },
+                        "provenance": { "type": "string", "description": "Updated provenance / source" },
+                        "ttl": { "type": "string", "description": "Set/update expiration TTL duration (e.g. '24h', '7d')" },
+                        "clear_ttl": { "type": "boolean", "description": "Clear expiration TTL" },
+                        "files": { "type": "array", "items": { "type": "string" }, "description": "Additional file paths to attach" },
+                        "refresh_entities": { "type": "boolean", "description": "Re-extract structured entities via configured LLM" }
                     }
                 }
             }),
@@ -643,6 +732,17 @@ impl McpServer {
                 }
             }),
             json!({
+                "name": "links",
+                "description": "List incoming and outgoing relationship links for a specific memory",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string", "description": "Memory ID, title, or prefix" }
+                    }
+                }
+            }),
+            json!({
                 "name": "graph",
                 "description": "Retrieve knowledge graph nodes and edges with optional focus memory and hop radius",
                 "inputSchema": {
@@ -658,7 +758,53 @@ impl McpServer {
                 "description": "List all distinct tags across active memories and their counts",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {}
+                    "properties": {
+                        "query": { "type": "string", "description": "Optional substring filter on tag names" }
+                    }
+                }
+            }),
+            json!({
+                "name": "entities",
+                "description": "List extracted entities across active memories or retrieve memories matching an entity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Optional entity slot name filter" },
+                        "val": { "type": "string", "description": "Optional entity value filter (returns matching memories)" },
+                        "memories": { "type": "boolean", "description": "Return matching memory records instead of entity summary counts" }
+                    }
+                }
+            }),
+            json!({
+                "name": "deduplicate",
+                "description": "Merge identical or near-duplicate active memories and rebuild merged index cards",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+            json!({
+                "name": "autolink",
+                "description": "Automatically discover and link related memories via mentions, shared tags, and vector similarity",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "min_similarity": { "type": "number", "description": "Minimum cosine similarity threshold (default: 0.75)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "observe",
+                "description": "Extract atomic candidate memories from conversation or notes text, optionally saving them immediately",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["text"],
+                    "properties": {
+                        "text": { "type": "string", "description": "Conversation transcript or notes text" },
+                        "yes": { "type": "boolean", "description": "Immediately save extracted candidates to the vault (default: false)" },
+                        "dry_run": { "type": "boolean", "description": "Extract only without saving" },
+                        "category": { "type": "string", "description": "Optional category override" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to attach" },
+                        "confidence": { "type": "number", "description": "Minimum confidence threshold (default: 0.85)" },
+                        "reranker": { "type": "string", "description": "Optional extraction model override" }
+                    }
                 }
             }),
             json!({
@@ -674,19 +820,101 @@ impl McpServer {
             }),
             json!({
                 "name": "forget",
-                "description": "Forget / soft-retire or permanently delete a memory by ID or title",
+                "description": "Forget / soft-retire or permanently delete one or more memories by ID/title (or all with all:true & yes:true)",
                 "inputSchema": {
                     "type": "object",
-                    "required": ["id"],
                     "properties": {
-                        "id": {
-                            "type": "string",
-                            "description": "Memory ID, title, or prefix"
-                        },
-                        "hard": {
-                            "type": "boolean",
-                            "description": "Permanently delete instead of soft-retiring (default: false)"
-                        }
+                        "id": { "type": "string", "description": "Single memory ID, title, or prefix" },
+                        "ids": { "type": "array", "items": { "type": "string" }, "description": "Multiple memory IDs/titles to forget" },
+                        "all": { "type": "boolean", "description": "Forget all memories in vault (requires yes: true)" },
+                        "yes": { "type": "boolean", "description": "Explicit confirmation when all: true" },
+                        "hard": { "type": "boolean", "description": "Permanently delete instead of soft-retiring (default: false)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "clear",
+                "description": "Soft-retire or permanently wipe all memories in the active vault (requires yes: true)",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["yes"],
+                    "properties": {
+                        "yes": { "type": "boolean", "description": "Explicit confirmation required to clear vault" },
+                        "soft": { "type": "boolean", "description": "Soft-retire instead of permanently deleting (default: false)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "export",
+                "description": "Export vault memories (optionally filtered) to lossless JSON backup or Open Knowledge Format (OKF) Markdown",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "output": { "type": "string", "description": "Output file path" },
+                        "format": { "type": "string", "enum": ["json", "okf"], "description": "Export format (default: json)" },
+                        "category": { "type": "string", "description": "Filter exported memories by category" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "Filter by tags" },
+                        "status": { "type": "string", "enum": ["active", "expired", "all"], "description": "Filter by status" },
+                        "session": { "type": "string", "description": "Filter by session ID" },
+                        "entity": { "type": "string", "description": "Filter by entity ('name' or 'name=val')" }
+                    }
+                }
+            }),
+            json!({
+                "name": "import",
+                "description": "Import memories from JSON, JSONL, Markdown/OKF file or directory",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": { "type": "string", "description": "Path to JSON, JSONL, OKF/Markdown file, or directory" },
+                        "replace": { "type": "boolean", "description": "Overwrite conflicting IDs (default: false)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "bundle_export",
+                "description": "Export the entire database and media attachments into a compressed .zip transfer bundle",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "output": { "type": "string", "description": "Target .zip/.lmbundle path" }
+                    }
+                }
+            }),
+            json!({
+                "name": "bundle_import",
+                "description": "Import a .zip/.lmbundle transfer bundle",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": { "type": "string", "description": "Path to .zip/.lmbundle file" },
+                        "replace": { "type": "boolean", "description": "Replace existing database (default: false)" },
+                        "merge": { "type": "boolean", "description": "Merge bundle into active vault (default: false)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "bundle_info",
+                "description": "Inspect a transfer bundle manifest without unpacking",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                        "file": { "type": "string", "description": "Path to .zip/.lmbundle file" }
+                    }
+                }
+            }),
+            json!({
+                "name": "history",
+                "description": "Inspect recent CLI command execution history",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Filter by command/subcommand text" },
+                        "limit": { "type": "integer", "description": "Max entries to return (default: 20)" },
+                        "status": { "type": "string", "enum": ["success", "error"], "description": "Filter by execution status" }
                     }
                 }
             }),
@@ -708,19 +936,41 @@ impl McpServer {
             let previous_identity = cfg.embedding_identity().ok();
             let mut updated = false;
 
+            if let Some(preset) = args.get("preset") {
+                let p = preset.as_str().context("preset must be a string")?;
+                cfg.apply_preset(p)?;
+                updated = true;
+            }
             if let Some(backend) = args.get("backend") {
                 let b = backend.as_str().context("backend must be a string")?;
-                anyhow::ensure!(
-                    matches!(b, "onnx" | "hash" | "ollama" | "openai" | "gemini"),
-                    "Invalid backend '{}'. Supported: onnx, hash, ollama, openai, gemini",
-                    b
-                );
-                cfg.backend = b.to_string();
+                cfg.backend = LightMemConfig::parse_embedding_backend(b)?;
                 updated = true;
             }
             if let Some(onnx_m) = args.get("onnx_model") {
                 let m = onnx_m.as_str().context("onnx_model must be a string")?;
+                if cfg.backend == "onnx" && args.get("embedding_model").is_none() {
+                    cfg.embedding_model = m.to_string();
+                }
                 cfg.onnx_model = Some(m.to_string());
+                updated = true;
+            }
+            if let Some(emb_m) = args.get("embedding_model") {
+                let m = emb_m.as_str().context("embedding_model must be a string")?;
+                cfg.set_field("embedding_model", m)?;
+                updated = true;
+            }
+            if let Some(emb_ep) = args.get("embedding_endpoint") {
+                let u = emb_ep
+                    .as_str()
+                    .context("embedding_endpoint must be a string")?;
+                cfg.set_field("embedding_endpoint", u)?;
+                updated = true;
+            }
+            if let Some(emb_key) = args.get("embedding_api_key") {
+                let k = emb_key
+                    .as_str()
+                    .context("embedding_api_key must be a string")?;
+                cfg.set_field("embedding_api_key", k)?;
                 updated = true;
             }
             if let Some(url) = args.get("url") {
@@ -730,29 +980,41 @@ impl McpServer {
             }
             if let Some(r) = args.get("reranker") {
                 let rk = r.as_str().context("reranker must be a string")?;
-                cfg.reranker = LightMemConfig::normalize_reranker(rk, None);
+                let (_, prev_default_url, _) = cfg.active_provider();
+                cfg.reranker = LightMemConfig::parse_reranker_setting(rk)?;
+                let explicit_u = args.get("url").and_then(|v| v.as_str());
+                cfg.align_provider_endpoint(Some(prev_default_url), explicit_u);
                 updated = true;
             }
-            if let Some(preset) = args.get("preset") {
-                let p = preset.as_str().context("preset must be a string")?;
-                cfg.apply_preset(p)?;
+            if let Some(key) = args.get("ollama_api_key") {
+                let k = key.as_str().context("ollama_api_key must be a string")?;
+                cfg.set_field("ollama_api_key", k)?;
                 updated = true;
             }
             if let Some(mode) = args.get("entity_extraction") {
                 let m = mode
                     .as_str()
                     .context("entity_extraction must be a string")?;
-                let mode_clean = m.trim().to_lowercase();
-                anyhow::ensure!(
-                    matches!(mode_clean.as_str(), "off" | "on" | "llm" | "true" | "false"),
-                    "Entity extraction must be on or off"
-                );
-                let normalized = if matches!(mode_clean.as_str(), "on" | "llm" | "true") {
-                    "on"
-                } else {
-                    "off"
-                };
-                cfg.entity_extraction = normalized.to_string();
+                cfg.entity_extraction = LightMemConfig::parse_entity_extraction(m)?;
+                updated = true;
+            }
+            if let Some(remote) = args.get("remote_url") {
+                let r = remote.as_str().context("remote_url must be a string")?;
+                cfg.set_field("remote_url", r)?;
+                updated = true;
+            }
+            if let Some(api_key) = args.get("api_key") {
+                let k = api_key.as_str().context("api_key must be a string")?;
+                cfg.set_field("api_key", k)?;
+                updated = true;
+            }
+            if args
+                .get("clear_remote")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                cfg.remote_url = None;
+                cfg.api_key = None;
                 updated = true;
             }
 
@@ -776,15 +1038,12 @@ impl McpServer {
                 self.invalidate_controller();
             }
 
-            return Ok(json!({
-                "updated": updated,
-                "backend": cfg.backend,
-                "onnx_model": cfg.onnx_model,
-                "reranker": cfg.reranker,
-                "ollama_url": cfg.ollama_url,
-                "entity_extraction": cfg.entity_extraction,
-                "active_db": active_db
-            }));
+            let mut obj = cfg.redacted_json()?;
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("updated".to_string(), json!(updated));
+                map.insert("active_db".to_string(), json!(active_db));
+            }
+            return Ok(obj);
         }
 
         let mut connection = self.connection.clone();
@@ -800,9 +1059,29 @@ impl McpServer {
                 }
             }
         }
-        let lm = match &connection {
-            Some(connection) => Arc::new(LightMem::open_resolved(connection)?),
-            None => self.get_controller()?,
+        let lm = match (&connection, &fallback_session) {
+            (Some(connection), _) => Arc::new(LightMem::open_resolved(connection)?),
+            (None, Some(session)) => {
+                let config = self
+                    .config_override
+                    .clone()
+                    .unwrap_or_else(|| LightMemConfig::try_load().unwrap_or_default());
+                let db_path = self
+                    .db_path
+                    .clone()
+                    .unwrap_or_else(|| LightMemConfig::resolve_db_path(self.global));
+                let ctx = MemoryContext {
+                    connection_id: "default".to_string(),
+                    user_id: "default".to_string(),
+                    agent_id: "default".to_string(),
+                    harness_id: "mcp".to_string(),
+                    project_id: None,
+                    scope: MemoryScope::User,
+                    session_id: Some(session.clone()),
+                };
+                Arc::new(LightMem::open_at_with_context(&db_path, config, ctx)?)
+            }
+            (None, None) => self.get_controller()?,
         };
 
         match name {
@@ -920,15 +1199,11 @@ impl McpServer {
                     .get("query")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: query")?;
-                let category = if let Some(v) = args.get("category") {
-                    let s = v.as_str().context("category must be a string")?;
-                    Some(
-                        s.parse::<MemoryType>()
-                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
-                    )
-                } else {
-                    None
-                };
+                let category = parse_optional_category(&args)?;
+                let tags = parse_tag_list_arg(&args, "tags");
+                let session = args.get("session").and_then(|v| v.as_str());
+                let entity = parse_optional_entity(&args)?;
+                let media = args.get("media").and_then(|v| v.as_str());
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let min_sim = args
                     .get("min_similarity")
@@ -942,35 +1217,48 @@ impl McpServer {
                     .get("multi_hop")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let as_of = if let Some(v) = args.get("as_of") {
-                    let s = v.as_str().context("as_of must be a string")?;
-                    Some(
-                        parse_as_of_date(s)
-                            .with_context(|| format!("Invalid as_of timestamp '{}'", s))?,
-                    )
+                let (as_of, on_date) = parse_optional_dates(&args)?;
+                let fetch_limit = if media.is_some() {
+                    limit.max(100)
                 } else {
-                    None
-                };
-                let on_date = if let Some(v) = args.get("date") {
-                    let s = v.as_str().context("date must be a string")?;
-                    Some(
-                        NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").with_context(|| {
-                            format!("Invalid date '{}', expected YYYY-MM-DD", s)
-                        })?,
-                    )
-                } else {
-                    None
+                    limit
                 };
 
-                let results =
-                    lm.recall_expanded(query, category, as_of, on_date, limit, min_sim, multi_hop)?;
+                let mut results = lm.recall_filtered(
+                    query,
+                    category,
+                    as_of,
+                    on_date,
+                    &tags,
+                    session,
+                    entity.as_ref(),
+                    fetch_limit,
+                    min_sim,
+                    multi_hop,
+                )?;
+                if let Some(m) = media {
+                    let k = m.trim().to_lowercase();
+                    results.retain(|r| {
+                        !r.memory.attachments.is_empty()
+                            && (k == "any"
+                                || k == "all"
+                                || r.memory.attachments.iter().any(|a| {
+                                    a.media_kind.eq_ignore_ascii_case(&k)
+                                        || a.mime_type.to_lowercase().contains(&k)
+                                }))
+                    });
+                    results.truncate(limit);
+                }
 
                 let ranked = if precision && !results.is_empty() {
-                    let ans = lm.answer_with_options(
+                    let ans = lm.answer_with_filters(
                         query,
                         category,
                         as_of,
                         on_date,
+                        &tags,
+                        session,
+                        entity.as_ref(),
                         limit,
                         Some("onnx"),
                     )?;
@@ -1014,15 +1302,11 @@ impl McpServer {
                     .get("question")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: question")?;
-                let category = if let Some(v) = args.get("category") {
-                    let s = v.as_str().context("category must be a string")?;
-                    Some(
-                        s.parse::<MemoryType>()
-                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
-                    )
-                } else {
-                    None
-                };
+                let category = parse_optional_category(&args)?;
+                let tags = parse_tag_list_arg(&args, "tags");
+                let session = args.get("session").and_then(|v| v.as_str());
+                let entity = parse_optional_entity(&args)?;
+                let (as_of, on_date) = parse_optional_dates(&args)?;
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let reranker_override = args.get("reranker").and_then(|v| v.as_str());
                 let precision = args
@@ -1030,13 +1314,18 @@ impl McpServer {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-                let res = if precision || reranker_override.is_some() {
-                    let effective_r =
-                        reranker_override.or(if precision { Some("onnx") } else { None });
-                    lm.answer_with_options(question, category, None, None, limit, effective_r)?
-                } else {
-                    lm.answer(question, category, None, limit, false)?
-                };
+                let effective_r = reranker_override.or(if precision { Some("onnx") } else { None });
+                let res = lm.answer_with_filters(
+                    question,
+                    category,
+                    as_of,
+                    on_date,
+                    &tags,
+                    session,
+                    entity.as_ref(),
+                    limit,
+                    effective_r,
+                )?;
 
                 Ok(json!({
                     "question": question,
@@ -1073,8 +1362,9 @@ impl McpServer {
                     .get("resolve")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let reranker = args.get("reranker").and_then(|v| v.as_str());
 
-                let conflicts = lm.find_conflicts_with_options(resolve, min_sim, None)?;
+                let conflicts = lm.find_conflicts_with_options(resolve, min_sim, reranker)?;
                 Ok(json!({
                     "threshold": min_sim,
                     "resolved": resolve,
@@ -1084,17 +1374,56 @@ impl McpServer {
             }
 
             "forget" => {
+                let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
+                let all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+                let yes = args.get("yes").and_then(|v| v.as_bool()).unwrap_or(false);
+                if all {
+                    anyhow::ensure!(
+                        yes,
+                        "Forgetting all memories requires explicit confirmation: pass yes=true"
+                    );
+                    let removed = lm.clear_all(hard)?;
+                    return Ok(json!({
+                        "all": true,
+                        "forgotten": true,
+                        "count": removed,
+                        "hard_delete": hard
+                    }));
+                }
+                if let Some(ids_arr) = args.get("ids").and_then(|v| v.as_array()) {
+                    let mut items = Vec::new();
+                    for raw_id in ids_arr {
+                        if let Some(id) = raw_id.as_str() {
+                            let ok = lm.forget(id, hard)?;
+                            items.push(json!({ "id": id, "forgotten": ok, "hard_delete": hard }));
+                        }
+                    }
+                    return Ok(json!({ "results": items }));
+                }
                 let id = args
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .context("Missing required parameter: id")?;
-                let hard = args.get("hard").and_then(|v| v.as_bool()).unwrap_or(false);
+                    .context("Missing required parameter: id (or ids / all+yes)")?;
 
                 let forgotten = lm.forget(id, hard)?;
                 Ok(json!({
                     "id": id,
                     "forgotten": forgotten,
                     "hard_delete": hard
+                }))
+            }
+
+            "clear" => {
+                let yes = args.get("yes").and_then(|v| v.as_bool()).unwrap_or(false);
+                anyhow::ensure!(
+                    yes,
+                    "Clearing the vault requires explicit confirmation: pass yes=true"
+                );
+                let soft = args.get("soft").and_then(|v| v.as_bool()).unwrap_or(false);
+                let removed = lm.clear_all(!soft)?;
+                Ok(json!({
+                    "cleared": removed,
+                    "soft": soft
                 }))
             }
 
@@ -1117,36 +1446,51 @@ impl McpServer {
                     .get("page")
                     .and_then(|v| v.as_u64())
                     .map(|p| p as usize);
-                let category = if let Some(v) = args.get("category") {
-                    let s = v.as_str().context("category must be a string")?;
-                    Some(
-                        s.parse::<MemoryType>()
-                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
-                    )
-                } else {
-                    None
-                };
-                let tag = args.get("tag").and_then(|v| v.as_str());
-                let status = match args.get("status").and_then(|v| v.as_str()) {
-                    Some("expired") => Some(crate::models::MemoryStatus::Expired),
-                    _ => Some(crate::models::MemoryStatus::Active),
-                };
-                let effective_offset = if let Some(p) = page {
-                    if p > 0 {
-                        (p - 1) * limit
-                    } else {
-                        offset
+                let category = parse_optional_category(&args)?;
+                let mut tags = parse_tag_list_arg(&args, "tags");
+                if tags.is_empty() {
+                    if let Some(single) = args.get("tag").and_then(|v| v.as_str()) {
+                        let t = single.trim();
+                        if !t.is_empty() {
+                            tags.push(t.to_string());
+                        }
                     }
+                }
+                let media = args.get("media").and_then(|v| v.as_str());
+                let session = args.get("session").and_then(|v| v.as_str());
+                let entity = parse_optional_entity(&args)?;
+                let (as_of, on_date) = parse_optional_dates(&args)?;
+                let status = match args.get("status").and_then(|v| v.as_str()) {
+                    Some("all") => None,
+                    Some("expired") => Some(MemoryStatus::Expired),
+                    Some("active") | None => Some(MemoryStatus::Active),
+                    Some(other) => anyhow::bail!(
+                        "Invalid status '{}'. Expected active, expired, or all",
+                        other
+                    ),
+                };
+                let sort = args
+                    .get("sort")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.parse::<ListSort>().map_err(|e| anyhow::anyhow!(e)))
+                    .transpose()?
+                    .unwrap_or(ListSort::Newest);
+                let effective_offset = if let Some(p) = page {
+                    anyhow::ensure!(p > 0, "Page must be positive");
+                    (p - 1) * limit
                 } else {
                     offset
                 };
-                let paginated = lm.list_filtered_with_tag(
+                let paginated = lm.list_filtered_full(
                     category,
                     status,
-                    None,
-                    None,
-                    None,
-                    tag,
+                    as_of,
+                    on_date,
+                    media,
+                    &tags,
+                    session,
+                    entity.as_ref(),
+                    sort,
                     limit,
                     effective_offset,
                 )?;
@@ -1154,10 +1498,22 @@ impl McpServer {
             }
 
             "inspect" => {
+                if let Some(terms_arr) = args.get("terms").and_then(|v| v.as_array()) {
+                    let mut items = Vec::new();
+                    for raw_term in terms_arr {
+                        if let Some(t) = raw_term.as_str() {
+                            if let Some(mem) = lm.get(t)? {
+                                let links = lm.get_links(&mem.id).unwrap_or_default();
+                                items.push(json!({ "memory": mem, "links": links }));
+                            }
+                        }
+                    }
+                    return Ok(json!(items));
+                }
                 let term = args
                     .get("term")
                     .and_then(|v| v.as_str())
-                    .context("Missing required parameter: term")?;
+                    .context("Missing required parameter: term (or terms)")?;
                 let memory = lm
                     .get(term)?
                     .with_context(|| format!("Memory '{}' not found", term))?;
@@ -1175,35 +1531,62 @@ impl McpServer {
                     .context("Missing required parameter: id")?;
                 let content = args.get("content").and_then(|v| v.as_str());
                 let title = args.get("title").and_then(|v| v.as_str());
-                let category = if let Some(v) = args.get("category") {
-                    let s = v.as_str().context("category must be a string")?;
-                    Some(
-                        s.parse::<MemoryType>()
-                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
-                    )
+                let category = parse_optional_category(&args)?;
+                let tags = if args.get("tags").is_some() {
+                    Some(parse_tag_list_arg(&args, "tags"))
                 } else {
                     None
                 };
-                let tags: Option<Vec<String>> = match args.get("tags") {
-                    Some(Value::Array(arr)) => Some(
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect(),
-                    ),
-                    Some(Value::String(s)) => Some(
-                        s.split(',')
-                            .map(|item| item.trim().to_string())
-                            .filter(|item| !item.is_empty())
-                            .collect(),
-                    ),
-                    _ => None,
-                };
+                let add_tags = parse_tag_list_arg(&args, "add_tags");
+                let remove_tags = parse_tag_list_arg(&args, "remove_tags");
                 let confidence = args
                     .get("confidence")
                     .and_then(|v| v.as_f64())
                     .map(|f| f as f32);
+                let provenance = args.get("provenance").and_then(|v| v.as_str());
+                let clear_ttl = args
+                    .get("clear_ttl")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let new_expired_at = if clear_ttl {
+                    Some(None)
+                } else if let Some(ttl_raw) = args.get("ttl").and_then(|v| v.as_str()) {
+                    let dur = parse_ttl_duration(ttl_raw)
+                        .map_err(|e| anyhow::anyhow!("Invalid TTL '{}': {}", ttl_raw, e))?;
+                    Some(Some(Utc::now() + dur))
+                } else {
+                    None
+                };
+                let files: Vec<PathBuf> = match args.get("files") {
+                    Some(Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(PathBuf::from))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let mut attachments = Vec::with_capacity(files.len());
+                for fpath in &files {
+                    attachments.push(AttachmentInput::from_path(fpath)?);
+                }
+                let refresh_entities = args
+                    .get("refresh_entities")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
-                let updated = lm.update_memory(id, content, title, category, tags, confidence)?;
+                let updated = lm.update_memory_full(
+                    id,
+                    content,
+                    title,
+                    category,
+                    tags,
+                    add_tags,
+                    remove_tags,
+                    confidence,
+                    provenance,
+                    new_expired_at,
+                    attachments,
+                    refresh_entities,
+                )?;
                 let links = lm.get_links(&updated.id).unwrap_or_default();
                 Ok(json!({
                     "status": "updated",
@@ -1256,6 +1639,15 @@ impl McpServer {
                 }))
             }
 
+            "links" => {
+                let id = args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: id")?;
+                let links = lm.get_links(id)?;
+                Ok(serde_json::to_value(&links)?)
+            }
+
             "graph" => {
                 let focus = args.get("focus").and_then(|v| v.as_str());
                 let hops = args
@@ -1268,12 +1660,99 @@ impl McpServer {
             }
 
             "tags" => {
-                let tags = lm.get_all_tags()?;
+                let query = args
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .map(|q| q.trim().to_lowercase());
+                let mut tags = lm.get_all_tags()?;
+                if let Some(ref q) = query {
+                    if !q.is_empty() {
+                        tags.retain(|(t, _)| t.contains(q));
+                    }
+                }
                 let list: Vec<Value> = tags
                     .into_iter()
                     .map(|(t, c)| json!({ "tag": t, "count": c }))
                     .collect();
                 Ok(json!(list))
+            }
+
+            "entities" => {
+                let name = args.get("name").and_then(|v| v.as_str());
+                let val = args.get("val").and_then(|v| v.as_str());
+                let want_memories = args
+                    .get("memories")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if val.is_some() || want_memories {
+                    let target_name =
+                        name.context("Entity 'name' is required when filtering memories or val")?;
+                    let records = lm.find_by_entity(target_name, val)?;
+                    Ok(serde_json::to_value(&records)?)
+                } else {
+                    let entities = lm.list_entities(name)?;
+                    Ok(serde_json::to_value(&entities)?)
+                }
+            }
+
+            "deduplicate" => {
+                let merged = lm.deduplicate()?;
+                Ok(json!({ "merged": merged }))
+            }
+
+            "autolink" => {
+                let min_sim = args
+                    .get("min_similarity")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32);
+                let new_links = lm.autolink(min_sim)?;
+                let snap = lm.graph(None, None)?;
+                Ok(json!({
+                    "new_links": new_links,
+                    "nodes": snap.nodes.len(),
+                    "edges": snap.edges.len(),
+                }))
+            }
+
+            "observe" => {
+                let text = args
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: text")?;
+                let yes = args.get("yes").and_then(|v| v.as_bool()).unwrap_or(false);
+                let dry_run = args
+                    .get("dry_run")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(!yes);
+                let category = parse_optional_category(&args)?;
+                let tags = parse_tag_list_arg(&args, "tags");
+                let tags_opt = if tags.is_empty() {
+                    None
+                } else {
+                    Some(tags.as_slice())
+                };
+                let confidence = args
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32);
+                let reranker = args.get("reranker").and_then(|v| v.as_str());
+
+                let candidates =
+                    lm.observe_and_extract(text, category, tags_opt, confidence, reranker)?;
+                if dry_run || !yes {
+                    Ok(json!({
+                        "dry_run": true,
+                        "candidates": candidates,
+                        "saved": Vec::<Value>::new(),
+                    }))
+                } else {
+                    let saved = lm.save_observed_candidates(&candidates)?;
+                    Ok(json!({
+                        "dry_run": false,
+                        "candidates": candidates,
+                        "saved": saved,
+                    }))
+                }
             }
 
             "restore" => {
@@ -1290,9 +1769,180 @@ impl McpServer {
                 }))
             }
 
+            "export" => {
+                let fmt = args
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("json")
+                    .to_lowercase();
+                let category = parse_optional_category(&args)?;
+                let tags = parse_tag_list_arg(&args, "tags");
+                let session = args
+                    .get("session")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let entity = parse_optional_entity(&args)?;
+                let status = match args.get("status").and_then(|v| v.as_str()) {
+                    Some("all") | None => None,
+                    Some("active") => Some(MemoryStatus::Active),
+                    Some("expired") => Some(MemoryStatus::Expired),
+                    Some(other) => anyhow::bail!("Invalid status '{}'", other),
+                };
+                let filter = ExportFilter {
+                    category,
+                    status,
+                    tags,
+                    session_id: session,
+                    entity,
+                };
+                let output = args
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from);
+                let exported_path = match fmt.as_str() {
+                    "okf" => lm.export_okf_filtered(output.as_deref(), &filter)?,
+                    "json" => {
+                        let target =
+                            output.unwrap_or_else(|| PathBuf::from("lightmem-backup.json"));
+                        lm.export_json_filtered(&target, &filter)?
+                    }
+                    other => {
+                        anyhow::bail!("Invalid export format '{}'. Use 'json' or 'okf'", other)
+                    }
+                };
+                Ok(json!({
+                    "format": fmt,
+                    "output_path": exported_path,
+                }))
+            }
+
+            "import" => {
+                let file = args
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: file")?;
+                let replace = args
+                    .get("replace")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let count = lm.import_file_with_options(&PathBuf::from(file), false, replace)?;
+                Ok(json!({
+                    "imported": count,
+                    "file": file,
+                    "replace": replace,
+                }))
+            }
+
+            "bundle_export" => {
+                let output = args
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from);
+                let exported = lm.export_bundle(output.as_deref())?;
+                let manifest = lm.inspect_bundle(&exported)?;
+                Ok(json!({
+                    "output_path": exported,
+                    "manifest": manifest,
+                }))
+            }
+
+            "bundle_import" => {
+                let file = args
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: file")?;
+                let replace = args
+                    .get("replace")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let merge = args.get("merge").and_then(|v| v.as_bool()).unwrap_or(false);
+                anyhow::ensure!(!(replace && merge), "replace and merge cannot both be true");
+                let res = lm.import_bundle(&PathBuf::from(file), replace, merge)?;
+                Ok(serde_json::to_value(&res)?)
+            }
+
+            "bundle_info" => {
+                let file = args
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: file")?;
+                let manifest = lm.inspect_bundle(&PathBuf::from(file))?;
+                Ok(serde_json::to_value(&manifest)?)
+            }
+
+            "history" => {
+                let query = args.get("query").and_then(|v| v.as_str());
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let status = args.get("status").and_then(|v| v.as_str());
+                let (entries, total) = HistoryService::list(query, status, limit)?;
+                Ok(json!({
+                    "total": total,
+                    "entries": entries,
+                }))
+            }
+
             other => anyhow::bail!("Unknown tool: {}", other),
         }
     }
+}
+
+fn parse_tag_list_arg(args: &Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .flat_map(|s| s.split(','))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Some(Value::String(s)) => s
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_optional_category(args: &Value) -> Result<Option<MemoryType>> {
+    if let Some(v) = args.get("category") {
+        let s = v.as_str().context("category must be a string")?;
+        Ok(Some(s.parse::<MemoryType>().map_err(|e| {
+            anyhow::anyhow!("Invalid category '{}': {}", s, e)
+        })?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_optional_entity(args: &Value) -> Result<Option<EntityFilter>> {
+    if let Some(v) = args.get("entity") {
+        let s = v.as_str().context("entity must be a string")?;
+        Ok(Some(
+            EntityFilter::parse(s).map_err(|e| anyhow::anyhow!("{}", e))?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_optional_dates(args: &Value) -> Result<(Option<DateTime<Utc>>, Option<NaiveDate>)> {
+    let as_of = if let Some(v) = args.get("as_of") {
+        let s = v.as_str().context("as_of must be a string")?;
+        Some(parse_as_of_date(s).with_context(|| format!("Invalid as_of timestamp '{}'", s))?)
+    } else {
+        None
+    };
+    let on_date = if let Some(v) = args.get("date") {
+        let s = v.as_str().context("date must be a string")?;
+        Some(
+            NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+                .with_context(|| format!("Invalid date '{}', expected YYYY-MM-DD", s))?,
+        )
+    } else {
+        None
+    };
+    Ok((as_of, on_date))
 }
 
 fn parse_as_of_date(s: &str) -> Result<DateTime<Utc>> {

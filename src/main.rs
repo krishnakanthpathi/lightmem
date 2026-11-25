@@ -31,7 +31,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub scope: Option<lightmem::MemoryScope>,
 
-    /// Source conversation/session ID for new memories
+    /// Conversation/session ID (associates new memories or filters recall, list, answer, and export)
     #[arg(long, global = true)]
     pub session: Option<String>,
 
@@ -142,9 +142,13 @@ pub enum Commands {
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
 
-        /// Filter by tag
-        #[arg(long)]
-        tag: Option<String>,
+        /// Filter by tag (repeatable or comma-separated)
+        #[arg(long = "tag", visible_alias = "tags")]
+        tag: Vec<String>,
+
+        /// Filter by extracted entity ('name' or 'name=val')
+        #[arg(long = "entity", value_parser = lightmem::EntityFilter::parse)]
+        entity: Option<lightmem::EntityFilter>,
 
         /// Filter by attachment media kind (image, audio, video, document, code, archive, binary, or any)
         #[arg(short = 'm', long = "media")]
@@ -193,17 +197,25 @@ pub enum Commands {
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
 
-        /// Filter by tag
-        #[arg(long)]
-        tag: Option<String>,
+        /// Filter by tag (repeatable or comma-separated)
+        #[arg(long = "tag", visible_alias = "tags")]
+        tag: Vec<String>,
+
+        /// Filter by extracted entity ('name' or 'name=val')
+        #[arg(long = "entity", value_parser = lightmem::EntityFilter::parse)]
+        entity: Option<lightmem::EntityFilter>,
 
         /// Filter by attachment media kind (image, audio, video, document, code, archive, binary, or any)
         #[arg(short = 'm', long = "media")]
         media: Option<String>,
 
-        /// Filter by status (active | expired)
+        /// Filter by status (active | expired | all)
         #[arg(long, default_value = "active")]
-        status: MemoryStatus,
+        status: ListStatusFilter,
+
+        /// Sort order (newest | oldest | updated | confidence)
+        #[arg(long, default_value = "newest")]
+        sort: lightmem::ListSort,
 
         /// Point-in-time view (YYYY-MM-DD)
         #[arg(long, value_parser = parse_as_of_date)]
@@ -232,6 +244,10 @@ pub enum Commands {
         /// Materialize verified attachment(s) and print only their absolute file path(s) (one per line)
         #[arg(short = 'p', long = "path", visible_alias = "paths")]
         path: bool,
+
+        /// Open listed attachment file(s) immediately using system default application
+        #[arg(long)]
+        open: bool,
     },
 
     /// Deeply inspect one or more memory records, their metadata, attachments, and knowledge graph links
@@ -259,7 +275,7 @@ pub enum Commands {
         open: bool,
     },
 
-    /// Update an existing memory's content, title, category, tags, or confidence in-place
+    /// Update an existing memory's content, title, category, tags, TTL, provenance, or attachments in-place
     #[command(alias = "edit")]
     Update {
         /// Memory ID (UUID or prefix) or exact title
@@ -277,26 +293,59 @@ pub enum Commands {
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
 
-        /// New comma-separated tags
+        /// Replace all tags with comma-separated tags
         #[arg(long)]
         tags: Option<String>,
+
+        /// Add one or more tags without removing existing tags
+        #[arg(long = "add-tag", visible_alias = "add-tags")]
+        add_tags: Vec<String>,
+
+        /// Remove one or more tags without replacing remaining tags
+        #[arg(
+            long = "remove-tag",
+            visible_alias = "rm-tag",
+            visible_alias = "remove-tags"
+        )]
+        remove_tags: Vec<String>,
 
         /// New confidence score (0.0 to 1.0)
         #[arg(long)]
         confidence: Option<f32>,
+
+        /// Set or update expiration TTL duration (e.g. '24h', '7d')
+        #[arg(long, conflicts_with = "clear_ttl", value_parser = parse_ttl_duration)]
+        ttl: Option<chrono::Duration>,
+
+        /// Clear existing expiration TTL so the memory remains active
+        #[arg(long = "clear-ttl", visible_alias = "no-ttl")]
+        clear_ttl: bool,
+
+        /// Update provenance / verification level
+        #[arg(short = 'p', long)]
+        provenance: Option<String>,
+
+        /// Attach additional files to the memory
+        #[arg(short = 'f', long = "file", visible_alias = "attach")]
+        files: Vec<PathBuf>,
+
+        /// Re-extract structured entities via configured LLM
+        #[arg(long = "refresh-entities")]
+        refresh_entities: bool,
     },
 
     /// Deduplicate identical or near-duplicate memories by merging tags, titles, and timestamps
     #[command(alias = "dedup")]
     Deduplicate,
 
-    /// Forget or expire a memory (or all memories with --all)
+    /// Forget or expire one or more memories by ID/prefix/title (or all memories with --all)
     Forget {
-        /// Memory ID to forget (or omit when using --all)
-        id: Option<String>,
+        /// Memory ID(s), prefix(es), or unique exact title(s) to forget (omit when using --all)
+        #[arg(num_args = 0..)]
+        ids: Vec<String>,
 
         /// Forget all memories in the database
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ids")]
         all: bool,
 
         /// Permanently delete instead of soft-retiring
@@ -326,20 +375,36 @@ pub enum Commands {
     /// Export memories to Open Knowledge Format (OKF), lossless JSON backup, or compressed DB transfer bundle (.zip)
     Export {
         /// Target export format: json, okf, or bundle
-        #[arg(long, default_value = "json", value_parser = ["json", "okf", "bundle"])]
-        format: String,
+        #[arg(long, value_parser = ["json", "okf", "bundle"], conflicts_with_all = ["okf", "bundle"])]
+        format: Option<String>,
 
         /// Export to Open Knowledge Format bundle (shorthand for --format okf)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "bundle")]
         okf: bool,
 
         /// Export full database transfer bundle (shorthand for --format bundle)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "okf")]
         bundle: bool,
 
         /// Output file path
         #[arg(short = 'o', long, visible_alias = "save-to")]
         output: Option<PathBuf>,
+
+        /// Filter exported memories by category (json/okf only)
+        #[arg(short = 't', long = "type")]
+        category: Option<MemoryType>,
+
+        /// Filter exported memories by tag (repeatable or comma-separated; json/okf only)
+        #[arg(long = "tag", visible_alias = "tags")]
+        tags: Vec<String>,
+
+        /// Filter exported memories by status (active | expired | all; json/okf only)
+        #[arg(long)]
+        status: Option<ListStatusFilter>,
+
+        /// Filter exported memories by extracted entity ('name' or 'name=val'; json/okf only)
+        #[arg(long = "entity", value_parser = lightmem::EntityFilter::parse)]
+        entity: Option<lightmem::EntityFilter>,
 
         /// Emit operation summary as machine-readable JSON (kept for backwards compatibility)
         #[arg(long = "output-json", visible_alias = "print-json", hide = true)]
@@ -356,11 +421,11 @@ pub enum Commands {
         enrich: bool,
 
         /// Explicitly allow overwriting/replacing existing memories with matching IDs
-        #[arg(long)]
+        #[arg(long, conflicts_with = "merge")]
         replace: bool,
 
         /// Merge bundle into existing memories instead of requiring an empty vault or complete replacement
-        #[arg(long)]
+        #[arg(long, conflicts_with = "replace")]
         merge: bool,
     },
 
@@ -393,6 +458,14 @@ pub enum Commands {
         /// Filter candidate memories by category
         #[arg(short = 't', long = "type")]
         category: Option<MemoryType>,
+
+        /// Filter candidate memories by tag (repeatable or comma-separated)
+        #[arg(long = "tag", visible_alias = "tags")]
+        tag: Vec<String>,
+
+        /// Filter candidate memories by extracted entity ('name' or 'name=val')
+        #[arg(long = "entity", value_parser = lightmem::EntityFilter::parse)]
+        entity: Option<lightmem::EntityFilter>,
 
         /// Point-in-time view (YYYY-MM-DD or RFC3339)
         #[arg(long, value_parser = parse_as_of_date)]
@@ -437,9 +510,17 @@ pub enum Commands {
         #[arg(long, visible_alias = "refresh")]
         reload: bool,
 
-        /// Optional sub-action such as 'reload' or 'refresh'
+        /// Optional sub-action: 'reload', 'refresh', 'path', 'reset', 'get', or 'set'
         #[arg(index = 1)]
         action: Option<String>,
+
+        /// Config field name for 'config get <KEY>' or 'config set <KEY> <VALUE>'
+        #[arg(index = 2)]
+        action_key: Option<String>,
+
+        /// Config value for 'config set <KEY> <VALUE>'
+        #[arg(index = 3)]
+        action_value: Option<String>,
 
         /// Change a setting using short terminal prompts; no full-screen interface
         #[arg(long, conflicts_with_all = ["yes", "preset", "backend", "onnx_model", "download", "url", "model", "reranker", "entity_extraction", "ollama_api_key", "reset_db", "test", "remote", "api_key", "clear_remote", "dry_run", "reload"])]
@@ -517,15 +598,19 @@ pub enum Commands {
         yes: bool,
 
         /// Remote LightMem backend server URL (e.g. http://my-server:8080)
-        #[arg(long, visible_alias = "remote-url")]
+        #[arg(long, visible_alias = "remote-url", conflicts_with = "clear_remote")]
         remote: Option<String>,
 
         /// Secret API key for authenticating with the remote LightMem server
-        #[arg(long = "api-key", visible_alias = "remote-api-key")]
+        #[arg(
+            long = "api-key",
+            visible_alias = "remote-api-key",
+            conflicts_with = "clear_remote"
+        )]
         api_key: Option<String>,
 
         /// Clear saved remote server configuration and revert to local mode
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["remote", "api_key"])]
         clear_remote: bool,
     },
 
@@ -637,6 +722,22 @@ pub enum Commands {
         /// Optional search query to filter tags
         #[arg(default_value = "")]
         query: String,
+    },
+
+    /// List extracted entities or query memories referencing an entity
+    #[command(visible_alias = "entity")]
+    Entities {
+        /// Optional entity name (or 'name=value') to filter
+        #[arg(index = 1)]
+        name: Option<String>,
+
+        /// Entity value filter (shows matching memory records)
+        #[arg(long)]
+        val: Option<String>,
+
+        /// Show matching memory records instead of entity summary counts
+        #[arg(long)]
+        memories: bool,
     },
 
     /// Traverse and list multi-hop connected memories from a starting node
@@ -882,11 +983,11 @@ pub enum BundleCommand {
         file: PathBuf,
 
         /// Overwrite/replace the entire existing vault with the transfer bundle
-        #[arg(long)]
+        #[arg(long, conflicts_with = "merge")]
         replace: bool,
 
         /// Merge bundle into existing memories instead of replacing
-        #[arg(long)]
+        #[arg(long, conflicts_with = "replace")]
         merge: bool,
 
         /// Output result as JSON
@@ -905,12 +1006,46 @@ pub enum BundleCommand {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum ListStatusFilter {
+    Active,
+    Expired,
+    All,
+}
+
+impl ListStatusFilter {
+    pub fn into_memory_status(self) -> Option<MemoryStatus> {
+        match self {
+            ListStatusFilter::Active => Some(MemoryStatus::Active),
+            ListStatusFilter::Expired => Some(MemoryStatus::Expired),
+            ListStatusFilter::All => None,
+        }
+    }
+}
+
+pub fn parse_tag_list(tags: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in tags {
+        for part in raw.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() && !out.iter().any(|t: &String| t.eq_ignore_ascii_case(trimmed))
+            {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+    out
+}
+
 #[derive(Subcommand)]
 pub enum IdentityCommand {
     UserAdd {
         id: String,
         #[arg(long)]
         name: Option<String>,
+    },
+    UserRemove {
+        id: String,
     },
     AgentAdd {
         id: String,
@@ -919,12 +1054,18 @@ pub enum IdentityCommand {
         #[arg(long)]
         name: Option<String>,
     },
+    AgentRemove {
+        id: String,
+    },
     HarnessAdd {
         id: String,
         #[arg(short = 'p', long)]
         path: Option<PathBuf>,
         #[arg(long)]
         name: Option<String>,
+    },
+    HarnessRemove {
+        id: String,
     },
     ConnectionAdd {
         id: String,
@@ -938,6 +1079,18 @@ pub enum IdentityCommand {
         project: Option<String>,
         #[arg(long, default_value = "user")]
         memory_scope: lightmem::MemoryScope,
+    },
+    ConnectionUpdate {
+        id: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, conflicts_with = "project")]
+        clear_project: bool,
+        #[arg(long)]
+        memory_scope: Option<lightmem::MemoryScope>,
+    },
+    ConnectionRemove {
+        id: String,
     },
     List {
         #[arg(default_value = "connections")]
@@ -995,6 +1148,7 @@ fn extract_subcommand_name(cli: &Cli) -> String {
         Some(Commands::Unlink { .. }) => "unlink",
         Some(Commands::Links { .. }) => "links",
         Some(Commands::Tags { .. }) => "tags",
+        Some(Commands::Entities { .. }) => "entities",
         Some(Commands::Related { .. }) => "related",
         Some(Commands::Graph { .. }) => "graph",
         Some(Commands::Autolink { .. }) => "autolink",

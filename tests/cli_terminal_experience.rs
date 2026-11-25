@@ -314,6 +314,10 @@ fn bash_completes_new_connections_and_setup_presets_at_runtime() {
     );
     assert_eq!(
         shell("lmem setup --preset d", "3", "d", "--preset"),
+        "demo\ndeepseek\n"
+    );
+    assert_eq!(
+        shell("lmem setup --preset dem", "3", "dem", "--preset"),
         "demo\n"
     );
     assert!(!f.config().exists());

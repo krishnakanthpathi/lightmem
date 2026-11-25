@@ -75,8 +75,8 @@ pub fn run(cli: Cli) -> Result<()> {
             .filter(|v| !v.trim().is_empty())
     });
     anyhow::ensure!(
-        connection_id.is_some() || (cli.scope.is_none() && cli.session.is_none()),
-        "--scope and --session require --connection"
+        connection_id.is_some() || cli.scope.is_none(),
+        "--scope requires --connection"
     );
     anyhow::ensure!(
         connection_id.is_none() || (cli.db.is_none() && env_db.is_none() && !cli.global),
@@ -146,7 +146,11 @@ pub fn run(cli: Cli) -> Result<()> {
         if cli.command.is_none() {
             let stats = match client.stats() {
                 Ok(s) => s,
-                Err(ref e) => context::handle_remote_network_error(remote_url, e, cli.json),
+                Err(ref e) => {
+                    return Err(context::handle_remote_network_error(
+                        remote_url, e, cli.json,
+                    ))
+                }
             };
             if cli.json {
                 return CliView::render_stats(&stats, Path::new(remote_url), true);
@@ -155,7 +159,7 @@ pub fn run(cli: Cli) -> Result<()> {
             return Ok(());
         }
         if let Some(ref cmd) = cli.command {
-            match remote::handle_remote_command(&client, cmd, cli.json) {
+            match remote::handle_remote_command(&client, cmd, cli.session.as_deref(), cli.json) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(e) => {
@@ -165,7 +169,9 @@ pub fn run(cli: Cli) -> Result<()> {
                         || err_str.contains("Authentication failed")
                         || err_str.contains("Failed to reach remote server");
                     if is_network_or_auth && !err_str.contains("not supported in remote mode") {
-                        context::handle_remote_network_error(remote_url, &e, cli.json);
+                        return Err(context::handle_remote_network_error(
+                            remote_url, &e, cli.json,
+                        ));
                     }
                     return Err(e);
                 }
@@ -219,6 +225,7 @@ pub fn run(cli: Cli) -> Result<()> {
             supersede,
             provenance,
             no_entities,
+            cli.session.as_deref(),
             cli.json,
             effective_db,
             global,
@@ -230,6 +237,7 @@ pub fn run(cli: Cli) -> Result<()> {
             image,
             category,
             tag,
+            entity,
             media,
             as_of,
             date,
@@ -245,6 +253,7 @@ pub fn run(cli: Cli) -> Result<()> {
             image,
             category,
             tag,
+            entity,
             media,
             as_of,
             date,
@@ -255,6 +264,7 @@ pub fn run(cli: Cli) -> Result<()> {
             save_to,
             path,
             open,
+            cli.session.as_deref(),
             cli.json,
             effective_db,
             global,
@@ -266,6 +276,8 @@ pub fn run(cli: Cli) -> Result<()> {
             precision,
             reranker,
             category,
+            tag,
+            entity,
             as_of,
             date,
             limit,
@@ -274,9 +286,12 @@ pub fn run(cli: Cli) -> Result<()> {
             precision,
             reranker,
             category,
+            tag,
+            entity,
             as_of,
             date,
             limit,
+            cli.session.as_deref(),
             cli.json,
             effective_db,
             global,
@@ -286,8 +301,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::List {
             category,
             tag,
+            entity,
             media,
             status,
+            sort,
             as_of,
             date,
             limit,
@@ -295,11 +312,14 @@ pub fn run(cli: Cli) -> Result<()> {
             page,
             save_to,
             path,
+            open,
         } => manage::handle_list(
             category,
             tag,
+            entity,
             media,
-            status,
+            status.into_memory_status(),
+            sort,
             as_of,
             date,
             limit,
@@ -307,6 +327,8 @@ pub fn run(cli: Cli) -> Result<()> {
             page,
             save_to,
             path,
+            open,
+            cli.session.as_deref(),
             cli.json,
             effective_db,
             global,
@@ -335,14 +357,28 @@ pub fn run(cli: Cli) -> Result<()> {
             title,
             category,
             tags,
+            add_tags,
+            remove_tags,
             confidence,
+            ttl,
+            clear_ttl,
+            provenance,
+            files,
+            refresh_entities,
         } => manage::handle_update(
             id,
             content,
             title,
             category,
             tags,
+            add_tags,
+            remove_tags,
             confidence,
+            ttl,
+            clear_ttl,
+            provenance,
+            files,
+            refresh_entities,
             cli.json,
             effective_db,
             global,
@@ -351,8 +387,13 @@ pub fn run(cli: Cli) -> Result<()> {
 
         Commands::Deduplicate => manage::handle_dedup(cli.json, effective_db, global, connection),
 
-        Commands::Forget { id, all, hard, yes } => manage::handle_forget(
-            id,
+        Commands::Forget {
+            ids,
+            all,
+            hard,
+            yes,
+        } => manage::handle_forget(
+            ids,
             all,
             hard,
             yes,
@@ -375,12 +416,21 @@ pub fn run(cli: Cli) -> Result<()> {
             okf,
             bundle,
             output,
+            category,
+            tags,
+            status,
+            entity,
             output_json,
         } => transfer::handle_export(
             format,
             okf,
             bundle,
             output,
+            category,
+            tags,
+            status.and_then(|s| s.into_memory_status()),
+            entity,
+            cli.session.as_deref(),
             output_json,
             cli.json,
             effective_db,
@@ -460,6 +510,20 @@ pub fn run(cli: Cli) -> Result<()> {
             graph::handle_tags(query, cli.json, effective_db, global, connection)
         }
 
+        Commands::Entities {
+            name,
+            val,
+            memories,
+        } => manage::handle_entities(
+            name,
+            val,
+            memories,
+            cli.json,
+            effective_db,
+            global,
+            connection,
+        ),
+
         Commands::Related { id, hops } => {
             graph::handle_related(id, hops, cli.json, effective_db, global, connection)
         }
@@ -490,6 +554,7 @@ pub fn run(cli: Cli) -> Result<()> {
             tags,
             confidence,
             reranker,
+            cli.session.as_deref(),
             cli.json,
             effective_db,
             global,
@@ -512,6 +577,8 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Config {
             reload,
             action,
+            action_key,
+            action_value,
             edit,
             preset,
             backend,
@@ -534,6 +601,8 @@ pub fn run(cli: Cli) -> Result<()> {
         } => config::handle_config(
             reload,
             action,
+            action_key,
+            action_value,
             edit,
             preset,
             backend,
@@ -623,6 +692,7 @@ pub fn run(cli: Cli) -> Result<()> {
             daemon,
             stop,
             status,
+            cli.json,
             effective_db,
             global,
             connection,

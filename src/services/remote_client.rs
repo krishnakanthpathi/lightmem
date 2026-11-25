@@ -1,11 +1,13 @@
 use crate::models::link::{GraphSnapshot, RelatedMemory};
 use crate::models::{
-    MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, ScoredMemory, StorageStats,
+    EntitySummary, ListSort, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
+    PaginatedMemories, ScoredMemory, StorageStats,
 };
 use crate::services::api_server::{
-    AnswerRequest, ClearPayload, ForgetPayload, LinkRequest, RecallRequest, RememberRequest,
-    UnlinkRequest,
+    AnswerRequest, AutolinkRequest, ClearPayload, ConflictsRequest, ForgetPayload, LinkRequest,
+    ObserveRequest, RecallRequest, RememberRequest, UnlinkRequest, UpdateRequest,
 };
+use crate::services::observer::ObservedCandidate;
 use crate::services::reranker::AnswerResult;
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -201,9 +203,46 @@ impl RemoteClient {
         date: Option<NaiveDate>,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<PaginatedMemories> {
+        self.list_filtered(
+            limit,
+            offset,
+            page,
+            category,
+            status,
+            true,
+            media,
+            date,
+            as_of,
+            &[],
+            None,
+            None,
+            ListSort::Newest,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_filtered(
+        &self,
+        limit: usize,
+        offset: usize,
+        page: Option<usize>,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        explicit_all_status: bool,
+        media: Option<String>,
+        date: Option<NaiveDate>,
+        as_of: Option<DateTime<Utc>>,
+        tags: &[String],
+        session: Option<&str>,
+        entity: Option<&str>,
+        sort: ListSort,
+    ) -> Result<PaginatedMemories> {
         let mut url = format!(
-            "{}/v1/list?limit={}&offset={}",
-            self.base_url, limit, offset
+            "{}/v1/list?limit={}&offset={}&sort={}",
+            self.base_url,
+            limit,
+            offset,
+            sort.as_str()
         );
         if let Some(p) = page {
             url.push_str(&format!("&page={}", p));
@@ -213,6 +252,8 @@ impl RemoteClient {
         }
         if let Some(stat) = status {
             url.push_str(&format!("&status={}", stat.as_str()));
+        } else if explicit_all_status {
+            url.push_str("&status=all");
         }
         if let Some(ref m) = media {
             url.push_str(&format!("&media={}", query_encode(m)));
@@ -222,6 +263,15 @@ impl RemoteClient {
         }
         if let Some(a) = as_of {
             url.push_str(&format!("&as_of={}", query_encode(&a.to_rfc3339())));
+        }
+        if !tags.is_empty() {
+            url.push_str(&format!("&tags={}", query_encode(&tags.join(","))));
+        }
+        if let Some(sid) = session.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str(&format!("&session={}", query_encode(sid)));
+        }
+        if let Some(ent) = entity.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str(&format!("&entity={}", query_encode(ent)));
         }
 
         let resp = self
@@ -268,6 +318,158 @@ impl RemoteClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         Ok(success)
+    }
+
+    pub fn forget_all(&self, hard: bool) -> Result<usize> {
+        let url = format!("{}/v1/forget", self.base_url);
+        let payload = ForgetPayload {
+            id: None,
+            all: true,
+            hard,
+        };
+        let resp = self
+            .apply_auth(ureq::post(&url))
+            .send_json(&payload)
+            .map_err(|e| self.map_ureq_error(e))?;
+        let val: serde_json::Value = resp
+            .into_json()
+            .context("Failed to parse forget response as JSON")?;
+        Ok(val.get("deleted").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+    }
+
+    pub fn update(&self, req: &UpdateRequest) -> Result<MemoryRecord> {
+        let url = format!("{}/v1/update", self.base_url);
+        let resp = self
+            .apply_auth(ureq::post(&url))
+            .send_json(req)
+            .map_err(|e| self.map_ureq_error(e))?;
+        resp.into_json()
+            .context("Failed to parse updated MemoryRecord as JSON")
+    }
+
+    pub fn tags(&self, query: Option<&str>) -> Result<Vec<(String, usize)>> {
+        let mut url = format!("{}/v1/tags", self.base_url);
+        if let Some(q) = query.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str(&format!("?q={}", query_encode(q)));
+        }
+        let resp = self
+            .apply_auth(ureq::get(&url))
+            .call()
+            .map_err(|e| self.map_ureq_error(e))?;
+        let items: Vec<serde_json::Value> = resp
+            .into_json()
+            .context("Failed to parse tags response as JSON")?;
+        Ok(items
+            .into_iter()
+            .filter_map(|v| {
+                let tag = v.get("tag")?.as_str()?.to_string();
+                let count = v.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                Some((tag, count))
+            })
+            .collect())
+    }
+
+    pub fn entities(&self, name: Option<&str>) -> Result<Vec<EntitySummary>> {
+        let mut url = format!("{}/v1/entities", self.base_url);
+        if let Some(n) = name.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str(&format!("?name={}", query_encode(n)));
+        }
+        let resp = self
+            .apply_auth(ureq::get(&url))
+            .call()
+            .map_err(|e| self.map_ureq_error(e))?;
+        resp.into_json()
+            .context("Failed to parse entities response as JSON")
+    }
+
+    pub fn find_by_entity(&self, name: &str, val: Option<&str>) -> Result<Vec<MemoryRecord>> {
+        let mut url = format!(
+            "{}/v1/entities?name={}&memories=true",
+            self.base_url,
+            query_encode(name)
+        );
+        if let Some(v) = val.map(str::trim).filter(|s| !s.is_empty()) {
+            url.push_str(&format!("&val={}", query_encode(v)));
+        }
+        let resp = self
+            .apply_auth(ureq::get(&url))
+            .call()
+            .map_err(|e| self.map_ureq_error(e))?;
+        resp.into_json()
+            .context("Failed to parse entity memories as JSON")
+    }
+
+    pub fn deduplicate(&self) -> Result<usize> {
+        let url = format!("{}/v1/deduplicate", self.base_url);
+        let resp = self
+            .apply_auth(ureq::post(&url))
+            .send_json(serde_json::json!({}))
+            .map_err(|e| self.map_ureq_error(e))?;
+        let val: serde_json::Value = resp
+            .into_json()
+            .context("Failed to parse deduplicate response as JSON")?;
+        Ok(val.get("merged").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+    }
+
+    pub fn autolink(&self, min_similarity: Option<f32>) -> Result<(usize, usize, usize)> {
+        let url = format!("{}/v1/autolink", self.base_url);
+        let payload = AutolinkRequest { min_similarity };
+        let resp = self
+            .apply_auth(ureq::post(&url))
+            .send_json(&payload)
+            .map_err(|e| self.map_ureq_error(e))?;
+        let val: serde_json::Value = resp
+            .into_json()
+            .context("Failed to parse autolink response as JSON")?;
+        let new_links = val.get("new_links").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let nodes = val.get("nodes").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let edges = val.get("edges").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        Ok((new_links, nodes, edges))
+    }
+
+    pub fn conflicts(
+        &self,
+        yes: bool,
+        min_similarity: f32,
+        reranker: Option<&str>,
+    ) -> Result<Vec<MemoryConflict>> {
+        let url = format!("{}/v1/conflicts", self.base_url);
+        let payload = ConflictsRequest {
+            yes,
+            min_similarity: Some(min_similarity),
+            reranker: reranker.map(ToString::to_string),
+        };
+        let resp = self
+            .apply_auth(ureq::post(&url))
+            .send_json(&payload)
+            .map_err(|e| self.map_ureq_error(e))?;
+        resp.into_json()
+            .context("Failed to parse conflicts response as JSON")
+    }
+
+    pub fn observe(
+        &self,
+        req: &ObserveRequest,
+    ) -> Result<(Vec<ObservedCandidate>, Vec<MemoryRecord>)> {
+        let url = format!("{}/v1/observe", self.base_url);
+        let resp = self
+            .apply_auth(ureq::post(&url))
+            .send_json(req)
+            .map_err(|e| self.map_ureq_error(e))?;
+        let val: serde_json::Value = resp
+            .into_json()
+            .context("Failed to parse observe response as JSON")?;
+        let candidates: Vec<ObservedCandidate> = serde_json::from_value(
+            val.get("candidates")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )?;
+        let saved: Vec<MemoryRecord> = serde_json::from_value(
+            val.get("saved")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )?;
+        Ok((candidates, saved))
     }
 
     pub fn links(&self, id: &str) -> Result<Vec<crate::models::MemoryLink>> {

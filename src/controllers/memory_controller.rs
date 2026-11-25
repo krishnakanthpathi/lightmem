@@ -1,13 +1,13 @@
 use crate::models::{
     compute_sha256_hex, detect_memory_conflict_with_similarity, AttachmentInput,
-    AttachmentMetadata, GraphSnapshot, LightMemConfig, MemoryConflict, MemoryLink, MemoryRecord,
-    MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory, ScoredMemory, StorageStats,
-    DEFAULT_CONFLICT_SIMILARITY,
+    AttachmentMetadata, EntityFilter, EntitySummary, LightMemConfig, ListSort, MemoryConflict,
+    MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory, ScoredMemory,
+    StorageStats, DEFAULT_CONFLICT_SIMILARITY,
 };
 use crate::repositories::Storage;
 use crate::services::{
-    cosine_similarity, extract_imported_links, AnswerResult, EmbeddingProvider, Exporter,
-    HashEmbeddingProvider, HybridSearchEngine, JsonMemoryImporter, MemoryImporter,
+    cosine_similarity, extract_imported_links, AnswerResult, EmbeddingProvider, ExportFilter,
+    Exporter, HashEmbeddingProvider, HybridSearchEngine, JsonMemoryImporter, MemoryImporter,
     ObservedCandidate, ObserverService, OkfMemoryImporter, OllamaEmbeddingProvider, OllamaReranker,
     OnnxEmbeddingProvider, OnnxQaReranker, Reranker, Top1Reranker,
 };
@@ -39,6 +39,23 @@ impl LightMem {
     pub fn open_at(db_path: &Path, config: LightMemConfig) -> Result<Self> {
         let embedding_identity = config.embedding_identity()?;
         let storage = Storage::open(db_path)?;
+
+        Ok(Self {
+            storage: Arc::new(storage),
+            embedder: Mutex::new(None),
+            config,
+            embedding_identity,
+        })
+    }
+
+    /// Open database at a specific path with an attached provenance/session context
+    pub fn open_at_with_context(
+        db_path: &Path,
+        config: LightMemConfig,
+        context: crate::models::MemoryContext,
+    ) -> Result<Self> {
+        let embedding_identity = config.embedding_identity()?;
+        let storage = Storage::open(db_path)?.with_context(context);
 
         Ok(Self {
             storage: Arc::new(storage),
@@ -925,37 +942,18 @@ impl LightMem {
         limit: usize,
         min_similarity: Option<f32>,
     ) -> Result<Vec<ScoredMemory>> {
-        self.storage
-            .check_embedding_identity(&self.embedding_identity)?;
-        // Day filtering must see the complete eligible pool, not a global top-250
-        // prefix. Each search lane is bounded by at least this many records, so
-        // no day-eligible hit can be discarded before the day predicate runs.
-        let fetch_limit = if on_date.is_some() && limit > 0 {
-            self.storage
-                .count_memories(category, Some(MemoryStatus::Active), as_of)?
-                .max(limit)
-        } else {
-            limit
-        };
-        let mut results = HybridSearchEngine::search_with_identity(
-            &self.storage,
-            self.embedder()?.as_ref(),
+        self.recall_filtered(
             query,
             category,
-            Some(MemoryStatus::Active),
             as_of,
-            fetch_limit,
+            on_date,
+            &[],
+            None,
+            None,
+            limit,
             min_similarity,
-            Some(&self.embedding_identity),
-        )?;
-        if let Some(target_day) = on_date {
-            results.retain(|r| {
-                r.memory.created_at.date_naive() == target_day
-                    || r.memory.updated_at.date_naive() == target_day
-            });
-            results.truncate(limit);
-        }
-        Ok(results)
+            false,
+        )
     }
 
     /// Hybrid Recall with optional multi-hop expansion along knowledge graph links
@@ -970,12 +968,44 @@ impl LightMem {
         min_similarity: Option<f32>,
         multi_hop: bool,
     ) -> Result<Vec<ScoredMemory>> {
+        self.recall_filtered(
+            query,
+            category,
+            as_of,
+            on_date,
+            &[],
+            None,
+            None,
+            limit,
+            min_similarity,
+            multi_hop,
+        )
+    }
+
+    /// Hybrid Recall with optional date, tags, session, entity, and multi-hop filters
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_filtered(
+        &self,
+        query: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+        limit: usize,
+        min_similarity: Option<f32>,
+        multi_hop: bool,
+    ) -> Result<Vec<ScoredMemory>> {
         let input = crate::services::embeddings::MultimodalInput::text_only(query);
-        self.recall_multimodal_expanded(
+        self.recall_multimodal_filtered(
             &input,
             category,
             as_of,
             on_date,
+            tags,
+            session_id,
+            entity,
             limit,
             min_similarity,
             multi_hop,
@@ -994,12 +1024,40 @@ impl LightMem {
         min_similarity: Option<f32>,
         multi_hop: bool,
     ) -> Result<Vec<ScoredMemory>> {
+        self.recall_multimodal_filtered(
+            input,
+            category,
+            as_of,
+            on_date,
+            &[],
+            None,
+            None,
+            limit,
+            min_similarity,
+            multi_hop,
+        )
+    }
+
+    /// Multimodal Hybrid Recall with full metadata filters and optional 1-hop graph expansion
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_multimodal_filtered(
+        &self,
+        input: &crate::services::embeddings::MultimodalInput<'_>,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+        limit: usize,
+        min_similarity: Option<f32>,
+        multi_hop: bool,
+    ) -> Result<Vec<ScoredMemory>> {
         self.storage
             .check_embedding_identity(&self.embedding_identity)?;
-        // Day filtering must see the complete eligible pool, not a global top-250
-        // prefix. Each search lane is bounded by at least this many records, so
-        // no day-eligible hit can be discarded before the day predicate runs.
-        let fetch_limit = if on_date.is_some() && limit > 0 {
+        let has_post_filters =
+            on_date.is_some() || !tags.is_empty() || session_id.is_some() || entity.is_some();
+        let fetch_limit = if has_post_filters && limit > 0 {
             self.storage
                 .count_memories(category, Some(MemoryStatus::Active), as_of)?
                 .max(limit)
@@ -1018,10 +1076,16 @@ impl LightMem {
             min_similarity,
             Some(&self.embedding_identity),
         )?;
-        if let Some(target_day) = on_date {
+        if has_post_filters {
             base_results.retain(|r| {
-                r.memory.created_at.date_naive() == target_day
-                    || r.memory.updated_at.date_naive() == target_day
+                if let Some(target_day) = on_date {
+                    if r.memory.created_at.date_naive() != target_day
+                        && r.memory.updated_at.date_naive() != target_day
+                    {
+                        return false;
+                    }
+                }
+                r.memory.matches_metadata_filters(tags, session_id, entity)
             });
             base_results.truncate(limit);
         }
@@ -1065,6 +1129,9 @@ impl LightMem {
                         {
                             continue;
                         }
+                    }
+                    if !memory.matches_metadata_filters(tags, session_id, entity) {
+                        continue;
                     }
                     if seen_ids.insert(memory.id.clone()) {
                         expanded.push(ScoredMemory {
@@ -1145,6 +1212,38 @@ impl LightMem {
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedMemories> {
+        let tags: Vec<String> = tag.map(|t| vec![t.to_string()]).unwrap_or_default();
+        self.list_filtered_full(
+            category,
+            status,
+            as_of,
+            on_date,
+            media,
+            &tags,
+            None,
+            None,
+            ListSort::Newest,
+            limit,
+            offset,
+        )
+    }
+
+    /// Apply media/date/tags/session/entity filters and sort before pagination, including accurate filtered totals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_filtered_full(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+        sort: ListSort,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
         anyhow::ensure!(
             limit > 0 && limit <= i64::MAX as usize && offset <= i64::MAX as usize,
             "Invalid pagination range"
@@ -1154,13 +1253,15 @@ impl LightMem {
             anyhow::ensure!(
                 matches!(
                     clean_m.as_str(),
-                    "any" | "all" | "image" | "audio" | "video" | "document"
+                    "any" | "all" | "image" | "audio" | "video" | "document" | "code" | "archive" | "binary"
                 ),
-                "Invalid media filter"
+                "Invalid media filter '{}'. Expected: any, all, image, audio, video, document, code, archive, or binary",
+                m
             );
         }
-        self.storage
-            .list_memories_filtered(category, status, as_of, on_date, media, tag, limit, offset)
+        self.storage.list_memories_filtered_full(
+            category, status, as_of, on_date, media, tags, session_id, entity, sort, limit, offset,
+        )
     }
 
     /// List memories by 1-indexed page number and page size
@@ -1213,6 +1314,11 @@ impl LightMem {
     /// Find memories containing a specific entity name and optional value
     pub fn find_by_entity(&self, name: &str, val: Option<&str>) -> Result<Vec<MemoryRecord>> {
         self.storage.find_by_entity(name, val)
+    }
+
+    /// List extracted entities across all active memories
+    pub fn list_entities(&self, name_filter: Option<&str>) -> Result<Vec<EntitySummary>> {
+        self.storage.list_all_entities(name_filter)
     }
 
     /// Access underlying SQLite storage engine
@@ -1283,7 +1389,9 @@ impl LightMem {
     pub fn forget(&self, id: &str, hard_delete: bool) -> Result<bool> {
         let old_atts = if hard_delete {
             self.storage
-                .get_memory(id)?
+                .get_memory_for_restore(id)
+                .ok()
+                .flatten()
                 .map(|m| m.attachments)
                 .unwrap_or_default()
         } else {
@@ -1356,16 +1464,111 @@ impl LightMem {
         new_tags: Option<Vec<String>>,
         new_confidence: Option<f32>,
     ) -> Result<MemoryRecord> {
-        self.storage
-            .check_embedding_identity(&self.embedding_identity)?;
-        let embedder = self.embedder()?;
-        let updated = self.storage.update_memory(
+        self.update_memory_full(
             id_or_title,
             new_content,
             new_title,
             new_category,
-            new_tags.as_deref(),
+            new_tags,
+            Vec::new(),
+            Vec::new(),
             new_confidence,
+            None,
+            None,
+            Vec::new(),
+            false,
+        )
+    }
+
+    /// Update any mutable attributes of an existing memory in-place
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_memory_full(
+        &self,
+        id_or_title: &str,
+        new_content: Option<&str>,
+        new_title: Option<&str>,
+        new_category: Option<MemoryType>,
+        replace_tags: Option<Vec<String>>,
+        mut add_tags: Vec<String>,
+        remove_tags: Vec<String>,
+        new_confidence: Option<f32>,
+        new_provenance: Option<&str>,
+        new_expired_at: Option<Option<DateTime<Utc>>>,
+        new_attachments: Vec<AttachmentInput>,
+        refresh_entities: bool,
+    ) -> Result<MemoryRecord> {
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let embedder = self.embedder()?;
+
+        let mut clean_attachments = Vec::new();
+        let mut seen_sha = HashSet::new();
+        for att in new_attachments {
+            if !seen_sha.insert(att.metadata.sha256.clone()) {
+                continue;
+            }
+            if !add_tags
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&att.metadata.media_kind))
+            {
+                add_tags.push(att.metadata.media_kind.clone());
+            }
+            if let Some(ext) = Path::new(&att.metadata.filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+            {
+                if !ext.is_empty() && !add_tags.iter().any(|t| t.eq_ignore_ascii_case(&ext)) {
+                    add_tags.push(ext);
+                }
+            }
+            clean_attachments.push(att);
+        }
+
+        let llm_available = self.config.has_active_llm()
+            || self.config.has_explicit_entity_llm()
+            || (self.config.entity_extraction == "llm"
+                && self.config.effective_ollama_url() != "http://localhost:11434");
+        let auto_extract_on_edit = new_content.is_some()
+            && !self.config.entity_extraction.eq_ignore_ascii_case("off")
+            && !self.config.entity_extraction.is_empty()
+            && llm_available;
+
+        let extracted_entities = if refresh_entities || auto_extract_on_edit {
+            let source_text = if let Some(c) = new_content {
+                Some(c.to_string())
+            } else {
+                self.get(id_or_title)?.map(|m| m.content)
+            };
+            if let Some(txt) = source_text {
+                if refresh_entities {
+                    Some(ObserverService::extract_entities_via_llm(
+                        &txt,
+                        &self.config,
+                    )?)
+                } else {
+                    ObserverService::extract_entities_via_llm(&txt, &self.config).ok()
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let updated = self.storage.update_memory_full(
+            id_or_title,
+            new_content,
+            new_title,
+            new_category,
+            replace_tags.as_deref(),
+            &add_tags,
+            &remove_tags,
+            new_confidence,
+            new_provenance,
+            new_expired_at,
+            extracted_entities.as_deref(),
+            &clean_attachments,
             Some(embedder.as_ref()),
             Some(&self.embedding_identity),
         )?;
@@ -1398,7 +1601,7 @@ impl LightMem {
     }
 
     /// Retrieve all direct outgoing and incoming links for a memory
-    pub fn get_links(&self, memory_id: &str) -> Result<Vec<MemoryLink>> {
+    pub fn get_links(&self, memory_id: &str) -> Result<Vec<crate::models::MemoryLink>> {
         self.storage.get_links_for_memory(memory_id)
     }
 
@@ -1414,7 +1617,11 @@ impl LightMem {
     }
 
     /// Get knowledge graph snapshot (all active nodes and edges, or focused neighborhood)
-    pub fn graph(&self, focus: Option<&str>, hops: Option<usize>) -> Result<GraphSnapshot> {
+    pub fn graph(
+        &self,
+        focus: Option<&str>,
+        hops: Option<usize>,
+    ) -> Result<crate::models::GraphSnapshot> {
         self.storage.get_graph_snapshot(focus, hops)
     }
 
@@ -1423,8 +1630,24 @@ impl LightMem {
         Exporter::export_okf(&self.storage, target_path)
     }
 
+    pub fn export_okf_filtered(
+        &self,
+        target_path: Option<&Path>,
+        filter: &ExportFilter,
+    ) -> Result<PathBuf> {
+        Exporter::export_okf_filtered(&self.storage, target_path, filter)
+    }
+
     pub fn export_json(&self, target_path: &Path) -> Result<PathBuf> {
         Exporter::export_json(&self.storage, target_path)
+    }
+
+    pub fn export_json_filtered(
+        &self,
+        target_path: &Path,
+        filter: &ExportFilter,
+    ) -> Result<PathBuf> {
+        Exporter::export_json_filtered(&self.storage, target_path, filter)
     }
 
     /// Export the entire database, all videos, photos, documents, and vectors into a compressed ZIP transfer bundle
@@ -1642,37 +1865,29 @@ impl LightMem {
             return Ok(Box::new(Top1Reranker));
         }
 
-        let (stored_prov, _, _) = self.config.active_provider();
+        let (stored_prov, stored_default_url, _) = self.config.active_provider();
         let mut effective_cfg = self.config.clone();
         if let Some((prov, _)) = active_reranker.split_once(':') {
             let prov_lower = prov.trim().to_lowercase();
+            effective_cfg.reranker = active_reranker.to_string();
             if matches!(
                 prov_lower.as_str(),
-                "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
-            ) && (prov_lower != stored_prov
-                || self.config.ollama_url == "http://localhost:11434"
-                || self.config.ollama_url.is_empty())
-            {
-                let _ = effective_cfg.apply_preset(&prov_lower);
+                "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral" | "ollama"
+            ) {
+                effective_cfg.align_provider_endpoint(Some(stored_default_url), None);
                 if prov_lower != stored_prov {
                     effective_cfg.ollama_api_key = None;
                 }
             }
-            effective_cfg.reranker = active_reranker.to_string();
         } else if matches!(
             lower.as_str(),
-            "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral"
+            "openai" | "gemini" | "groq" | "openrouter" | "deepseek" | "mistral" | "ollama"
         ) {
-            if lower != stored_prov
-                || self.config.ollama_url == "http://localhost:11434"
-                || self.config.ollama_url.is_empty()
-            {
-                let _ = effective_cfg.apply_preset(&lower);
-                if lower != stored_prov {
-                    effective_cfg.ollama_api_key = None;
-                }
-            }
             effective_cfg.reranker = active_reranker.to_string();
+            effective_cfg.align_provider_endpoint(Some(stored_default_url), None);
+            if lower != stored_prov {
+                effective_cfg.ollama_api_key = None;
+            }
         }
 
         if lower == "ollama"
@@ -1799,7 +2014,35 @@ impl LightMem {
         limit: usize,
         reranker_override: Option<&str>,
     ) -> Result<AnswerResult> {
-        let candidates = self.recall_with_date(question, category, as_of, on_date, limit, None)?;
+        self.answer_with_filters(
+            question,
+            category,
+            as_of,
+            on_date,
+            &[],
+            None,
+            None,
+            limit,
+            reranker_override,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn answer_with_filters(
+        &self,
+        question: &str,
+        category: Option<MemoryType>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        tags: &[String],
+        session_id: Option<&str>,
+        entity: Option<&EntityFilter>,
+        limit: usize,
+        reranker_override: Option<&str>,
+    ) -> Result<AnswerResult> {
+        let candidates = self.recall_filtered(
+            question, category, as_of, on_date, tags, session_id, entity, limit, None, false,
+        )?;
 
         // Exact entity slot shortcut (when caller did not explicitly request a specific reranker
         // and the query is not a multi-record synthesis/summary prompt).

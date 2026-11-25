@@ -1553,7 +1553,10 @@ impl CliView {
                 );
                 obj.insert(
                     "entity_extraction_destination".into(),
-                    serde_json::json!(if cfg.entity_extraction == "llm" {
+                    serde_json::json!(if cfg.has_active_llm()
+                        && !cfg.entity_extraction.eq_ignore_ascii_case("off")
+                        && !cfg.entity_extraction.is_empty()
+                    {
                         Some(cfg.effective_ollama_url())
                     } else {
                         None
@@ -2026,6 +2029,181 @@ impl CliView {
         Ok(())
     }
 
+    pub fn render_entities(entities: &[crate::models::EntitySummary], json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(entities)?);
+            return Ok(());
+        }
+
+        if entities.is_empty() {
+            println!(
+                "\n  {} No active entities found in vault.\n",
+                Self::slate("○")
+            );
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("Extracted Entities")
+        );
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
+        println!(
+            "  {:<20} {:<30} {:>8}",
+            Self::slate("ENTITY"),
+            Self::slate("VALUE"),
+            Self::slate("COUNT")
+        );
+        println!(
+            "  {}",
+            Self::slate("──────────────────────────────────────────────────────────────")
+        );
+        for ent in entities {
+            println!(
+                "  {:<20} {:<30} {:>8}",
+                Self::violet_bold(&ent.name),
+                Self::gold(&ent.val),
+                Self::white_bold(&ent.count.to_string())
+            );
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_identity_entry(
+        action: &str,
+        value: &serde_json::Value,
+        json: bool,
+    ) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(value)?);
+            return Ok(());
+        }
+        println!(
+            "\n  {} {} {}",
+            Self::emerald_bold("✓"),
+            Self::white_bold(action),
+            Self::gold(
+                value
+                    .get("connection_id")
+                    .or_else(|| value.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            )
+        );
+        if let Some(obj) = value.as_object() {
+            for (k, v) in obj {
+                if v.is_null() {
+                    continue;
+                }
+                let disp = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                println!("  {} {:<16} {}", Self::slate("▸"), Self::slate(k), disp);
+            }
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_identity_list(kind: &str, value: &serde_json::Value, json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(value)?);
+            return Ok(());
+        }
+        let items = value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        if items.is_empty() {
+            println!("\n  {} No {} registered.\n", Self::slate("○"), kind);
+            return Ok(());
+        }
+        println!();
+        println!(
+            "  {} {} ({})",
+            Self::crimson_bold("❖"),
+            Self::white_bold(&format!("Registered {}", kind)),
+            items.len()
+        );
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
+        for item in items {
+            let id = item
+                .get("connection_id")
+                .or_else(|| item.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let name = item.get("name").and_then(|v| v.as_str());
+            let extra = if let Some(scope) = item.get("scope").and_then(|v| v.as_str()) {
+                let user = item.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                let agent = item.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+                let harness = item
+                    .get("harness_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let project = item
+                    .get("project_id")
+                    .and_then(|v| v.as_str())
+                    .map(|p| format!(" project={}", p))
+                    .unwrap_or_default();
+                format!(
+                    "user={} agent={} harness={} scope={}{}",
+                    user, agent, harness, scope, project
+                )
+            } else if let Some(u) = item.get("user_id").and_then(|v| v.as_str()) {
+                format!("name={} user={}", name.unwrap_or(id), u)
+            } else if let Some(sp) = item.get("skill_path").and_then(|v| v.as_str()) {
+                format!("name={} path={}", name.unwrap_or(id), sp)
+            } else {
+                format!("name={}", name.unwrap_or(id))
+            };
+            println!(
+                "  {} {:<18} {}",
+                Self::slate("▸"),
+                Self::gold(id),
+                Self::slate(&extra)
+            );
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_identity_removed(kind: &str, id: &str, removed: bool, json: bool) -> Result<()> {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "kind": kind,
+                    "id": id,
+                    "removed": removed,
+                }))?
+            );
+            return Ok(());
+        }
+        if removed {
+            println!(
+                "\n  {} Removed {} '{}'\n",
+                Self::emerald_bold("✓"),
+                kind,
+                Self::gold(id)
+            );
+        } else {
+            println!(
+                "\n  {} {} '{}' not found\n",
+                Self::crimson_bold("✕"),
+                kind,
+                Self::gold(id)
+            );
+        }
+        Ok(())
+    }
+
     pub fn render_links_list(term: &str, links: &[MemoryLink], json: bool) -> Result<()> {
         if json {
             println!("{}", serde_json::to_string_pretty(&links)?);
@@ -2064,7 +2242,9 @@ impl CliView {
             Self::slate("───────────────────────────────────────────────────────────────")
         );
         for link in links {
-            let (dir, target_id) = if link.source_id == term || link.source_id.starts_with(term) {
+            let is_outgoing = link.source_id == term
+                || (link.target_id != term && link.source_id.starts_with(term));
+            let (dir, target_id) = if is_outgoing {
                 (
                     "outgoing →",
                     link.target_id.chars().take(14).collect::<String>(),
@@ -2628,7 +2808,12 @@ impl CliView {
         );
 
         for (idx, entry) in entries.iter().enumerate() {
-            let row_num = format!("{:>4}", entries.len() - idx);
+            let row_id = if entry.id > 0 {
+                entry.id as usize
+            } else {
+                entries.len() - idx
+            };
+            let row_num = format!("{:>4}", row_id);
             let status_mark = if entry.status == "success" {
                 Self::emerald_bold("✓")
             } else {
@@ -2649,6 +2834,15 @@ impl CliView {
                 Self::slate(&dur_disp),
                 entry.command.white().bold()
             );
+            if let Some(ref err_msg) = entry.error_message {
+                if !err_msg.trim().is_empty() {
+                    println!(
+                        "           {} {}",
+                        Self::crimson("↳"),
+                        Self::slate(err_msg.trim())
+                    );
+                }
+            }
         }
 
         println!(

@@ -1,7 +1,7 @@
 use crate::controllers::LightMem;
 use crate::models::{
     compute_sha256_hex, decode_base64, detect_mime_and_kind, parse_ttl_duration, AttachmentInput,
-    AttachmentMetadata, MemoryStatus, MemoryType,
+    AttachmentMetadata, EntityFilter, ListSort, MemoryStatus, MemoryType,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -49,6 +49,12 @@ pub struct RecallRequest {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<MemoryType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,6 +76,9 @@ impl Default for RecallRequest {
         Self {
             query: String::new(),
             category: None,
+            tags: Vec::new(),
+            session: None,
+            entity: None,
             media: None,
             as_of: None,
             date: None,
@@ -94,6 +103,12 @@ pub struct AnswerRequest {
     pub reranker: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<MemoryType>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub as_of: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,11 +124,74 @@ impl Default for AnswerRequest {
             precision: false,
             reranker: None,
             category: None,
+            tags: Vec::new(),
+            session: None,
+            entity: None,
             as_of: None,
             date: None,
             limit: default_recall_limit(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateRequest {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<MemoryType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    #[serde(default)]
+    pub clear_ttl: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<AttachmentPayload>>,
+    #[serde(default)]
+    pub refresh_entities: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AutolinkRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_similarity: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConflictsRequest {
+    #[serde(default)]
+    pub yes: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_similarity: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObserveRequest {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<MemoryType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -172,6 +250,58 @@ impl Default for ServerOptions {
             no_auth: false,
         }
     }
+}
+
+fn decode_attachment_payloads(
+    payloads: Option<Vec<AttachmentPayload>>,
+) -> std::result::Result<Vec<AttachmentInput>, String> {
+    let mut attachments = Vec::new();
+    if let Some(atts) = payloads {
+        for att in atts {
+            let bytes = decode_base64(&att.data_base64)
+                .map_err(|e| format!("Invalid base64 attachment: {}", e))?;
+            let (inferred_mime, inferred_kind) = detect_mime_and_kind(&att.name, &bytes);
+            let mime_type = att.mime.unwrap_or(inferred_mime);
+            let sha256 = compute_sha256_hex(&bytes);
+            let meta = AttachmentMetadata {
+                id: uuid::Uuid::new_v4().to_string(),
+                memory_id: String::new(),
+                filename: att.name,
+                mime_type,
+                media_kind: inferred_kind,
+                size_bytes: bytes.len() as u64,
+                sha256,
+                dimensions: None,
+                duration_secs: None,
+                created_at: Utc::now(),
+                data_base64: None,
+            };
+            attachments.push(AttachmentInput {
+                metadata: meta,
+                data: bytes,
+            });
+        }
+    }
+    Ok(attachments)
+}
+
+fn parse_query_tags(query: &HashMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for key in ["tag", "tags"] {
+        if let Some(raw) = query.get(key) {
+            for part in raw.split(',') {
+                let t = part.trim();
+                if !t.is_empty()
+                    && !out
+                        .iter()
+                        .any(|existing: &String| existing.eq_ignore_ascii_case(t))
+                {
+                    out.push(t.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn url_decode(s: &str) -> Result<String> {
@@ -587,43 +717,13 @@ fn handle_connection(
                 }
             };
 
-            let mut attachments = Vec::new();
-            if let Some(atts) = payload.attachments {
-                for att in atts {
-                    let bytes = match decode_base64(&att.data_base64) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            send_error(
-                                stream,
-                                400,
-                                "Bad Request",
-                                &format!("Invalid base64 attachment: {}", e),
-                            );
-                            return;
-                        }
-                    };
-                    let (inferred_mime, inferred_kind) = detect_mime_and_kind(&att.name, &bytes);
-                    let mime_type = att.mime.unwrap_or(inferred_mime);
-                    let sha256 = compute_sha256_hex(&bytes);
-                    let meta = AttachmentMetadata {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        memory_id: String::new(),
-                        filename: att.name,
-                        mime_type,
-                        media_kind: inferred_kind,
-                        size_bytes: bytes.len() as u64,
-                        sha256,
-                        dimensions: None,
-                        duration_secs: None,
-                        created_at: Utc::now(),
-                        data_base64: None,
-                    };
-                    attachments.push(AttachmentInput {
-                        metadata: meta,
-                        data: bytes,
-                    });
+            let attachments = match decode_attachment_payloads(payload.attachments) {
+                Ok(atts) => atts,
+                Err(msg) => {
+                    send_error(stream, 400, "Bad Request", &msg);
+                    return;
                 }
-            }
+            };
 
             let duration = match payload.ttl.as_deref().map(parse_ttl_duration).transpose() {
                 Ok(d) => d,
@@ -663,6 +763,55 @@ fn handle_connection(
             }
         }
 
+        ("POST", "/v1/update")
+        | ("PUT", "/v1/update")
+        | ("PATCH", "/v1/update")
+        | ("POST", "/update") => {
+            let payload: UpdateRequest = match serde_json::from_slice(&req.body) {
+                Ok(p) => p,
+                Err(e) => {
+                    send_error(stream, 400, "Bad Request", &format!("Invalid JSON: {}", e));
+                    return;
+                }
+            };
+            let new_expired_at = if payload.clear_ttl {
+                Some(None)
+            } else {
+                match payload.ttl.as_deref().map(parse_ttl_duration).transpose() {
+                    Ok(Some(dur)) => Some(Some(Utc::now() + dur)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        send_error(stream, 400, "Bad Request", &format!("Invalid TTL: {}", e));
+                        return;
+                    }
+                }
+            };
+            let attachments = match decode_attachment_payloads(payload.attachments) {
+                Ok(atts) => atts,
+                Err(msg) => {
+                    send_error(stream, 400, "Bad Request", &msg);
+                    return;
+                }
+            };
+            match controller.update_memory_full(
+                &payload.id,
+                payload.content.as_deref(),
+                payload.title.as_deref(),
+                payload.category,
+                payload.tags,
+                payload.add_tags,
+                payload.remove_tags,
+                payload.confidence,
+                payload.provenance.as_deref(),
+                new_expired_at,
+                attachments,
+                payload.refresh_entities,
+            ) {
+                Ok(updated) => send_json(stream, 200, "OK", &updated),
+                Err(e) => send_error(stream, 400, "Bad Request", &e.to_string()),
+            }
+        }
+
         ("POST", "/v1/recall") | ("POST", "/recall") => {
             let payload: RecallRequest = match serde_json::from_slice(&req.body) {
                 Ok(p) => p,
@@ -681,17 +830,32 @@ fn handle_connection(
                 send_error(stream, 400, "Bad Request", "Recall returns ranked memories. Use /v1/answer for precision answers; limit must not exceed 1000.");
                 return;
             }
+            let entity_filter = match payload
+                .entity
+                .as_deref()
+                .map(EntityFilter::parse)
+                .transpose()
+            {
+                Ok(ef) => ef,
+                Err(e) => {
+                    send_error(stream, 400, "Bad Request", &e);
+                    return;
+                }
+            };
             let fetch_limit = if payload.media.is_some() {
                 req_limit.max(100)
             } else {
                 req_limit
             };
 
-            match controller.recall_expanded(
+            match controller.recall_filtered(
                 &payload.query,
                 payload.category,
                 payload.as_of,
                 payload.date,
+                &payload.tags,
+                payload.session.as_deref(),
+                entity_filter.as_ref(),
                 fetch_limit,
                 payload.min_similarity,
                 payload.multi_hop,
@@ -724,6 +888,18 @@ fn handle_connection(
                     return;
                 }
             };
+            let entity_filter = match payload
+                .entity
+                .as_deref()
+                .map(EntityFilter::parse)
+                .transpose()
+            {
+                Ok(ef) => ef,
+                Err(e) => {
+                    send_error(stream, 400, "Bad Request", &e);
+                    return;
+                }
+            };
 
             let reranker = if payload.precision {
                 payload.reranker.as_deref().or(Some("onnx"))
@@ -731,11 +907,14 @@ fn handle_connection(
                 payload.reranker.as_deref()
             };
 
-            match controller.answer_with_options(
+            match controller.answer_with_filters(
                 &payload.question,
                 payload.category,
                 payload.as_of,
                 payload.date,
+                &payload.tags,
+                payload.session.as_deref(),
+                entity_filter.as_ref(),
                 payload.limit,
                 reranker,
             ) {
@@ -772,12 +951,24 @@ fn handle_connection(
                     date.is_none() || as_of.is_none(),
                     "Choose date or as_of, not both"
                 );
-                controller.list_filtered(
+                let tags = parse_query_tags(&req.query);
+                let session = req.query.get("session").map(String::as_str);
+                let entity = req
+                    .query
+                    .get("entity")
+                    .map(|e| EntityFilter::parse(e).map_err(|msg| anyhow::anyhow!(msg)))
+                    .transpose()?;
+                let sort = query_value::<ListSort>(&req.query, "sort")?.unwrap_or(ListSort::Newest);
+                controller.list_filtered_full(
                     category,
                     status,
                     as_of,
                     date,
                     req.query.get("media").map(String::as_str),
+                    &tags,
+                    session,
+                    entity.as_ref(),
+                    sort,
                     limit,
                     offset,
                 )
@@ -973,6 +1164,158 @@ fn handle_connection(
                     send_json(stream, 200, "OK", &res);
                 }
                 Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+            }
+        }
+
+        ("GET", "/v1/tags") | ("GET", "/tags") => {
+            let query_str = req.query.get("q").map(|s| s.trim().to_lowercase());
+            match controller.get_all_tags() {
+                Ok(mut tags) => {
+                    if let Some(ref q) = query_str {
+                        if !q.is_empty() {
+                            tags.retain(|(t, _)| t.contains(q));
+                        }
+                    }
+                    let items: Vec<serde_json::Value> = tags
+                        .into_iter()
+                        .map(|(tag, count)| serde_json::json!({ "tag": tag, "count": count }))
+                        .collect();
+                    send_json(stream, 200, "OK", &items);
+                }
+                Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+            }
+        }
+
+        ("GET", "/v1/entities") | ("GET", "/entities") => {
+            let name = req.query.get("name").map(String::as_str);
+            let val = req.query.get("val").map(String::as_str);
+            let want_memories = req
+                .query
+                .get("memories")
+                .is_some_and(|v| v == "true" || v == "1");
+            if val.is_some() || want_memories {
+                let Some(entity_name) = name.filter(|s| !s.trim().is_empty()) else {
+                    send_error(
+                        stream,
+                        400,
+                        "Bad Request",
+                        "Entity 'name' query parameter is required when requesting memories",
+                    );
+                    return;
+                };
+                match controller.find_by_entity(entity_name, val) {
+                    Ok(records) => send_json(stream, 200, "OK", &records),
+                    Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+                }
+            } else {
+                match controller.list_entities(name) {
+                    Ok(list) => send_json(stream, 200, "OK", &list),
+                    Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+                }
+            }
+        }
+
+        ("POST", "/v1/deduplicate") | ("POST", "/deduplicate") => match controller.deduplicate() {
+            Ok(merged) => {
+                let res = serde_json::json!({ "merged": merged });
+                send_json(stream, 200, "OK", &res);
+            }
+            Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+        },
+
+        ("POST", "/v1/autolink") | ("POST", "/autolink") => {
+            let payload: AutolinkRequest = if req.body.is_empty() {
+                AutolinkRequest::default()
+            } else {
+                match serde_json::from_slice(&req.body) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_error(stream, 400, "Bad Request", &format!("Invalid JSON: {}", e));
+                        return;
+                    }
+                }
+            };
+            match controller
+                .autolink(payload.min_similarity)
+                .and_then(|new_links| Ok((new_links, controller.graph(None, None)?)))
+            {
+                Ok((new_links, snap)) => {
+                    let res = serde_json::json!({
+                        "new_links": new_links,
+                        "nodes": snap.nodes.len(),
+                        "edges": snap.edges.len(),
+                    });
+                    send_json(stream, 200, "OK", &res);
+                }
+                Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+            }
+        }
+
+        ("POST", "/v1/conflicts") | ("POST", "/conflicts") => {
+            let payload: ConflictsRequest = if req.body.is_empty() {
+                ConflictsRequest::default()
+            } else {
+                match serde_json::from_slice(&req.body) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_error(stream, 400, "Bad Request", &format!("Invalid JSON: {}", e));
+                        return;
+                    }
+                }
+            };
+            let min_sim = payload
+                .min_similarity
+                .unwrap_or(crate::models::DEFAULT_CONFLICT_SIMILARITY);
+            match controller.find_conflicts_with_options(
+                payload.yes,
+                min_sim,
+                payload.reranker.as_deref(),
+            ) {
+                Ok(conflicts) => send_json(stream, 200, "OK", &conflicts),
+                Err(e) => send_error(stream, 500, "Internal Server Error", &e.to_string()),
+            }
+        }
+
+        ("POST", "/v1/observe") | ("POST", "/observe") => {
+            let payload: ObserveRequest = match serde_json::from_slice(&req.body) {
+                Ok(p) => p,
+                Err(e) => {
+                    send_error(stream, 400, "Bad Request", &format!("Invalid JSON: {}", e));
+                    return;
+                }
+            };
+            match controller.observe_and_extract(
+                &payload.text,
+                payload.category,
+                payload.tags.as_deref(),
+                payload.confidence,
+                payload.reranker.as_deref(),
+            ) {
+                Ok(candidates) => {
+                    if payload.dry_run || candidates.is_empty() {
+                        let res = serde_json::json!({
+                            "dry_run": payload.dry_run,
+                            "candidates": candidates,
+                            "saved": Vec::<serde_json::Value>::new(),
+                        });
+                        send_json(stream, 200, "OK", &res);
+                    } else {
+                        match controller.save_observed_candidates(&candidates) {
+                            Ok(saved) => {
+                                let res = serde_json::json!({
+                                    "dry_run": false,
+                                    "candidates": candidates,
+                                    "saved": saved,
+                                });
+                                send_json(stream, 200, "OK", &res);
+                            }
+                            Err(e) => {
+                                send_error(stream, 500, "Internal Server Error", &e.to_string())
+                            }
+                        }
+                    }
+                }
+                Err(e) => send_error(stream, 400, "Bad Request", &e.to_string()),
             }
         }
 

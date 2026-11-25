@@ -1,9 +1,30 @@
-use crate::models::{encode_base64, MemoryRecord, MemoryStatus, MemoryType};
+use crate::models::{
+    encode_base64, EntityFilter, ListSort, MemoryRecord, MemoryStatus, MemoryType,
+};
 use crate::storage::Storage;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Default)]
+pub struct ExportFilter {
+    pub category: Option<MemoryType>,
+    pub status: Option<MemoryStatus>,
+    pub tags: Vec<String>,
+    pub session_id: Option<String>,
+    pub entity: Option<EntityFilter>,
+}
+
+impl ExportFilter {
+    pub fn is_empty(&self) -> bool {
+        self.category.is_none()
+            && self.status.is_none()
+            && self.tags.is_empty()
+            && self.session_id.is_none()
+            && self.entity.is_none()
+    }
+}
 
 fn write_secure_file(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
     // A fresh private inode avoids following a leaf symlink and never exposes a
@@ -53,8 +74,42 @@ impl Exporter {
 
     /// Lossless versioned backup, including expired records, all metadata, knowledge graph links, and binary attachment BLOBs (vectors are rebuilt).
     pub fn export_json(storage: &Storage, output_path: &Path) -> Result<PathBuf> {
-        let (_, mut memories) = storage.index_snapshot()?;
-        let links = storage.all_links().unwrap_or_default();
+        Self::export_json_filtered(storage, output_path, &ExportFilter::default())
+    }
+
+    pub fn export_json_filtered(
+        storage: &Storage,
+        output_path: &Path,
+        filter: &ExportFilter,
+    ) -> Result<PathBuf> {
+        let mut memories = if filter.is_empty() {
+            let (_, memories) = storage.index_snapshot()?;
+            memories
+        } else {
+            storage
+                .list_memories_filtered_full(
+                    filter.category,
+                    filter.status,
+                    None,
+                    None,
+                    None,
+                    &filter.tags,
+                    filter.session_id.as_deref(),
+                    filter.entity.as_ref(),
+                    ListSort::Oldest,
+                    0,
+                    0,
+                )?
+                .items
+        };
+        let ids: std::collections::HashSet<String> =
+            memories.iter().map(|m| m.id.clone()).collect();
+        let links: Vec<_> = storage
+            .all_links()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| ids.contains(&l.source_id) && ids.contains(&l.target_id))
+            .collect();
         Self::attach_blobs(storage, &mut memories)?;
         let backup = serde_json::json!({
             "format": "lightmem-backup-v1",
@@ -71,7 +126,30 @@ impl Exporter {
 
     /// Export memories to an Open Knowledge Format (OKF) markdown document
     pub fn export_okf(storage: &Storage, output_path: Option<&Path>) -> Result<PathBuf> {
-        let mut memories = storage.list_memories(None, Some(MemoryStatus::Active), None, 0)?;
+        Self::export_okf_filtered(storage, output_path, &ExportFilter::default())
+    }
+
+    pub fn export_okf_filtered(
+        storage: &Storage,
+        output_path: Option<&Path>,
+        filter: &ExportFilter,
+    ) -> Result<PathBuf> {
+        let effective_status = Some(filter.status.unwrap_or(MemoryStatus::Active));
+        let mut memories = storage
+            .list_memories_filtered_full(
+                filter.category,
+                effective_status,
+                None,
+                None,
+                None,
+                &filter.tags,
+                filter.session_id.as_deref(),
+                filter.entity.as_ref(),
+                ListSort::Newest,
+                0,
+                0,
+            )?
+            .items;
         let active_ids: std::collections::HashSet<String> =
             memories.iter().map(|m| m.id.clone()).collect();
         let links: Vec<_> = storage

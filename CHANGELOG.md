@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0
+
+### Highlights
+- **CLI & Flag Disambiguation**: Fixed silent hijacking and overload ambiguity across `config` (`--embedding-model`, `--answer-model`, `--model-api-key` vs remote `--api-key`, `--entity-extraction` strict `on|off`), added `lmem config path|get|set|reset|reload`, fixed `model`/`setup` endpoint alignment without clobbering custom proxies, prevented `self.api_key` from impersonating LLM provider credentials, and defaulted `lmem serve` to `127.0.0.1`.
+- **Full CRUD, Stdin, Filters, & Destructive Guards**: Added `lmem remember -` piped stdin input, standalone global `--session` (store & filter without `--connection`), repeatable `--tag`, `--entity`, `--status active|expired|all`, `--sort`, and `--open` on `list`, full `lmem update` flags (`--add-tag`, `--remove-tag`, `--ttl`, `--clear-ttl`, `--provenance`, `-f`, `--refresh-entities`), multi-ID/title `forget` exiting non-zero on missing IDs, `lmem entities` summary/memory lookup, `lmem identity *-remove` / `connection-update`, mutually exclusive `export`/`import` flags with filtered JSON/OKF exports, `serve --status|--stop --json`, and strict `--yes` confirmation even when `--json` is passed on `forget --all`, `clear`, and `config reset|reset-db`.
+- **Remote Server, MCP, & Python SDK Parity**: Added `/v1/update`, `/v1/tags`, `/v1/entities`, `/v1/deduplicate`, `/v1/autolink`, `/v1/conflicts`, `/v1/observe`, remote tag/entity/session/sort filters, aligned MCP config backend validation (`onnx|ollama|hash`) and expanded MCP tools (`update`, `restore`, `clear`, `links`, `tags`, `entities`, `deduplicate`, `autolink`, `observe`, `export`, `import`, `bundle_*`, `history`), and added matching methods/filters to the Python `lmem.LightMem` client.
+- **Audit Redaction & Error Tracking**: Updated CLI error propagation so failed commands record real IDs and `error_message` entries in `history.db`, and extended argument redaction to `--remote-api-key`, `--embedding-api-key`, `--server-key`, and `--key`.
+
 ## 0.10.0
 
 - **Modular CLI Architecture**: Modularized `main.rs` from 5,000+ monolithic lines into maintainable domain-specific command handlers (`src/commands/`), eliminating raw database queries in views and CLI helpers.

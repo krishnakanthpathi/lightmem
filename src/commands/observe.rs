@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::config::migrate_embeddings;
-use super::context::open_controller;
+use super::context::open_controller_with_session;
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_observe(
@@ -17,12 +17,13 @@ pub fn handle_observe(
     tags: Option<String>,
     confidence: f32,
     reranker: Option<String>,
+    session: Option<&str>,
     json: bool,
     effective_db: Option<&Path>,
     global: bool,
     connection: Option<&ResolvedConnection>,
 ) -> Result<()> {
-    let lm = open_controller(effective_db, global, connection)?;
+    let lm = open_controller_with_session(effective_db, global, connection, session)?;
     if !dry_run && !migrate_embeddings(&lm, false, json, false)? {
         return Ok(());
     }
