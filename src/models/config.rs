@@ -89,7 +89,13 @@ impl Default for LightMemConfig {
 
 impl LightMemConfig {
     pub fn offline_requested() -> bool {
-        std::env::var_os("LIGHTMEM_OFFLINE").is_some()
+        match std::env::var("LIGHTMEM_OFFLINE") {
+            Ok(val) => {
+                let v = val.trim().to_lowercase();
+                !v.is_empty() && v != "0" && v != "false" && v != "no" && v != "off"
+            }
+            Err(_) => false,
+        }
     }
     /// Normalize any reranker string ('onnx', 'minilm-squad2', 'tinyroberta-squad2', 'ollama', 'ollama:<model>', 'top1', 'openai:<model>', etc.)
     pub fn normalize_reranker(raw: &str, legacy_qa: Option<&str>) -> String {
@@ -410,19 +416,9 @@ impl LightMemConfig {
 
     /// Resolves effective API key from config, provider-specific environment variables, or fallback environment variables.
     pub fn effective_ollama_api_key(&self) -> Option<String> {
-        let from_config = self
-            .ollama_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
-            .map(String::from);
-        if from_config.is_some() {
-            return from_config;
-        }
-
         let (prov, _default_url, key_env) = self.active_provider();
 
-        // Check provider-specific environment variables
+        // 1. Check provider-specific environment variables first (CLI flag > env var > config > default)
         if let Some(env_name) = key_env {
             if let Ok(key) = std::env::var(env_name) {
                 let trimmed = key.trim();
@@ -440,40 +436,28 @@ impl LightMemConfig {
             }
         }
 
-        // Generic / legacy fallbacks
-        std::env::var("OPENAI_API_KEY")
-            .ok()
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
-            .or_else(|| {
-                std::env::var("OLLAMA_API_KEY")
-                    .ok()
-                    .map(|k| k.trim().to_string())
-                    .filter(|k| !k.is_empty())
-            })
-            .or_else(|| {
-                std::env::var("LMEM_OLLAMA_API_KEY")
-                    .ok()
-                    .map(|k| k.trim().to_string())
-                    .filter(|k| !k.is_empty())
-            })
-            .or_else(|| {
-                std::env::var("LLM_API_KEY")
-                    .ok()
-                    .map(|k| k.trim().to_string())
-                    .filter(|k| !k.is_empty())
-            })
-            .or_else(|| {
-                if self.remote_url.is_none() {
-                    self.api_key
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
-                        .map(String::from)
-                } else {
-                    None
-                }
-            })
+        // 2. Check config file key
+        let from_config = self
+            .ollama_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
+            .map(String::from);
+        if from_config.is_some() {
+            return from_config;
+        }
+
+        // 3. Provider-specific fallbacks only (never leak OPENAI_API_KEY to non-OpenAI providers or remote server keys)
+        match prov {
+            "openai" => std::env::var("OPENAI_API_KEY").ok(),
+            "ollama" => std::env::var("OLLAMA_API_KEY")
+                .or_else(|_| std::env::var("LMEM_OLLAMA_API_KEY"))
+                .or_else(|_| std::env::var("LLM_API_KEY"))
+                .ok(),
+            _ => None,
+        }
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
     }
 
     /// Returns true if an LLM is configured as the active answer engine.
@@ -771,7 +755,16 @@ impl LightMemConfig {
     }
 
     pub fn load() -> Self {
-        Self::try_load().unwrap_or_default()
+        match Self::try_load() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to load configuration: {}. Using default.",
+                    e
+                );
+                Self::default()
+            }
+        }
     }
 
     pub fn try_load() -> Result<Self> {
@@ -880,9 +873,6 @@ impl LightMemConfig {
         }
 
         let mut to_save = self.clone();
-        if to_save.backend == "onnx" {
-            to_save.onnx_model = None;
-        }
         let norm_entity =
             if to_save.entity_extraction != "off" && !to_save.entity_extraction.is_empty() {
                 "on"

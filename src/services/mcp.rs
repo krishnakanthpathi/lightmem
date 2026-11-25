@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::str::FromStr;
+use std::sync::Arc;
 
 fn deserialize_some_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
@@ -49,6 +49,7 @@ pub struct McpServer {
     db_path: Option<PathBuf>,
     connection: Option<crate::models::ResolvedConnection>,
     config_override: Option<LightMemConfig>,
+    controller: std::sync::Mutex<Option<Arc<LightMem>>>,
 }
 
 impl McpServer {
@@ -58,6 +59,7 @@ impl McpServer {
             db_path,
             connection: None,
             config_override: None,
+            controller: std::sync::Mutex::new(None),
         }
     }
 
@@ -88,6 +90,48 @@ impl McpServer {
         } else {
             LightMem::open_default(self.global)
         }
+    }
+
+    fn get_controller(&self) -> Result<Arc<LightMem>> {
+        let mut guard = self
+            .controller
+            .lock()
+            .map_err(|_| anyhow::anyhow!("McpServer controller mutex poisoned"))?;
+        if let Some(ref lm) = *guard {
+            return Ok(Arc::clone(lm));
+        }
+        let lm = Arc::new(self.open_controller()?);
+        *guard = Some(Arc::clone(&lm));
+        Ok(lm)
+    }
+
+    fn invalidate_controller(&self) {
+        if let Ok(mut guard) = self.controller.lock() {
+            *guard = None;
+        }
+    }
+
+    fn is_known_tool(&self, name: &str) -> bool {
+        matches!(
+            name,
+            "remember"
+                | "recall"
+                | "answer"
+                | "context"
+                | "graph_related"
+                | "conflicts"
+                | "config"
+                | "forget"
+                | "stats"
+                | "list"
+                | "inspect"
+                | "update"
+                | "link"
+                | "unlink"
+                | "graph"
+                | "tags"
+                | "restore"
+        )
     }
 
     pub fn run_stdio(&self) -> Result<()> {
@@ -193,7 +237,6 @@ impl McpServer {
         };
 
         if is_notification {
-            // Notifications execute side effects without sending a response.
             if method == "tools/call" {
                 let params = req.params.unwrap_or(Value::Null);
                 let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -257,6 +300,32 @@ impl McpServer {
                 let params = req.params.unwrap_or(Value::Null);
                 let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+
+                if tool_name.is_empty() {
+                    return Some(JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: "Invalid params: missing tool name".into(),
+                            data: None,
+                        }),
+                    });
+                }
+
+                if !self.is_known_tool(tool_name) {
+                    return Some(JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32602,
+                            message: format!("Unknown tool: {}", tool_name),
+                            data: None,
+                        }),
+                    });
+                }
 
                 let tool_result = self.call_tool(tool_name, arguments);
                 let (content, is_error) = match tool_result {
@@ -495,12 +564,111 @@ impl McpServer {
                         },
                         "preset": {
                             "type": "string",
-                            "description": "Apply setup preset: 'local', 'ollama-cloud', or 'ollama-local'"
+                            "description": "Apply setup preset: local, ollama, openai, gemini, groq, openrouter, deepseek, mistral, custom, or demo"
                         },
                         "entity_extraction": {
                             "type": "string", "enum": ["off", "llm"],
                             "description": "Opt in to sending new memory text to the configured LLM; off by default"
                         }
+                    }
+                }
+            }),
+            json!({
+                "name": "list",
+                "description": "List memories chronologically with pagination, category, tag, or status filters",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max results per page (default: 20)" },
+                        "offset": { "type": "integer", "description": "Records to skip (default: 0)" },
+                        "page": { "type": "integer", "description": "Page number (1-indexed; overrides offset)" },
+                        "category": { "type": "string", "description": "Filter by category" },
+                        "tag": { "type": "string", "description": "Filter by tag" },
+                        "status": { "type": "string", "enum": ["active", "expired"], "description": "Filter by status (default: active)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "inspect",
+                "description": "Deeply inspect a memory record by ID, prefix, or title, including attachments and knowledge graph links",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["term"],
+                    "properties": {
+                        "term": { "type": "string", "description": "Memory ID, prefix, or title" }
+                    }
+                }
+            }),
+            json!({
+                "name": "update",
+                "description": "Update an existing memory's content, title, category, tags, or confidence in-place",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string", "description": "Memory ID, prefix, or title" },
+                        "content": { "type": "string", "description": "New text content" },
+                        "title": { "type": "string", "description": "New title" },
+                        "category": { "type": "string", "description": "New category" },
+                        "tags": { "type": "array", "items": { "type": "string" }, "description": "New tags" },
+                        "confidence": { "type": "number", "description": "New confidence score (0.0 to 1.0)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "link",
+                "description": "Create a directional relationship link between two memories",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["source", "target"],
+                    "properties": {
+                        "source": { "type": "string", "description": "Source memory ID, title, or prefix" },
+                        "target": { "type": "string", "description": "Target memory ID, title, or prefix" },
+                        "relation": { "type": "string", "description": "Relationship type (default: relates_to)" },
+                        "weight": { "type": "number", "description": "Connection weight / strength (default: 1.0)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "unlink",
+                "description": "Remove a relationship link between two memories",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["source", "target"],
+                    "properties": {
+                        "source": { "type": "string", "description": "Source memory ID, title, or prefix" },
+                        "target": { "type": "string", "description": "Target memory ID, title, or prefix" },
+                        "relation": { "type": "string", "description": "Specific relation to remove (omitting removes all)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "graph",
+                "description": "Retrieve knowledge graph nodes and edges with optional focus memory and hop radius",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "focus": { "type": "string", "description": "Focus the graph on a specific memory neighborhood (ID or title)" },
+                        "hops": { "type": "integer", "description": "Maximum hop radius when focused (default: 2)" }
+                    }
+                }
+            }),
+            json!({
+                "name": "tags",
+                "description": "List all distinct tags across active memories and their counts",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            json!({
+                "name": "restore",
+                "description": "Restore an archived/expired memory by ID, prefix, or exact title",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["term"],
+                    "properties": {
+                        "term": { "type": "string", "description": "Memory ID, prefix, or exact title" }
                     }
                 }
             }),
@@ -534,6 +702,91 @@ impl McpServer {
     }
 
     fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
+        // Handle "config" before attempting to open the controller so broken config can be repaired via MCP.
+        if name == "config" {
+            let mut cfg = LightMemConfig::try_load().unwrap_or_default();
+            let previous_identity = cfg.embedding_identity().ok();
+            let mut updated = false;
+
+            if let Some(backend) = args.get("backend") {
+                let b = backend.as_str().context("backend must be a string")?;
+                anyhow::ensure!(
+                    matches!(b, "onnx" | "hash" | "ollama" | "openai" | "gemini"),
+                    "Invalid backend '{}'. Supported: onnx, hash, ollama, openai, gemini",
+                    b
+                );
+                cfg.backend = b.to_string();
+                updated = true;
+            }
+            if let Some(onnx_m) = args.get("onnx_model") {
+                let m = onnx_m.as_str().context("onnx_model must be a string")?;
+                cfg.onnx_model = Some(m.to_string());
+                updated = true;
+            }
+            if let Some(url) = args.get("url") {
+                let u = url.as_str().context("url must be a string")?;
+                cfg.ollama_url = LightMemConfig::normalize_ollama_url(u);
+                updated = true;
+            }
+            if let Some(r) = args.get("reranker") {
+                let rk = r.as_str().context("reranker must be a string")?;
+                cfg.reranker = LightMemConfig::normalize_reranker(rk, None);
+                updated = true;
+            }
+            if let Some(preset) = args.get("preset") {
+                let p = preset.as_str().context("preset must be a string")?;
+                cfg.apply_preset(p)?;
+                updated = true;
+            }
+            if let Some(mode) = args.get("entity_extraction") {
+                let m = mode
+                    .as_str()
+                    .context("entity_extraction must be a string")?;
+                let mode_clean = m.trim().to_lowercase();
+                anyhow::ensure!(
+                    matches!(mode_clean.as_str(), "off" | "on" | "llm" | "true" | "false"),
+                    "Entity extraction must be on or off"
+                );
+                let normalized = if matches!(mode_clean.as_str(), "on" | "llm" | "true") {
+                    "on"
+                } else {
+                    "off"
+                };
+                cfg.entity_extraction = normalized.to_string();
+                updated = true;
+            }
+
+            let active_db = if let Ok(lm) = self.get_controller() {
+                if updated {
+                    let new_id = cfg.embedding_identity().ok();
+                    if previous_identity != new_id && lm.stats()?.total_memories > 0 {
+                        anyhow::bail!("Changing embeddings for a populated vault requires migration. Use lmem config --yes to preview and migrate.");
+                    }
+                }
+                lm.db_path().display().to_string()
+            } else {
+                self.db_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "default".to_string())
+            };
+
+            if updated {
+                cfg.save()?;
+                self.invalidate_controller();
+            }
+
+            return Ok(json!({
+                "updated": updated,
+                "backend": cfg.backend,
+                "onnx_model": cfg.onnx_model,
+                "reranker": cfg.reranker,
+                "ollama_url": cfg.ollama_url,
+                "entity_extraction": cfg.entity_extraction,
+                "active_db": active_db
+            }));
+        }
+
         let mut connection = self.connection.clone();
         let mut fallback_session: Option<String> = None;
         if name == "remember" {
@@ -548,8 +801,8 @@ impl McpServer {
             }
         }
         let lm = match &connection {
-            Some(connection) => LightMem::open_resolved(connection)?,
-            None => self.open_controller()?,
+            Some(connection) => Arc::new(LightMem::open_resolved(connection)?),
+            None => self.get_controller()?,
         };
 
         match name {
@@ -561,10 +814,15 @@ impl McpServer {
             }),
             "remember" => {
                 let content = args.get("content").and_then(|v| v.as_str());
-                let category = args
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| MemoryType::from_str(s).ok());
+                let category = if let Some(v) = args.get("category") {
+                    let s = v.as_str().context("category must be a string")?;
+                    Some(
+                        s.parse::<MemoryType>()
+                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
+                    )
+                } else {
+                    None
+                };
                 let title = args
                     .get("title")
                     .and_then(|v| v.as_str())
@@ -606,10 +864,15 @@ impl McpServer {
                     .get("extract_entities")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let ttl = args
-                    .get("ttl")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| parse_ttl_duration(s).ok());
+                let ttl = if let Some(v) = args.get("ttl") {
+                    let s = v.as_str().context("ttl must be a string")?;
+                    Some(
+                        parse_ttl_duration(s)
+                            .map_err(|e| anyhow::anyhow!("Invalid TTL '{}': {}", s, e))?,
+                    )
+                } else {
+                    None
+                };
                 let supersede = args
                     .get("supersede")
                     .and_then(|v| v.as_bool())
@@ -657,10 +920,15 @@ impl McpServer {
                     .get("query")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: query")?;
-                let category = args
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| MemoryType::from_str(s).ok());
+                let category = if let Some(v) = args.get("category") {
+                    let s = v.as_str().context("category must be a string")?;
+                    Some(
+                        s.parse::<MemoryType>()
+                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
+                    )
+                } else {
+                    None
+                };
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let min_sim = args
                     .get("min_similarity")
@@ -674,14 +942,25 @@ impl McpServer {
                     .get("multi_hop")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let as_of = args
-                    .get("as_of")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| parse_as_of_date(s).ok());
-                let on_date = args
-                    .get("date")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok());
+                let as_of = if let Some(v) = args.get("as_of") {
+                    let s = v.as_str().context("as_of must be a string")?;
+                    Some(
+                        parse_as_of_date(s)
+                            .with_context(|| format!("Invalid as_of timestamp '{}'", s))?,
+                    )
+                } else {
+                    None
+                };
+                let on_date = if let Some(v) = args.get("date") {
+                    let s = v.as_str().context("date must be a string")?;
+                    Some(
+                        NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").with_context(|| {
+                            format!("Invalid date '{}', expected YYYY-MM-DD", s)
+                        })?,
+                    )
+                } else {
+                    None
+                };
 
                 let results =
                     lm.recall_expanded(query, category, as_of, on_date, limit, min_sim, multi_hop)?;
@@ -698,8 +977,7 @@ impl McpServer {
                     let mut res = results;
                     if let Some(ref selected) = ans.selected_memory {
                         if let Some(idx) = res.iter().position(|r| r.memory.id == selected.id) {
-                            let mut item = res.remove(idx);
-                            item.score = 1.0;
+                            let item = res.remove(idx);
                             res.insert(0, item);
                         }
                     }
@@ -736,10 +1014,15 @@ impl McpServer {
                     .get("question")
                     .and_then(|v| v.as_str())
                     .context("Missing required parameter: question")?;
-                let category = args
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| MemoryType::from_str(s).ok());
+                let category = if let Some(v) = args.get("category") {
+                    let s = v.as_str().context("category must be a string")?;
+                    Some(
+                        s.parse::<MemoryType>()
+                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
+                    )
+                } else {
+                    None
+                };
                 let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 let reranker_override = args.get("reranker").and_then(|v| v.as_str());
                 let precision = args
@@ -800,62 +1083,6 @@ impl McpServer {
                 }))
             }
 
-            "config" => {
-                let mut cfg = LightMemConfig::try_load()?;
-                let previous_identity = cfg.embedding_identity()?;
-                let mut updated = false;
-
-                if let Some(backend) = args.get("backend").and_then(|v| v.as_str()) {
-                    cfg.backend = backend.to_string();
-                    updated = true;
-                }
-                if let Some(onnx_m) = args.get("onnx_model").and_then(|v| v.as_str()) {
-                    cfg.onnx_model = Some(onnx_m.to_string());
-                    updated = true;
-                }
-                if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(url);
-                    updated = true;
-                }
-                if let Some(r) = args.get("reranker").and_then(|v| v.as_str()) {
-                    cfg.reranker = LightMemConfig::normalize_reranker(r, None);
-                    updated = true;
-                }
-                if let Some(preset) = args.get("preset").and_then(|v| v.as_str()) {
-                    cfg.apply_preset(preset)?;
-                    updated = true;
-                }
-                if let Some(mode) = args.get("entity_extraction").and_then(|v| v.as_str()) {
-                    let mode_clean = mode.trim().to_lowercase();
-                    anyhow::ensure!(
-                        matches!(mode_clean.as_str(), "off" | "on" | "llm" | "true" | "false"),
-                        "Entity extraction must be on or off"
-                    );
-                    let normalized = if matches!(mode_clean.as_str(), "on" | "llm" | "true") {
-                        "on"
-                    } else {
-                        "off"
-                    };
-                    cfg.entity_extraction = normalized.to_string();
-                    updated = true;
-                }
-
-                if updated {
-                    anyhow::ensure!(cfg.embedding_identity()? == previous_identity || lm.stats()?.total_memories == 0, "Changing embeddings for a populated vault requires migration. Use lmem config --yes to preview and migrate.");
-                    cfg.save()?;
-                }
-
-                Ok(json!({
-                    "updated": updated,
-                    "backend": cfg.backend,
-                    "onnx_model": cfg.onnx_model,
-                    "reranker": cfg.reranker,
-                    "ollama_url": cfg.ollama_url,
-                    "entity_extraction": cfg.entity_extraction,
-                    "active_db": lm.db_path().display().to_string()
-                }))
-            }
-
             "forget" => {
                 let id = args
                     .get("id")
@@ -880,6 +1107,186 @@ impl McpServer {
                     "total_vectors": stats.total_vectors,
                     "by_category": stats.by_category,
                     "db_path": lm.db_path().display().to_string()
+                }))
+            }
+
+            "list" => {
+                let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+                let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let page = args
+                    .get("page")
+                    .and_then(|v| v.as_u64())
+                    .map(|p| p as usize);
+                let category = if let Some(v) = args.get("category") {
+                    let s = v.as_str().context("category must be a string")?;
+                    Some(
+                        s.parse::<MemoryType>()
+                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
+                    )
+                } else {
+                    None
+                };
+                let tag = args.get("tag").and_then(|v| v.as_str());
+                let status = match args.get("status").and_then(|v| v.as_str()) {
+                    Some("expired") => Some(crate::models::MemoryStatus::Expired),
+                    _ => Some(crate::models::MemoryStatus::Active),
+                };
+                let effective_offset = if let Some(p) = page {
+                    if p > 0 {
+                        (p - 1) * limit
+                    } else {
+                        offset
+                    }
+                } else {
+                    offset
+                };
+                let paginated = lm.list_filtered_with_tag(
+                    category,
+                    status,
+                    None,
+                    None,
+                    None,
+                    tag,
+                    limit,
+                    effective_offset,
+                )?;
+                Ok(serde_json::to_value(&paginated)?)
+            }
+
+            "inspect" => {
+                let term = args
+                    .get("term")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: term")?;
+                let memory = lm
+                    .get(term)?
+                    .with_context(|| format!("Memory '{}' not found", term))?;
+                let links = lm.get_links(&memory.id).unwrap_or_default();
+                Ok(json!({
+                    "memory": memory,
+                    "links": links
+                }))
+            }
+
+            "update" => {
+                let id = args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: id")?;
+                let content = args.get("content").and_then(|v| v.as_str());
+                let title = args.get("title").and_then(|v| v.as_str());
+                let category = if let Some(v) = args.get("category") {
+                    let s = v.as_str().context("category must be a string")?;
+                    Some(
+                        s.parse::<MemoryType>()
+                            .map_err(|e| anyhow::anyhow!("Invalid category '{}': {}", s, e))?,
+                    )
+                } else {
+                    None
+                };
+                let tags: Option<Vec<String>> = match args.get("tags") {
+                    Some(Value::Array(arr)) => Some(
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect(),
+                    ),
+                    Some(Value::String(s)) => Some(
+                        s.split(',')
+                            .map(|item| item.trim().to_string())
+                            .filter(|item| !item.is_empty())
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+                let confidence = args
+                    .get("confidence")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32);
+
+                let updated = lm.update_memory(id, content, title, category, tags, confidence)?;
+                let links = lm.get_links(&updated.id).unwrap_or_default();
+                Ok(json!({
+                    "status": "updated",
+                    "memory": updated,
+                    "links": links
+                }))
+            }
+
+            "link" => {
+                let source = args
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: source")?;
+                let target = args
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: target")?;
+                let relation = args.get("relation").and_then(|v| v.as_str());
+                let weight = args
+                    .get("weight")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32);
+
+                let (src_id, dst_id) = lm.link(source, target, relation, weight)?;
+                Ok(json!({
+                    "status": "linked",
+                    "source": src_id,
+                    "target": dst_id,
+                    "relation": relation.unwrap_or("relates_to"),
+                    "weight": weight.unwrap_or(1.0)
+                }))
+            }
+
+            "unlink" => {
+                let source = args
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: source")?;
+                let target = args
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: target")?;
+                let relation = args.get("relation").and_then(|v| v.as_str());
+
+                let removed = lm.unlink(source, target, relation)?;
+                Ok(json!({
+                    "source": source,
+                    "target": target,
+                    "removed": removed
+                }))
+            }
+
+            "graph" => {
+                let focus = args.get("focus").and_then(|v| v.as_str());
+                let hops = args
+                    .get("hops")
+                    .and_then(|v| v.as_u64())
+                    .map(|h| h as usize);
+
+                let snapshot = lm.graph(focus, hops)?;
+                Ok(serde_json::to_value(&snapshot)?)
+            }
+
+            "tags" => {
+                let tags = lm.get_all_tags()?;
+                let list: Vec<Value> = tags
+                    .into_iter()
+                    .map(|(t, c)| json!({ "tag": t, "count": c }))
+                    .collect();
+                Ok(json!(list))
+            }
+
+            "restore" => {
+                let term = args
+                    .get("term")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: term")?;
+                let restored = lm.restore_memory(term)?;
+                let links = lm.get_links(&restored.id).unwrap_or_default();
+                Ok(json!({
+                    "status": "restored",
+                    "memory": restored,
+                    "links": links
                 }))
             }
 
@@ -943,6 +1350,14 @@ mod tests {
         assert!(tool_names.contains(&"config"));
         assert!(tool_names.contains(&"forget"));
         assert!(tool_names.contains(&"stats"));
+        assert!(tool_names.contains(&"list"));
+        assert!(tool_names.contains(&"inspect"));
+        assert!(tool_names.contains(&"update"));
+        assert!(tool_names.contains(&"link"));
+        assert!(tool_names.contains(&"unlink"));
+        assert!(tool_names.contains(&"graph"));
+        assert!(tool_names.contains(&"tags"));
+        assert!(tool_names.contains(&"restore"));
     }
 
     #[test]
@@ -1038,5 +1453,69 @@ mod tests {
         assert_eq!(res["session_id"], "session-xyz");
         let tags = res["memory"]["tags"].as_array().unwrap();
         assert!(tags.iter().any(|t| t == "session:session-xyz"));
+    }
+
+    #[test]
+    fn test_mcp_unknown_tool_returns_invalid_params() {
+        let server = McpServer::new(false, None);
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(10)),
+            method: Some(json!("tools/call")),
+            params: Some(json!({
+                "name": "non_existent_tool",
+                "arguments": {}
+            })),
+        };
+        let resp = server.handle_request(req).expect("Response expected");
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("Error expected");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn test_mcp_notification_executes_tool_without_response() {
+        let temp_db = tempfile::NamedTempFile::new().unwrap();
+        let cfg = LightMemConfig {
+            backend: "hash".to_string(),
+            reranker: "top1".to_string(),
+            entity_extraction: "off".to_string(),
+            ..LightMemConfig::default()
+        };
+        let server = McpServer::new(false, Some(temp_db.path().to_path_buf())).with_config(cfg);
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: Some(json!("tools/call")),
+            params: Some(json!({
+                "name": "remember",
+                "arguments": { "content": "Notification content" }
+            })),
+        };
+        let resp = server.handle_request(req);
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn test_mcp_invalid_category_returns_error() {
+        let temp_db = tempfile::NamedTempFile::new().unwrap();
+        let cfg = LightMemConfig {
+            backend: "hash".to_string(),
+            reranker: "top1".to_string(),
+            entity_extraction: "off".to_string(),
+            ..LightMemConfig::default()
+        };
+        let server = McpServer::new(false, Some(temp_db.path().to_path_buf())).with_config(cfg);
+        let err = server
+            .call_tool(
+                "remember",
+                json!({
+                    "content": "Test content",
+                    "category": "not_a_real_category"
+                }),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Invalid category"));
     }
 }

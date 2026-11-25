@@ -345,6 +345,19 @@ impl IdentityRegistry {
         })
     }
 
+    pub fn connection_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM connections ORDER BY id")?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids
+            .into_iter()
+            .filter(|id| validate_id(id).is_ok())
+            .collect())
+    }
+
     pub fn list_resolved_connections(&self) -> Result<Vec<ResolvedConnection>> {
         let mut stmt = self
             .conn

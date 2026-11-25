@@ -4,6 +4,8 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+pub const DEFAULT_CONFLICT_SIMILARITY: f32 = 0.75;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {

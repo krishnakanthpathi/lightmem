@@ -1,8 +1,8 @@
 use crate::models::{
-    GraphSnapshot, LightMemConfig, MemoryConflict, MemoryRecord, PaginatedMemories, RelatedMemory,
-    ScoredMemory, StorageStats,
+    GraphSnapshot, LightMemConfig, MemoryConflict, MemoryLink, MemoryRecord, PaginatedMemories,
+    RelatedMemory, ScoredMemory, StorageStats,
 };
-use crate::services::{AnswerResult, ObservedCandidate, OllamaReranker};
+use crate::services::{AnswerResult, ObservedCandidate};
 
 use anyhow::Result;
 use colored::*;
@@ -177,19 +177,7 @@ impl CliView {
         let norm_reranker = LightMemConfig::normalize_reranker(&cfg.reranker, None);
         let reranker_label = match norm_reranker.as_str() {
             "minilm-squad2" | "tinyroberta-squad2" => format!("onnx ({})", norm_reranker),
-            "ollama" | "auto" => {
-                let resolved = OllamaReranker::with_api_key(
-                    cfg.effective_ollama_url(),
-                    None,
-                    cfg.ollama_api_key.clone(),
-                )
-                .resolve_model_with_timeout(std::time::Duration::from_millis(200));
-                if let Some(m) = resolved {
-                    format!("ollama (auto: {})", m)
-                } else {
-                    "ollama (auto)".to_string()
-                }
-            }
+            "ollama" | "auto" => "ollama (auto)".to_string(),
             other if other.starts_with("ollama:") => {
                 format!("ollama ({})", &other[7..])
             }
@@ -1394,17 +1382,7 @@ impl CliView {
         );
 
         let model_display = if cfg.reranker == "ollama" || cfg.reranker == "auto" {
-            let resolved = OllamaReranker::with_api_key(
-                cfg.effective_ollama_url(),
-                None,
-                cfg.ollama_api_key.clone(),
-            )
-            .resolve_model_with_timeout(std::time::Duration::from_millis(200));
-            if let Some(m) = resolved {
-                format!("ollama (auto: {})", m)
-            } else {
-                "ollama (auto)".to_string()
-            }
+            "ollama (auto)".to_string()
         } else {
             cfg.reranker.clone()
         };
@@ -1434,13 +1412,7 @@ impl CliView {
 
         let key_disp = if provider == "Local ONNX" || provider == "Top-1" {
             Self::slate("none (local, offline)")
-        } else if cfg
-            .ollama_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
-            .is_some()
-        {
+        } else if cfg.effective_ollama_api_key().is_some() {
             Self::gold("configured (secret)")
         } else {
             Self::slate("empty (none)")
@@ -1604,17 +1576,6 @@ impl CliView {
                     "model_provider".into(),
                     serde_json::Value::String(provider.to_string()),
                 );
-                if cfg.reranker == "ollama" || cfg.reranker == "auto" {
-                    if let Some(m) = OllamaReranker::with_api_key(
-                        cfg.effective_ollama_url(),
-                        None,
-                        cfg.ollama_api_key.clone(),
-                    )
-                    .resolve_model_with_timeout(std::time::Duration::from_millis(200))
-                    {
-                        obj.insert("resolved_model".into(), serde_json::Value::String(m));
-                    }
-                }
                 obj.insert(
                     "config_file".into(),
                     serde_json::Value::String(
@@ -1706,17 +1667,7 @@ impl CliView {
             Self::violet_bold(provider)
         );
         let model_display = if cfg.reranker == "ollama" || cfg.reranker == "auto" {
-            let resolved = OllamaReranker::with_api_key(
-                cfg.effective_ollama_url(),
-                None,
-                cfg.ollama_api_key.clone(),
-            )
-            .resolve_model_with_timeout(std::time::Duration::from_millis(200));
-            if let Some(m) = resolved {
-                format!("ollama (auto: {})", m)
-            } else {
-                "ollama (auto)".to_string()
-            }
+            "ollama (auto)".to_string()
         } else {
             cfg.reranker.clone()
         };
@@ -1744,13 +1695,7 @@ impl CliView {
         );
         let key_disp = if provider == "Local ONNX" || provider == "Top-1" {
             Self::slate("none (local, offline)")
-        } else if cfg
-            .ollama_api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"))
-            .is_some()
-        {
+        } else if cfg.effective_ollama_api_key().is_some() {
             Self::gold("configured (secret)")
         } else if let Some((_, _, Some(env_name))) = Some(cfg.active_provider()) {
             if std::env::var(env_name).is_ok() {
@@ -2037,6 +1982,108 @@ impl CliView {
                 Self::gold(&short_dst)
             );
         }
+        Ok(())
+    }
+
+    pub fn render_tags(tags: &[(String, usize)], json: bool) -> Result<()> {
+        if json {
+            let list: Vec<serde_json::Value> = tags
+                .iter()
+                .map(|(t, c)| serde_json::json!({ "tag": t, "count": c }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&list)?);
+            return Ok(());
+        }
+
+        if tags.is_empty() {
+            println!("\n  {} No active tags found in vault.\n", Self::slate("○"));
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "  {} {}",
+            Self::crimson_bold("❖"),
+            Self::white_bold("Active Tags")
+        );
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
+        println!("  {:<32} {:>10}", Self::slate("TAG"), Self::slate("COUNT"));
+        println!(
+            "  {}",
+            Self::slate("──────────────────────────────────────────")
+        );
+        for (tag, count) in tags {
+            println!(
+                "  {:<32} {:>10}",
+                Self::gold(tag),
+                Self::white_bold(&count.to_string())
+            );
+        }
+        println!();
+        Ok(())
+    }
+
+    pub fn render_links_list(term: &str, links: &[MemoryLink], json: bool) -> Result<()> {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&links)?);
+            return Ok(());
+        }
+
+        if links.is_empty() {
+            println!(
+                "\n  {} No relationship links found for '{}'.\n",
+                Self::slate("○"),
+                term
+            );
+            return Ok(());
+        }
+
+        println!();
+        println!(
+            "  {} {} '{}'",
+            Self::crimson_bold("❖"),
+            Self::white_bold("Knowledge Graph Links for"),
+            Self::gold(term)
+        );
+        println!(
+            "  {}",
+            Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        );
+        println!(
+            "  {:<14} {:<22} {:<16} {:>8}",
+            Self::slate("DIRECTION"),
+            Self::slate("RELATION"),
+            Self::slate("CONNECTED ID"),
+            Self::slate("WEIGHT")
+        );
+        println!(
+            "  {}",
+            Self::slate("───────────────────────────────────────────────────────────────")
+        );
+        for link in links {
+            let (dir, target_id) = if link.source_id == term || link.source_id.starts_with(term) {
+                (
+                    "outgoing →",
+                    link.target_id.chars().take(14).collect::<String>(),
+                )
+            } else {
+                (
+                    "← incoming",
+                    link.source_id.chars().take(14).collect::<String>(),
+                )
+            };
+            println!(
+                "  {:<14} {:<22} {:<16} {:>8.1}",
+                Self::slate(dir),
+                Self::violet_bold(&link.relation),
+                Self::gold(&target_id),
+                link.weight
+            );
+        }
+        println!();
         Ok(())
     }
 
@@ -3037,6 +3084,13 @@ impl CliView {
 
     /// Try to render any known error (such as model or chat error) as a branded card.
     pub fn try_render_known_error(err: &anyhow::Error, json: bool) -> bool {
+        if let Some(me) = err.downcast_ref::<crate::models::ModelError>() {
+            let formatted = format!(
+                "Chat completions request to {} (model '{}') failed: {}",
+                me.endpoint, me.model, me.details
+            );
+            return Self::try_render_model_error(&formatted, json);
+        }
         let err_str = err.to_string();
         Self::try_render_model_error(&err_str, json)
     }

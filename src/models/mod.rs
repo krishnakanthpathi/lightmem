@@ -16,6 +16,15 @@ pub use memory::{
     extract_meaningful_tokens, parse_audio_duration_secs, parse_image_dimensions,
     parse_mp4_dimensions_and_duration, parse_ttl_duration, AttachmentInput, AttachmentMetadata,
     EntityRecord, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType, PaginatedMemories,
-    ScoredMemory,
+    ScoredMemory, DEFAULT_CONFLICT_SIMILARITY,
 };
 pub use stats::StorageStats;
+
+#[derive(Debug, thiserror::Error, Clone, serde::Serialize, serde::Deserialize)]
+#[error("Model request to {endpoint} (model '{model}') failed: {details}")]
+pub struct ModelError {
+    pub endpoint: String,
+    pub model: String,
+    pub details: String,
+    pub status_code: Option<u16>,
+}

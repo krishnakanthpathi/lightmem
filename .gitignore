@@ -16,3 +16,10 @@ __pycache__/
 .pytest_cache/
 /dist/
 /artifacts/
+/.codex-demo-deck/
+/demo
+/demo_vault/
+*.pptx
+slides.html
+PRESENTATION_NOTES.md
+build_lightmem_deck.py

@@ -118,17 +118,19 @@ fn download_file_atomic(url: &str, dest: &Path) -> Result<()> {
         .call()
         .map_err(|e| anyhow::anyhow!("Failed to download {}: {}", url, e))?;
 
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("Failed reading stream from {}", url))?;
-
-    anyhow::ensure!(!bytes.is_empty(), "Downloaded empty file from {}", url);
-
     let tmp_path = dest.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp_path, &bytes)
-        .with_context(|| format!("Failed writing temporary file {}", tmp_path.display()))?;
+    let mut tmp_file = std::fs::File::create(&tmp_path)
+        .with_context(|| format!("Failed creating temporary file {}", tmp_path.display()))?;
+
+    // Stream directly to disk with a 500 MB limit
+    let mut reader = response.into_reader().take(500 * 1024 * 1024);
+    let bytes_copied = std::io::copy(&mut reader, &mut tmp_file)
+        .with_context(|| format!("Failed streaming download from {}", url))?;
+
+    anyhow::ensure!(bytes_copied > 0, "Downloaded empty file from {}", url);
+    tmp_file.sync_all()?;
+    drop(tmp_file);
+
     if let Err(err) = std::fs::rename(&tmp_path, dest) {
         let _ = std::fs::remove_file(&tmp_path);
         return Err(err.into());
@@ -878,15 +880,20 @@ impl OllamaReranker {
                 let body: serde_json::Value = resp
                     .into_json()
                     .context("Failed to parse JSON response from /v1/chat/completions")?;
-                Ok(body
+                let content = body
                     .get("choices")
                     .and_then(|c| c.get(0))
                     .and_then(|c0| c0.get("message"))
                     .and_then(|m| m.get("content"))
                     .and_then(|v| v.as_str())
-                    .or_else(|| body.get("response").and_then(|v| v.as_str()))
-                    .unwrap_or("{}")
-                    .to_string())
+                    .or_else(|| body.get("response").and_then(|v| v.as_str()));
+                match content {
+                    Some(text) if !text.trim().is_empty() => Ok(text.to_string()),
+                    _ => anyhow::bail!(
+                        "LLM chat completion returned empty or missing content: {}",
+                        body
+                    ),
+                }
             }
             Err(err) if matches!(*err, ureq::Error::Status(404, _)) => {
                 // Fallback to legacy Ollama /api/generate
@@ -933,11 +940,11 @@ impl OllamaReranker {
                 }
                 .map_err(|e| anyhow::anyhow!("Ollama QA request to {} failed: {}", gen_url, e))?;
                 let body: serde_json::Value = resp.into_json()?;
-                Ok(body
-                    .get("response")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}")
-                    .to_string())
+                let response = body.get("response").and_then(|v| v.as_str());
+                match response {
+                    Some(text) if !text.trim().is_empty() => Ok(text.to_string()),
+                    _ => anyhow::bail!("LLM generate returned empty or missing response: {}", body),
+                }
             }
             Err(e) => {
                 let detail = match *e {
@@ -996,7 +1003,7 @@ pub fn build_answer_prompt(
 
 impl Reranker for OllamaReranker {
     fn name(&self) -> &str {
-        "ollama"
+        self.provider_prefix()
     }
 
     fn answer(&self, question: &str, candidates: &[ScoredMemory]) -> Result<AnswerResult> {

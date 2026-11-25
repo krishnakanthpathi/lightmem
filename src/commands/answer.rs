@@ -1,0 +1,47 @@
+use anyhow::Result;
+use chrono::{DateTime, NaiveDate, Utc};
+use lightmem::{CliView, MemoryType, ResolvedConnection};
+use std::path::Path;
+
+use super::config::migrate_embeddings;
+use super::context::{open_controller, AlreadyHandledError};
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_answer(
+    question: String,
+    precision: bool,
+    reranker: Option<String>,
+    category: Option<MemoryType>,
+    as_of: Option<DateTime<Utc>>,
+    date: Option<NaiveDate>,
+    limit: usize,
+    json: bool,
+    effective_db: Option<&Path>,
+    global: bool,
+    connection: Option<&ResolvedConnection>,
+) -> Result<()> {
+    let lm = open_controller(effective_db, global, connection)?;
+    let cat = category;
+    let as_of_dt = as_of;
+
+    if !migrate_embeddings(&lm, false, json, false)? {
+        return Ok(());
+    }
+    let effective_reranker = if let Some(ref explicit_r) = reranker {
+        Some(explicit_r.as_str())
+    } else if precision {
+        Some("onnx")
+    } else {
+        None
+    };
+    let result =
+        match lm.answer_with_options(&question, cat, as_of_dt, date, limit, effective_reranker) {
+            Ok(ans) => ans,
+            Err(err) => {
+                CliView::render_llm_or_error(&err, json);
+                return Err(AlreadyHandledError.into());
+            }
+        };
+    CliView::render_answer(&result, json)?;
+    Ok(())
+}

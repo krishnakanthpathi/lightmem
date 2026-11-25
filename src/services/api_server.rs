@@ -20,7 +20,6 @@ pub struct AttachmentPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct RememberRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -152,7 +151,6 @@ pub struct UnlinkRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
 pub struct ClearPayload {
     pub soft: bool,
 }
@@ -168,7 +166,7 @@ pub struct ServerOptions {
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
+            host: "127.0.0.1".to_string(),
             port: 8080,
             api_key: None,
             no_auth: false,
@@ -232,6 +230,19 @@ fn query_value<T: std::str::FromStr>(
         .transpose()
 }
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn authorized(headers: &HashMap<String, String>, expected_key: Option<&str>) -> bool {
     let Some(expected) = expected_key else {
         return true;
@@ -245,9 +256,13 @@ fn authorized(headers: &HashMap<String, String>, expected_key: Option<&str>) -> 
             } else {
                 token
             };
-            token == expected
+            constant_time_eq(token, expected)
         })
-        .or_else(|| headers.get("x-api-key").map(|k| k.trim() == expected))
+        .or_else(|| {
+            headers
+                .get("x-api-key")
+                .map(|k| constant_time_eq(k.trim(), expected))
+        })
         .unwrap_or(false)
 }
 
@@ -414,11 +429,12 @@ fn handle_connection(
     };
 
     if let Some(origin) = req.headers.get("origin") {
-        let expected = req
-            .headers
-            .get("host")
-            .map(|host| format!("http://{}", host));
-        if expected.as_deref() != Some(origin.as_str()) {
+        let host = req.headers.get("host");
+        let allowed_http = host.map(|h| format!("http://{}", h));
+        let allowed_https = host.map(|h| format!("https://{}", h));
+        let is_allowed = allowed_http.as_deref() == Some(origin.as_str())
+            || allowed_https.as_deref() == Some(origin.as_str());
+        if !is_allowed {
             send_error(
                 stream,
                 403,
@@ -454,13 +470,6 @@ fn handle_connection(
     // Health check endpoint is accessible without authentication
     let is_health = req.method == "GET" && (req.path == "/v1/health" || req.path == "/health");
 
-    if req.method == "GET" {
-        if let Some((bytes, content_type)) = super::workspace::asset(&req.path) {
-            send_response(stream, 200, "OK", content_type, bytes);
-            return;
-        }
-    }
-
     if !authorized(&req.headers, effective_api_key) && !is_health {
         send_error(
             stream,
@@ -469,6 +478,13 @@ fn handle_connection(
             "Unauthorized: invalid or missing API key",
         );
         return;
+    }
+
+    if req.method == "GET" {
+        if let Some((bytes, content_type)) = super::workspace::asset(&req.path) {
+            send_response(stream, 200, "OK", content_type, bytes);
+            return;
+        }
     }
 
     let _mutation = if req.method != "GET" {
@@ -1154,6 +1170,8 @@ pub fn serve_loop(
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
                 if active
                     .try_update(
                         std::sync::atomic::Ordering::SeqCst,

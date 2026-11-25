@@ -253,29 +253,26 @@ impl HybridSearchEngine {
             crate::embeddings::validate_vector(&query_vector)?;
             let candidates =
                 storage.get_candidate_vectors_checked(category, status, as_of, identity)?;
-            anyhow::ensure!(
-                candidates
-                    .iter()
-                    .all(|(_, vector)| vector.len() == query_vector.len()
-                        && vector.iter().all(|v| v.is_finite())),
-                "Stored embedding dimensions/values are invalid; run lmem reindex"
-            );
+            let query_len = query_vector.len();
             let mut scored_vectors: Vec<(String, f32)> = candidates
                 .into_iter()
-                .map(|(id, vec)| {
+                .filter_map(|(id, vec)| {
+                    if vec.len() != query_len || !vec.iter().all(|v| v.is_finite()) {
+                        return None;
+                    }
                     let sim = cosine_similarity(&query_vector, &vec);
-                    let safe_sim = if sim.is_finite() {
-                        sim.clamp(-1.0, 1.0)
+                    if sim.is_finite() {
+                        Some((id, sim.clamp(-1.0, 1.0)))
                     } else {
-                        0.0
-                    };
-                    (id, safe_sim)
+                        None
+                    }
                 })
-                .filter(|(_, score)| score.is_finite())
                 .collect();
 
             // Select a bounded top-k pool without sorting the full vault.
-            if !is_bare_acronym_query {
+            if let Some(min_sim) = min_similarity {
+                scored_vectors.retain(|(_, score)| *score >= min_sim);
+            } else if !is_bare_acronym_query {
                 scored_vectors.retain(|(_, score)| *score > 0.0);
             }
             let compare = |a: &(String, f32), b: &(String, f32)| {
@@ -288,14 +285,6 @@ impl HybridSearchEngine {
             scored_vectors.sort_by(compare);
 
             for (rank_idx, (id, score)) in scored_vectors.into_iter().enumerate() {
-                if !score.is_finite() {
-                    continue;
-                }
-                if let Some(min_sim) = min_similarity {
-                    if score < min_sim {
-                        continue;
-                    }
-                }
                 vector_ranks.insert(id.clone(), rank_idx + 1);
                 vector_scores.insert(id, score);
             }
@@ -306,6 +295,15 @@ impl HybridSearchEngine {
         let mut rrf_scores: HashMap<String, f32> = HashMap::new();
 
         for (id, rank) in &bm25_ranks {
+            if let Some(min) = min_similarity {
+                if let Some(v_score) = vector_scores.get(id) {
+                    if *v_score < min {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            }
             let rrf = 1.0 / (K + *rank as f32);
             *rrf_scores.entry(id.clone()).or_insert(0.0) += rrf;
         }

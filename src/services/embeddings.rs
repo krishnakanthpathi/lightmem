@@ -203,6 +203,7 @@ pub struct OllamaEmbeddingProvider {
     pub url: String,
     pub model: String,
     pub api_key: Option<String>,
+    agent: ureq::Agent,
 }
 
 impl OllamaEmbeddingProvider {
@@ -215,10 +216,14 @@ impl OllamaEmbeddingProvider {
         let clean_key = api_key
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"));
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(60))
+            .build();
         Self {
             url: clean_url,
             model,
             api_key: clean_key,
+            agent,
         }
     }
 
@@ -280,7 +285,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
             "input": serde_json::Value::Object(input_obj),
         });
 
-        let mut req = ureq::post(&endpoint).timeout(std::time::Duration::from_secs(60));
+        let mut req = self.agent.post(&endpoint);
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
@@ -306,10 +311,8 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                 }
                 anyhow::bail!("Ollama returned 200 OK but embedding array was empty");
             }
-            Err(_) => {
-                // Fallback to text-only embedding
-                self.embed(input.text)
-            }
+            Err(e) => Err(e)
+                .with_context(|| format!("Multimodal embedding request failed at {}", endpoint)),
         }
     }
 
@@ -355,7 +358,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
             "input": input_array,
         });
 
-        let mut req = ureq::post(&endpoint).timeout(std::time::Duration::from_secs(120));
+        let mut req = self.agent.post(&endpoint);
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
@@ -381,11 +384,45 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                     .map(|inp| self.embed_multimodal(inp))
                     .collect()
             }
-            Err(_) => inputs
-                .iter()
-                .map(|inp| self.embed_multimodal(inp))
-                .collect(),
+            Err(e) => Err(e).with_context(|| {
+                format!(
+                    "Failed to call batch multimodal embedding endpoint at {}",
+                    endpoint
+                )
+            }),
         }
+    }
+
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if texts.len() == 1 {
+            return Ok(vec![self.embed(&texts[0])?]);
+        }
+        let endpoint = format!("{}/api/embed", self.url);
+        let body = serde_json::json!({
+            "model": &self.model,
+            "input": texts,
+        });
+        let mut req = self.agent.post(&endpoint);
+        if let Some(ref key) = self.api_key {
+            req = req.set(
+                "Authorization",
+                &crate::models::config::format_auth_header(key),
+            );
+        }
+        if let Ok(resp) = req.send_json(&body) {
+            if let Ok(parsed) = resp.into_json::<OllamaEmbedResponse>() {
+                if let Some(embs) = parsed.embeddings {
+                    if embs.len() == texts.len() {
+                        return Ok(embs);
+                    }
+                }
+            }
+        }
+        // Fallback to sequential calls using pooled agent if batch endpoint not present
+        texts.iter().map(|t| self.embed(t)).collect()
     }
 
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -396,7 +433,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
             prompt: text,
         };
 
-        let mut req = ureq::post(&endpoint).timeout(std::time::Duration::from_secs(30));
+        let mut req = self.agent.post(&endpoint);
         if let Some(ref key) = self.api_key {
             req = req.set(
                 "Authorization",
@@ -444,8 +481,7 @@ impl EmbeddingProvider for OllamaEmbeddingProvider {
                     input: &'a str,
                 }
 
-                let mut alt_req =
-                    ureq::post(&alt_endpoint).timeout(std::time::Duration::from_secs(30));
+                let mut alt_req = self.agent.post(&alt_endpoint);
                 if let Some(ref key) = self.api_key {
                     alt_req = alt_req.set(
                         "Authorization",

@@ -20,7 +20,7 @@ pub use models::{
     detect_memory_conflict_with_similarity, detect_mime_and_kind, encode_base64,
     extract_meaningful_tokens, parse_ttl_duration, AttachmentInput, AttachmentMetadata,
     EntityRecord, LightMemConfig, MemoryConflict, MemoryRecord, MemoryStatus, MemoryType,
-    PaginatedMemories, ScoredMemory, StorageStats,
+    ModelError, PaginatedMemories, ScoredMemory, StorageStats,
 };
 pub use repositories::{SqliteRepository, Storage};
 #[cfg(feature = "mcp")]

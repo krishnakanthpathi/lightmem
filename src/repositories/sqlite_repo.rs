@@ -7,7 +7,7 @@ use crate::services::embeddings::{
     cosine_similarity, validate_vector, EmbeddingProvider, MultimodalInput,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,9 +30,19 @@ impl Storage {
             .with_context(|| format!("Failed to open SQLite database at {:?}", path_buf))?;
 
         #[cfg(unix)]
-        if path_buf != Path::new(":memory:") && path_buf.exists() {
+        if path_buf != Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o600));
+            if path_buf.exists() {
+                let _ = std::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o600));
+            }
+            let wal = PathBuf::from(format!("{}-wal", path_buf.display()));
+            if wal.exists() {
+                let _ = std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o600));
+            }
+            let shm = PathBuf::from(format!("{}-shm", path_buf.display()));
+            if shm.exists() {
+                let _ = std::fs::set_permissions(&shm, std::fs::Permissions::from_mode(0o600));
+            }
         }
 
         // Set busy timeout for WAL concurrency (10 seconds)
@@ -53,6 +63,40 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Inspect a vault database safely in read-only mode to retrieve count and embedding identity without holding locks.
+    pub fn inspect_vault_state(path: &Path) -> Result<(i64, Option<String>)> {
+        if !path.exists() {
+            return Ok((0, None));
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("Cannot inspect selected vault {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+            .unwrap_or(0);
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='embedding_state' AND type='table')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        let identity = if exists {
+            conn.query_row(
+                "SELECT identity FROM embedding_state WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        Ok((count, identity))
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let storage = Self {
@@ -68,6 +112,20 @@ impl Storage {
     pub fn with_context(mut self, context: crate::models::MemoryContext) -> Self {
         self.context = Some(context);
         self
+    }
+
+    pub fn clone_with_context(&self, context: Option<crate::models::MemoryContext>) -> Self {
+        Self {
+            conn: Arc::clone(&self.conn),
+            path: self.path.clone(),
+            context,
+        }
+    }
+
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database lock poisoned or unavailable"))
     }
 
     pub fn path(&self) -> &Path {
@@ -92,7 +150,7 @@ impl Storage {
     }
 
     fn migrate(&self) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
 
         // Fast-path: Check user_version and need for repair first on connection before acquiring an Immediate write lock
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -222,7 +280,9 @@ impl Storage {
                     DELETE FROM memories_fts WHERE id = old.id;
                 END;
 
-                CREATE TRIGGER IF NOT EXISTS trg_memories_au AFTER UPDATE ON memories BEGIN
+                CREATE TRIGGER IF NOT EXISTS trg_memories_au AFTER UPDATE OF title, content, tags ON memories
+                WHEN old.title IS NOT new.title OR old.content IS NOT new.content OR old.tags IS NOT new.tags
+                BEGIN
                     DELETE FROM memories_fts WHERE id = old.id;
                     INSERT INTO memories_fts(id, title, content, tags) 
                     VALUES (new.id, new.title, new.content, new.tags);
@@ -335,7 +395,9 @@ impl Storage {
                 );
             END;
 
-            CREATE TRIGGER trg_memories_au AFTER UPDATE ON memories BEGIN
+            CREATE TRIGGER trg_memories_au AFTER UPDATE OF title, content, tags ON memories
+            WHEN old.title IS NOT new.title OR old.content IS NOT new.content OR old.tags IS NOT new.tags
+            BEGIN
                 DELETE FROM memories_fts WHERE id = old.id;
                 INSERT INTO memories_fts(id, title, content, tags)
                 VALUES (
@@ -399,7 +461,7 @@ impl Storage {
     }
 
     pub fn insert_memory(&self, memory: &MemoryRecord, vector: Option<&[f32]>) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Low-level writes cannot prove the embedding model identity. Invalidate it.
         tx.execute("DELETE FROM embedding_state", [])?;
@@ -414,7 +476,7 @@ impl Storage {
     }
 
     pub fn embedding_identity(&self) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn
             .query_row(
                 "SELECT identity FROM embedding_state WHERE singleton=1",
@@ -425,7 +487,7 @@ impl Storage {
     }
 
     pub fn check_embedding_identity(&self, identity: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         check_identity(&conn, identity)
     }
 
@@ -452,7 +514,40 @@ impl Storage {
         let paired = vec![(mem.id.clone(), attachments.to_vec())];
         let mut batch =
             self.insert_indexed_batch_with_attachments(&[mem], &paired, embedder, identity, merge)?;
-        Ok(batch.remove(0))
+        batch
+            .pop()
+            .with_context(|| "Failed to insert indexed memory: empty batch returned")
+    }
+
+    fn get_primary_multimodal_payload_from_inputs(
+        inputs: &[AttachmentInput],
+    ) -> Option<(Option<String>, Option<String>)> {
+        let mut best_img = None;
+        let mut best_aud = None;
+        for att in inputs {
+            let kind = att.metadata.media_kind.as_str();
+            if kind == "image" && best_img.is_none() {
+                best_img = Some(encode_base64(&att.data));
+            } else if kind == "video" && best_img.is_none() {
+                if let Some(frame) =
+                    crate::services::observer::ObserverService::extract_video_keyframe_jpeg(
+                        &att.data,
+                    )
+                {
+                    best_img = Some(encode_base64(&frame));
+                }
+            } else if kind == "audio"
+                && best_aud.is_none()
+                && att.metadata.duration_secs.unwrap_or(0.0) >= 0.5
+            {
+                best_aud = Some(encode_base64(&att.data));
+            }
+        }
+        if best_img.is_some() || best_aud.is_some() {
+            Some((best_img, best_aud))
+        } else {
+            None
+        }
     }
 
     pub fn insert_indexed_batch_with_attachments(
@@ -463,7 +558,62 @@ impl Storage {
         identity: &str,
         merge: bool,
     ) -> Result<Vec<MemoryRecord>> {
-        let mut conn = self.conn.lock().unwrap();
+        for memory in memories {
+            anyhow::ensure!(
+                !memory.id.trim().is_empty() && !memory.content.trim().is_empty(),
+                "Memory ID and content cannot be blank"
+            );
+            anyhow::ensure!(
+                memory.confidence.is_finite() && (0.0..=1.0).contains(&memory.confidence),
+                "Confidence must be between 0 and 1"
+            );
+        }
+
+        // 1. Compute embeddings upfront OUTSIDE of SQLite write lock
+        let mut precomputed_vectors = Vec::with_capacity(memories.len());
+        for chunk in memories.chunks(32) {
+            let texts: Vec<String> = chunk.iter().map(MemoryRecord::to_card_text).collect();
+            let vectors = if embedder.supports_multimodal() {
+                let media_payloads: Vec<Option<(Option<String>, Option<String>)>> = chunk
+                    .iter()
+                    .map(|mem| {
+                        attachments_by_mem
+                            .iter()
+                            .find(|(id, _)| *id == mem.id)
+                            .and_then(|(_, atts)| {
+                                Self::get_primary_multimodal_payload_from_inputs(atts)
+                            })
+                    })
+                    .collect();
+                let inputs: Vec<MultimodalInput> = texts
+                    .iter()
+                    .zip(&media_payloads)
+                    .map(|(text, media)| match media.as_ref() {
+                        Some((Some(img), _)) => {
+                            MultimodalInput::with_image(text.as_str(), img.as_str())
+                        }
+                        Some((_, Some(aud))) => {
+                            MultimodalInput::with_audio(text.as_str(), aud.as_str())
+                        }
+                        _ => MultimodalInput::text_only(text.as_str()),
+                    })
+                    .collect();
+                embedder.embed_multimodal_batch(&inputs)?
+            } else {
+                embedder.embed_batch(&texts)?
+            };
+            anyhow::ensure!(
+                vectors.len() == chunk.len(),
+                "Embedding provider returned the wrong batch size"
+            );
+            for vector in vectors {
+                validate_vector(&vector)?;
+                precomputed_vectors.push(vector);
+            }
+        }
+
+        // 2. Fast atomic SQLite write transaction (holding lock only for brief SQL execution)
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         check_identity(&tx, identity)?;
         let empty: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM memories)", [], |r| {
@@ -497,42 +647,77 @@ impl Storage {
             resolved.entities = load_entities_for_id(&tx, &resolved.id)?;
             *record = resolved;
         }
+
         let mut unique = std::collections::BTreeMap::new();
         for record in &records {
             unique.insert(record.id.clone(), record.clone());
         }
         let final_records: Vec<_> = unique.into_values().collect();
+
+        let precomputed_map: std::collections::HashMap<String, (String, Vec<f32>)> = memories
+            .iter()
+            .zip(precomputed_vectors)
+            .map(|(m, v)| (m.id.clone(), (m.to_card_text(), v)))
+            .collect();
+
         for batch in final_records.chunks(32) {
-            let texts: Vec<_> = batch.iter().map(MemoryRecord::to_card_text).collect();
-            let vectors = if embedder.supports_multimodal() {
-                let mut media_payloads = Vec::with_capacity(batch.len());
-                for rec in batch {
-                    let media = if !rec.attachments.is_empty() {
-                        load_primary_multimodal_payload(&tx, &rec.id)?
-                    } else {
-                        None
-                    };
-                    media_payloads.push(media);
+            let mut batch_vectors: Vec<Option<Vec<f32>>> = Vec::with_capacity(batch.len());
+            let mut need_embed_indices = Vec::new();
+            let mut need_embed_records = Vec::new();
+
+            for (idx, rec) in batch.iter().enumerate() {
+                let card_text = rec.to_card_text();
+                if let Some((orig_text, v)) = precomputed_map.get(&rec.id) {
+                    if *orig_text == card_text {
+                        batch_vectors.push(Some(v.clone()));
+                        continue;
+                    }
                 }
-                let inputs: Vec<MultimodalInput> = texts
+                batch_vectors.push(None);
+                need_embed_indices.push(idx);
+                need_embed_records.push(rec);
+            }
+
+            if !need_embed_records.is_empty() {
+                let texts: Vec<_> = need_embed_records
                     .iter()
-                    .zip(&media_payloads)
-                    .map(|(text, media)| match media.as_ref() {
-                        Some((Some(img), _)) => MultimodalInput::with_image(text, img.as_str()),
-                        Some((_, Some(aud))) => MultimodalInput::with_audio(text, aud.as_str()),
-                        _ => MultimodalInput::text_only(text),
-                    })
+                    .map(|r| r.to_card_text())
                     .collect();
-                embedder.embed_multimodal_batch(&inputs)?
-            } else {
-                embedder.embed_batch(&texts)?
-            };
-            anyhow::ensure!(
-                vectors.len() == batch.len(),
-                "Embedding provider returned the wrong batch size"
-            );
-            for (memory, vector) in batch.iter().zip(vectors) {
-                validate_vector(&vector)?;
+                let vectors = if embedder.supports_multimodal() {
+                    let mut media_payloads = Vec::with_capacity(need_embed_records.len());
+                    for rec in &need_embed_records {
+                        let media = if !rec.attachments.is_empty() {
+                            load_primary_multimodal_payload(&tx, &rec.id)?
+                        } else {
+                            None
+                        };
+                        media_payloads.push(media);
+                    }
+                    let inputs: Vec<MultimodalInput> = texts
+                        .iter()
+                        .zip(&media_payloads)
+                        .map(|(text, media)| match media.as_ref() {
+                            Some((Some(img), _)) => MultimodalInput::with_image(text, img.as_str()),
+                            Some((_, Some(aud))) => MultimodalInput::with_audio(text, aud.as_str()),
+                            _ => MultimodalInput::text_only(text),
+                        })
+                        .collect();
+                    embedder.embed_multimodal_batch(&inputs)?
+                } else {
+                    embedder.embed_batch(&texts)?
+                };
+                anyhow::ensure!(
+                    vectors.len() == need_embed_records.len(),
+                    "Embedding provider returned the wrong batch size"
+                );
+                for (idx, vec) in need_embed_indices.into_iter().zip(vectors) {
+                    validate_vector(&vec)?;
+                    batch_vectors[idx] = Some(vec);
+                }
+            }
+
+            for (memory, vector_opt) in batch.iter().zip(batch_vectors) {
+                let vector = vector_opt.expect("Vector must be present");
                 bind_identity(&tx, identity, vector.len())?;
                 tx.execute(
                     "INSERT INTO memory_vectors VALUES (?1, ?2, ?3)
@@ -547,7 +732,7 @@ impl Storage {
 
     /// Snapshot memory rows and a monotonic revision together for optimistic index migration.
     pub fn index_snapshot(&self) -> Result<(i64, Vec<MemoryRecord>)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let tx = conn.unchecked_transaction()?;
         let revision = tx.query_row("SELECT revision FROM storage_revision", [], |r| r.get(0))?;
         let records = all_records(&tx)?;
@@ -561,7 +746,7 @@ impl Storage {
         identity: &str,
         vectors: &[(String, Vec<f32>)],
     ) -> Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let current: i64 =
             tx.query_row("SELECT revision FROM storage_revision", [], |r| r.get(0))?;
@@ -606,7 +791,7 @@ impl Storage {
     }
 
     fn deduplicate_with(&self, indexed: Option<(&dyn EmbeddingProvider, &str)>) -> Result<usize> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if let Some((_, identity)) = indexed {
             check_identity(&tx, identity)?;
@@ -649,12 +834,12 @@ impl Storage {
     }
 
     pub fn expire_due_memories(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         expire_due_conn(&conn)
     }
 
     pub fn get_memory(&self, id: &str) -> Result<Option<MemoryRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let Some(id) = resolve_id(&conn, id)? else {
             return Ok(None);
@@ -677,7 +862,7 @@ impl Storage {
         &self,
         ids: &[String],
     ) -> Result<std::collections::HashMap<String, MemoryRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let mut records = std::collections::HashMap::new();
         let has_atts: bool = conn
@@ -704,7 +889,7 @@ impl Storage {
     }
 
     pub fn get_memory_by_id_or_title(&self, term: &str) -> Result<Option<MemoryRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let Some(id) = resolve_id_or_title(&conn, term)? else {
             return Ok(None);
@@ -723,10 +908,146 @@ impl Storage {
         Ok(opt)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_memory(
+        &self,
+        term: &str,
+        new_content: Option<&str>,
+        new_title: Option<&str>,
+        new_category: Option<MemoryType>,
+        new_tags: Option<&[String]>,
+        new_confidence: Option<f32>,
+        embedder: Option<&dyn EmbeddingProvider>,
+        identity: Option<&str>,
+    ) -> Result<MemoryRecord> {
+        let mut conn = self.lock_conn()?;
+        let _ = expire_due_conn(&conn);
+        let id = resolve_id_or_title(&conn, term)?
+            .with_context(|| format!("Memory '{}' not found", term))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(identity) = identity {
+            check_identity(&tx, identity)?;
+        }
+        let mut record = tx.query_row(
+            "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE id=?1",
+            [&id],
+            row_to_memory,
+        )?;
+        record.attachments = load_attachments_for_id(&tx, &id)?;
+        record.entities = load_entities_for_id(&tx, &id)?;
+
+        let mut changed_text = false;
+        if let Some(c) = new_content {
+            let trimmed = c.trim();
+            anyhow::ensure!(!trimmed.is_empty(), "Memory content cannot be blank");
+            if record.content != trimmed {
+                record.content = trimmed.to_string();
+                changed_text = true;
+            }
+        }
+        if let Some(t) = new_title {
+            let trimmed = t.trim();
+            anyhow::ensure!(!trimmed.is_empty(), "Memory title cannot be blank");
+            if record.title != trimmed {
+                record.title = trimmed.to_string();
+                changed_text = true;
+            }
+        }
+        if let Some(cat) = new_category {
+            if record.category != cat {
+                record.category = cat;
+                changed_text = true;
+            }
+        }
+        if let Some(tags) = new_tags {
+            let clean_tags: Vec<String> = tags
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if record.tags != clean_tags {
+                record.tags = clean_tags;
+                changed_text = true;
+            }
+        }
+        if let Some(conf) = new_confidence {
+            anyhow::ensure!(
+                conf.is_finite() && (0.0..=1.0).contains(&conf),
+                "Confidence must be between 0.0 and 1.0"
+            );
+            record.confidence = conf;
+        }
+
+        record.updated_at = Utc::now();
+        let final_dedup_key = duplicate_key_for_record(&record);
+
+        tx.execute(
+            "UPDATE memories SET category=?1, title=?2, content=?3, tags=?4, confidence=?5, updated_at=?6, dedup_key=?7 WHERE id=?8",
+            params![
+                record.category.as_str(),
+                record.title,
+                record.content,
+                serde_json::to_string(&record.tags)?,
+                record.confidence,
+                record.updated_at.to_rfc3339(),
+                final_dedup_key,
+                record.id,
+            ],
+        )?;
+
+        if changed_text {
+            if let Some(embedder) = embedder {
+                let card_text = record.to_card_text();
+                let vector = embedder.embed(&card_text)?;
+                validate_vector(&vector)?;
+                if let Some(identity) = identity {
+                    bind_identity(&tx, identity, vector.len())?;
+                }
+                tx.execute("DELETE FROM memory_vectors WHERE id=?1", [&record.id])?;
+                tx.execute(
+                    "INSERT INTO memory_vectors VALUES (?1,?2,?3)",
+                    params![record.id, serialize_f32_slice(&vector), vector.len() as i64],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub fn get_all_tags(&self) -> Result<Vec<(String, usize)>> {
+        let conn = self.lock_conn()?;
+        let _ = expire_due_conn(&conn);
+        let mut stmt = conn.prepare("SELECT tags FROM memories WHERE status = 'active'")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for tags_str in rows.flatten() {
+            let parsed_tags: Vec<String> = if tags_str.trim().starts_with('[') {
+                serde_json::from_str(&tags_str).unwrap_or_default()
+            } else {
+                tags_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            };
+            for tag in parsed_tags {
+                let clean = tag.trim().to_lowercase();
+                if !clean.is_empty() {
+                    *counts.entry(clean).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut result: Vec<(String, usize)> = counts.into_iter().collect();
+        result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(result)
+    }
+
     /// Recovery must include archived titles and reject ambiguous matches.
     pub fn get_memory_for_restore(&self, term: &str) -> Result<Option<MemoryRecord>> {
         let id = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn()?;
             let clean = term.trim();
             if clean.is_empty() {
                 return Ok(None);
@@ -750,7 +1071,7 @@ impl Storage {
     }
 
     pub fn find_by_entity(&self, name: &str, val: Option<&str>) -> Result<Vec<MemoryRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let name_lower = name.trim().to_lowercase();
         let mut records = if let Some(v) = val {
@@ -785,7 +1106,7 @@ impl Storage {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut conflicts = Vec::new();
         let mut stmt = conn.prepare("SELECT 1 FROM memories WHERE id=?1")?;
         for id in ids {
@@ -798,7 +1119,7 @@ impl Storage {
 
     /// Retrieve verified binary attachment payloads `(AttachmentMetadata, Vec<u8>)` for all attachments in vault
     pub fn all_attachments_data(&self) -> Result<Vec<(AttachmentMetadata, Vec<u8>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, created_at, data
              FROM memory_attachments
@@ -830,13 +1151,13 @@ impl Storage {
         &self,
         memory_id: &str,
     ) -> Result<Option<(Option<String>, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         load_primary_multimodal_payload(&conn, memory_id)
     }
 
     /// Snapshot and defragment database into a standalone single SQLite file (flushing WAL)
     pub fn backup_to_file(&self, target_path: &Path) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         if target_path.exists() {
             let _ = std::fs::remove_file(target_path);
         }
@@ -887,7 +1208,7 @@ impl Storage {
         anyhow::ensure!(!foreign_key_error, "Restore contains invalid foreign keys");
         drop(staged_conn);
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let staged_conn = staged.conn.lock().unwrap();
         // SQLite's backup transaction publishes the validated snapshot atomically;
         // an interrupted/failed backup rolls back the destination transaction.
@@ -904,12 +1225,12 @@ impl Storage {
 
         let (mut conn, src_conn) =
             if (Arc::as_ptr(&self.conn) as usize) < (Arc::as_ptr(&src.conn) as usize) {
-                let c = self.conn.lock().unwrap();
-                let sc = src.conn.lock().unwrap();
+                let c = self.lock_conn()?;
+                let sc = src.lock_conn()?;
                 (c, sc)
             } else {
-                let sc = src.conn.lock().unwrap();
-                let c = self.conn.lock().unwrap();
+                let sc = src.lock_conn()?;
+                let c = self.lock_conn()?;
                 (c, sc)
             };
         let tx = conn.transaction()?;
@@ -1200,7 +1521,7 @@ impl Storage {
         &self,
         memory_term: &str,
     ) -> Result<Vec<(AttachmentMetadata, Vec<u8>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let id = resolve_id_or_title(&conn, memory_term)?
             .with_context(|| format!("Memory '{}' not found", memory_term))?;
         let mut stmt = conn.prepare(
@@ -1382,7 +1703,7 @@ impl Storage {
         if from_memory_id == to_memory_id {
             return Ok(0);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let rows = conn.execute(
             "INSERT OR IGNORE INTO memory_attachments (id, memory_id, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at)
              SELECT lower(hex(randomblob(16))), ?1, filename, mime_type, media_kind, size_bytes, sha256, dimensions, duration_secs, data, created_at
@@ -1402,7 +1723,7 @@ impl Storage {
         if from_memory_id == to_memory_id {
             return Ok(0);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let out_rows = conn.execute(
             "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, weight, created_at)
              SELECT ?1, target_id, relation, weight, created_at
@@ -1422,7 +1743,7 @@ impl Storage {
 
     /// Retrieve all knowledge graph links in the database for backup/export
     pub fn all_links(&self) -> Result<Vec<MemoryLink>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT source_id, target_id, relation, weight, created_at
              FROM memory_links
@@ -1449,7 +1770,7 @@ impl Storage {
         if links.is_empty() {
             return Ok(0);
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut count = 0;
         for link in links {
@@ -1478,7 +1799,7 @@ impl Storage {
 
     /// Check whether any attachment row in the database still references a given SHA-256 digest
     pub fn is_attachment_sha_referenced(&self, sha256: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM memory_attachments WHERE sha256 = ?1)",
@@ -1491,7 +1812,7 @@ impl Storage {
 
     /// Find all memories referencing a given attachment SHA-256 digest: returns Vec<(memory_id, filename)>
     pub fn find_attachments_by_sha256(&self, sha256: &str) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT memory_id, filename FROM memory_attachments WHERE sha256 = ?1 ORDER BY created_at ASC",
         )?;
@@ -1510,7 +1831,7 @@ impl Storage {
         relation: Option<&str>,
         weight: Option<f32>,
     ) -> Result<(String, String)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let src = resolve_id_or_title(&conn, source_term)?
             .with_context(|| format!("Source memory '{}' not found", source_term))?;
         let dst = resolve_id_or_title(&conn, target_term)?
@@ -1540,7 +1861,7 @@ impl Storage {
         target_term: &str,
         relation: Option<&str>,
     ) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let src = resolve_id_or_title(&conn, source_term)?
             .with_context(|| format!("Source memory '{}' not found", source_term))?;
         let dst = resolve_id_or_title(&conn, target_term)?
@@ -1562,8 +1883,7 @@ impl Storage {
     }
 
     pub fn get_links_for_memory(&self, memory_term: &str) -> Result<Vec<MemoryLink>> {
-        let conn = self.conn.lock().unwrap();
-        let _ = expire_due_conn(&conn);
+        let conn = self.lock_conn()?;
         let id = resolve_id_or_title(&conn, memory_term)?
             .with_context(|| format!("Memory '{}' not found", memory_term))?;
         let is_active: bool = conn
@@ -1609,7 +1929,7 @@ impl Storage {
         start_term: &str,
         max_hops: usize,
     ) -> Result<Vec<RelatedMemory>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let Some(start_id) = resolve_id_or_title(&conn, start_term)? else {
             return Ok(Vec::new());
@@ -1711,7 +2031,7 @@ impl Storage {
         focus_term: Option<&str>,
         max_hops: Option<usize>,
     ) -> Result<GraphSnapshot> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
 
         let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(focus) = focus_term
@@ -1847,7 +2167,7 @@ impl Storage {
     }
 
     pub fn auto_link_memory(&self, memory_id: &str, text: &str) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let Some(source_id) = resolve_id(&conn, memory_id)? else {
             return Ok(0);
         };
@@ -1903,7 +2223,7 @@ impl Storage {
     }
 
     pub fn autolink_vault(&self, min_similarity: f32) -> Result<usize> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let now = Utc::now().to_rfc3339();
 
@@ -2055,7 +2375,7 @@ impl Storage {
     }
 
     pub fn forget_memory(&self, id: &str, hard_delete: bool) -> Result<bool> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let Some(id) = resolve_id(&tx, id)? else {
             return Ok(false);
@@ -2070,7 +2390,7 @@ impl Storage {
     }
 
     pub fn clear_all(&self, hard_delete: bool) -> Result<usize> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let rows = if hard_delete {
             let deleted = tx.execute("DELETE FROM memories", [])?;
@@ -2092,7 +2412,19 @@ impl Storage {
         status: Option<MemoryStatus>,
         as_of: Option<DateTime<Utc>>,
     ) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        self.count_memories_filtered(category, status, as_of, None, None, None)
+    }
+
+    pub fn count_memories_filtered(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        tag: Option<&str>,
+    ) -> Result<usize> {
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let mut query = String::from("SELECT COUNT(*) FROM memories WHERE 1=1");
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -2108,12 +2440,49 @@ impl Storage {
             query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
             query.push_str(&format!(
-                " AND (expired_at IS NULL OR expired_at > ?{})",
+                " AND ((status = 'active' AND expired_at IS NULL) OR (expired_at IS NOT NULL AND expired_at > ?{}))",
                 params_vec.len()
             ));
         } else if let Some(st) = status {
             params_vec.push(Box::new(st.as_str().to_string()));
             query.push_str(&format!(" AND status = ?{}", params_vec.len()));
+        }
+
+        if let Some(d) = on_date {
+            let day_str = d.format("%Y-%m-%d").to_string();
+            params_vec.push(Box::new(day_str.clone()));
+            let p1 = params_vec.len();
+            params_vec.push(Box::new(day_str));
+            let p2 = params_vec.len();
+            query.push_str(&format!(
+                " AND (substr(created_at, 1, 10) = ?{} OR substr(updated_at, 1, 10) = ?{})",
+                p1, p2
+            ));
+        }
+
+        if let Some(m) = media {
+            let clean_m = m.trim().to_lowercase();
+            if clean_m == "any" || clean_m == "all" {
+                query.push_str(" AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id)");
+            } else {
+                params_vec.push(Box::new(clean_m));
+                query.push_str(&format!(
+                    " AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id AND a.media_kind = ?{})",
+                    params_vec.len()
+                ));
+            }
+        }
+
+        if let Some(t) = tag {
+            let clean_t = t.trim().to_lowercase();
+            params_vec.push(Box::new(clean_t.clone()));
+            let p1 = params_vec.len();
+            params_vec.push(Box::new(clean_t));
+            let p2 = params_vec.len();
+            query.push_str(&format!(
+                " AND (CASE WHEN json_valid(tags) THEN EXISTS(SELECT 1 FROM json_each(tags) WHERE LOWER(json_each.value) = ?{}) ELSE instr(',' || replace(LOWER(tags), ' ', '') || ',', ',' || ?{} || ',') > 0 END)",
+                p1, p2
+            ));
         }
 
         let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
@@ -2129,9 +2498,24 @@ impl Storage {
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedMemories> {
-        let total = self.count_memories(category, status, as_of)?;
+        self.list_memories_filtered(category, status, as_of, None, None, None, limit, offset)
+    }
 
-        let conn = self.conn.lock().unwrap();
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_memories_filtered(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        tag: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
+        let total = self.count_memories_filtered(category, status, as_of, on_date, media, tag)?;
+
+        let conn = self.lock_conn()?;
         let mut query = String::from(
             "SELECT id, category, title, content, tags, confidence, status, provenance, created_at, updated_at, expired_at, context_json FROM memories WHERE 1=1"
         );
@@ -2149,12 +2533,49 @@ impl Storage {
             query.push_str(&format!(" AND created_at <= ?{}", params_vec.len()));
             params_vec.push(Box::new(as_of_str));
             query.push_str(&format!(
-                " AND (expired_at IS NULL OR expired_at > ?{})",
+                " AND ((status = 'active' AND expired_at IS NULL) OR (expired_at IS NOT NULL AND expired_at > ?{}))",
                 params_vec.len()
             ));
         } else if let Some(st) = status {
             params_vec.push(Box::new(st.as_str().to_string()));
             query.push_str(&format!(" AND status = ?{}", params_vec.len()));
+        }
+
+        if let Some(d) = on_date {
+            let day_str = d.format("%Y-%m-%d").to_string();
+            params_vec.push(Box::new(day_str.clone()));
+            let p1 = params_vec.len();
+            params_vec.push(Box::new(day_str));
+            let p2 = params_vec.len();
+            query.push_str(&format!(
+                " AND (substr(created_at, 1, 10) = ?{} OR substr(updated_at, 1, 10) = ?{})",
+                p1, p2
+            ));
+        }
+
+        if let Some(m) = media {
+            let clean_m = m.trim().to_lowercase();
+            if clean_m == "any" || clean_m == "all" {
+                query.push_str(" AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id)");
+            } else {
+                params_vec.push(Box::new(clean_m));
+                query.push_str(&format!(
+                    " AND EXISTS(SELECT 1 FROM memory_attachments a WHERE a.memory_id = memories.id AND a.media_kind = ?{})",
+                    params_vec.len()
+                ));
+            }
+        }
+
+        if let Some(t) = tag {
+            let clean_t = t.trim().to_lowercase();
+            params_vec.push(Box::new(clean_t.clone()));
+            let p1 = params_vec.len();
+            params_vec.push(Box::new(clean_t));
+            let p2 = params_vec.len();
+            query.push_str(&format!(
+                " AND (CASE WHEN json_valid(tags) THEN EXISTS(SELECT 1 FROM json_each(tags) WHERE LOWER(json_each.value) = ?{}) ELSE instr(',' || replace(LOWER(tags), ' ', '') || ',', ',' || ?{} || ',') > 0 END)",
+                p1, p2
+            ));
         }
 
         query.push_str(" ORDER BY created_at DESC");
@@ -2241,7 +2662,7 @@ impl Storage {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
         let mut sql = String::from(
             r#"
@@ -2335,7 +2756,7 @@ impl Storage {
         as_of: Option<DateTime<Utc>>,
         identity: Option<&str>,
     ) -> Result<Vec<(String, Vec<f32>)>> {
-        let mut connection = self.conn.lock().unwrap();
+        let mut connection = self.lock_conn()?;
         let _ = expire_due_conn(&connection);
         let snapshot = connection.transaction()?;
         let conn = &snapshot;
@@ -2393,7 +2814,7 @@ impl Storage {
     }
 
     pub fn stats(&self) -> Result<StorageStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let _ = expire_due_conn(&conn);
 
         let total_memories: i64 =
@@ -2517,12 +2938,20 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<MemoryRecord> {
     let updated_at_str: String = row.get(9)?;
     let expired_at_str: Option<String> = row.get(10)?;
 
-    let category = category_str
-        .parse::<MemoryType>()
-        .unwrap_or(MemoryType::Fact);
-    let status = status_str
-        .parse::<MemoryStatus>()
-        .unwrap_or(MemoryStatus::Active);
+    let category = category_str.parse::<MemoryType>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
+    let status = status_str.parse::<MemoryStatus>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        )
+    })?;
 
     let tags: Vec<String> = parse_tags_column(&tags_str);
 
@@ -3511,5 +3940,59 @@ mod fts_tests {
 
         // Autolink vault skips deleted/expired memories without errors
         let _ = storage.autolink_vault(0.75).unwrap();
+    }
+
+    #[test]
+    fn test_update_memory_and_get_all_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("update_test.db");
+        let storage = Storage::open(&db_path).unwrap();
+
+        let mem = MemoryRecord {
+            id: "mem-update-1".to_string(),
+            category: MemoryType::Fact,
+            title: "Original Title".to_string(),
+            content: "Original Content with [[Target]]".to_string(),
+            tags: vec!["alpha".to_string(), "beta".to_string()],
+            confidence: 0.8,
+            status: MemoryStatus::Active,
+            provenance: "test".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expired_at: None,
+            attachments: Vec::new(),
+            entities: Vec::new(),
+            context: None,
+        };
+        storage.insert_memory(&mem, None).unwrap();
+
+        let tags = storage.get_all_tags().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].1, 1);
+
+        let updated = storage
+            .update_memory(
+                "mem-update-1",
+                Some("Updated Content text"),
+                Some("Updated Title"),
+                Some(MemoryType::Decision),
+                Some(&["gamma".to_string(), "beta".to_string()]),
+                Some(0.95),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(updated.content, "Updated Content text");
+        assert_eq!(updated.title, "Updated Title");
+        assert_eq!(updated.category, MemoryType::Decision);
+        assert_eq!(updated.confidence, 0.95);
+        assert_eq!(updated.tags, vec!["gamma", "beta"]);
+
+        let tags_after = storage.get_all_tags().unwrap();
+        let tag_names: Vec<&str> = tags_after.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(tag_names.contains(&"gamma"));
+        assert!(tag_names.contains(&"beta"));
+        assert!(!tag_names.contains(&"alpha"));
     }
 }

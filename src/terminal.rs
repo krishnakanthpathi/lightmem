@@ -1,8 +1,7 @@
 //! Short, line-oriented terminal interactions. Never open a controller for inspection.
 use anyhow::{bail, ensure, Context, Result};
 use colored::*;
-use lightmem::{CliView, LightMemConfig, MemoryContext, MemoryScope};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use lightmem::{CliView, IdentityRegistry, LightMemConfig, MemoryScope, Storage};
 use serde_json::json;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -50,7 +49,7 @@ pub fn confirm(prompt: &str, default: bool) -> Result<bool> {
 
 pub fn validate(cfg: &LightMemConfig) -> Result<()> {
     cfg.embedding_identity()?;
-    super::parse_reranker_setting(&cfg.reranker)?;
+    crate::commands::config::parse_reranker_setting(&cfg.reranker)?;
     let entity_clean = cfg.entity_extraction.trim().to_lowercase();
     ensure!(
         matches!(
@@ -885,11 +884,15 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                         prompt_key_if_missing(&mut cfg, prov_name)?;
                                         break;
                                     } else {
-                                        cfg.reranker = super::parse_reranker_setting(trimmed)?;
+                                        cfg.reranker =
+                                            crate::commands::config::parse_reranker_setting(
+                                                trimmed,
+                                            )?;
                                         break;
                                     }
                                 } else {
-                                    cfg.reranker = super::parse_reranker_setting(trimmed)?;
+                                    cfg.reranker =
+                                        crate::commands::config::parse_reranker_setting(trimmed)?;
                                     if cfg.reranker.starts_with("ollama")
                                         && !cfg.reranker.contains(':')
                                     {
@@ -1157,67 +1160,29 @@ pub fn offer_downloads(cfg: &LightMemConfig) -> Result<()> {
     Ok(())
 }
 
-fn read_only(path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    conn.busy_timeout(std::time::Duration::from_millis(250))?;
-    Ok(conn)
-}
-
 pub fn connection_ids() -> Result<Vec<String>> {
     let path = LightMemConfig::config_dir().join("identities.db");
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let conn = read_only(&path)?;
-    let mut statement = conn.prepare("SELECT id FROM connections ORDER BY id")?;
-    let values = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(values
-        .into_iter()
-        .filter(|id| lightmem::models::identity::validate_id(id).is_ok())
-        .collect())
+    let registry = match IdentityRegistry::open_default() {
+        Ok(r) => r,
+        Err(_) => return Ok(Vec::new()),
+    };
+    registry.connection_ids()
 }
 
 fn readonly_connection(id: &str, scope: Option<MemoryScope>) -> Result<PathBuf> {
-    let conn = read_only(&LightMemConfig::config_dir().join("identities.db"))
-        .context("Cannot read connection registry; use lmem identity list")?;
-    let raw: String = conn
-        .query_row("SELECT context FROM connections WHERE id=?1", [id], |row| {
-            row.get(0)
-        })
-        .context("Unknown connection")?;
-    let mut context: MemoryContext = serde_json::from_str(&raw)?;
-    if let Some(scope) = scope {
-        context.scope = scope;
+    let path = LightMemConfig::config_dir().join("identities.db");
+    if !path.exists() {
+        bail!("Cannot read connection registry; use lmem identity list");
     }
-    let hash = |value: &str| lightmem::compute_sha256_hex(value.as_bytes());
-    let root = LightMemConfig::config_dir()
-        .join("vaults")
-        .join(hash(&context.user_id));
-    Ok(match context.scope {
-        MemoryScope::User => root.join("user.db"),
-        MemoryScope::Project => root.join("projects").join(format!(
-            "{}.db",
-            hash(
-                context
-                    .project_id
-                    .as_deref()
-                    .context("Project scope requires a project ID")?
-            )
-        )),
-        MemoryScope::Agent => {
-            let root = root.join("agents").join(hash(&context.agent_id));
-            if let Some(project) = context.project_id {
-                root.join("projects").join(format!("{}.db", hash(&project)))
-            } else {
-                root.join("agent.db")
-            }
-        }
-    })
+    let registry = IdentityRegistry::open_default()
+        .context("Cannot read connection registry; use lmem identity list")?;
+    let resolved = registry
+        .resolve(id, scope, None)
+        .context("Unknown connection")?;
+    Ok(resolved.db_path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1456,23 +1421,7 @@ pub fn doctor(
 }
 
 fn inspect_index(path: &Path, cfg: &LightMemConfig) -> Result<(i64, Option<String>)> {
-    let conn = read_only(path)?;
-    let count: i64 = conn.query_row("SELECT count(*) FROM memories", [], |r| r.get(0))?;
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='embedding_state' AND type='table')",
-        [],
-        |r| r.get(0),
-    )?;
-    let identity = if exists {
-        conn.query_row(
-            "SELECT identity FROM embedding_state WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?
-    } else {
-        None
-    };
+    let (count, identity) = Storage::inspect_vault_state(path)?;
     cfg.embedding_identity()?;
     Ok((count, identity))
 }

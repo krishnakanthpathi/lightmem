@@ -83,25 +83,36 @@ impl RemoteClient {
         }
     }
 
+    fn extract_error_detail(body: &str) -> String {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
+                return msg.to_string();
+            }
+        }
+        body.to_string()
+    }
+
     fn map_ureq_error(&self, e: ureq::Error) -> anyhow::Error {
         match e {
             ureq::Error::Status(401, resp) => {
                 let body = resp.into_string().unwrap_or_default();
+                let detail = Self::extract_error_detail(&body);
                 anyhow::anyhow!(
                     "Authentication failed (401 Unauthorized) at remote LightMem backend {}. {}\nPlease verify your API key.",
                     self.base_url,
-                    body
+                    detail
                 )
             }
             ureq::Error::Status(code, resp) => {
                 let body = resp
                     .into_string()
                     .unwrap_or_else(|_| format!("HTTP {}", code));
+                let detail = Self::extract_error_detail(&body);
                 anyhow::anyhow!(
                     "Remote server error ({}) at {}: {}",
                     code,
                     self.base_url,
-                    body
+                    detail
                 )
             }
             ureq::Error::Transport(t) => {

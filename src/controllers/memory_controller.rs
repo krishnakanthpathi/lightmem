@@ -2,6 +2,7 @@ use crate::models::{
     compute_sha256_hex, detect_memory_conflict_with_similarity, AttachmentInput,
     AttachmentMetadata, GraphSnapshot, LightMemConfig, MemoryConflict, MemoryLink, MemoryRecord,
     MemoryStatus, MemoryType, PaginatedMemories, RelatedMemory, ScoredMemory, StorageStats,
+    DEFAULT_CONFLICT_SIMILARITY,
 };
 use crate::repositories::Storage;
 use crate::services::{
@@ -15,11 +16,11 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 pub struct LightMem {
     storage: Arc<Storage>,
-    embedder: OnceLock<Arc<dyn EmbeddingProvider>>,
+    embedder: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     config: LightMemConfig,
     embedding_identity: String,
 }
@@ -41,7 +42,7 @@ impl LightMem {
 
         Ok(Self {
             storage: Arc::new(storage),
-            embedder: OnceLock::new(),
+            embedder: Mutex::new(None),
             config,
             embedding_identity,
         })
@@ -64,19 +65,27 @@ impl LightMem {
         let storage = Storage::open(&connection.db_path)?.with_context(connection.context.clone());
         Ok(Self {
             storage: Arc::new(storage),
-            embedder: OnceLock::new(),
+            embedder: Mutex::new(None),
             config,
             embedding_identity,
         })
     }
 
-    fn embedder(&self) -> Result<&Arc<dyn EmbeddingProvider>> {
+    fn embedder(&self) -> Result<Arc<dyn EmbeddingProvider>> {
         anyhow::ensure!(
-            !LightMemConfig::offline_requested() || self.config.backend != "ollama",
-            "Offline mode blocks Ollama embeddings. Use a cached ONNX model or hash backend."
+            !LightMemConfig::offline_requested()
+                || self.config.backend == "onnx"
+                || self.config.backend == "hash",
+            "Offline mode blocks remote embedding backend '{}'. Use a cached ONNX model or hash backend.",
+            self.config.backend
         );
-        if let Some(emb) = self.embedder.get() {
-            return Ok(emb);
+
+        let mut lock = self
+            .embedder
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Embedder lock poisoned"))?;
+        if let Some(ref emb) = *lock {
+            return Ok(emb.clone());
         }
 
         let created: Arc<dyn EmbeddingProvider> = match self.config.backend.as_str() {
@@ -98,8 +107,8 @@ impl LightMem {
             other => anyhow::bail!("Unknown embedding backend: {}", other),
         };
 
-        let _ = self.embedder.set(created);
-        Ok(self.embedder.get().unwrap())
+        *lock = Some(created.clone());
+        Ok(created)
     }
 
     pub fn embedding_migration_needed(&self) -> Result<bool> {
@@ -184,19 +193,24 @@ impl LightMem {
     }
 
     pub(crate) fn reconfigured(&self, config: LightMemConfig) -> Result<Self> {
-        let mut reopened = Self::open_at(self.db_path(), config)?;
-        if let Some(context) = self.storage.source_context() {
-            reopened.storage =
-                Arc::new(Storage::open(self.db_path())?.with_context(context.clone()));
-        }
-        Ok(reopened)
+        let embedding_identity = config.embedding_identity()?;
+        let storage = Arc::new(
+            self.storage
+                .clone_with_context(self.storage.source_context().cloned()),
+        );
+        Ok(Self {
+            storage,
+            embedder: Mutex::new(None),
+            config,
+            embedding_identity,
+        })
     }
 
     pub(crate) fn reconfigured_with_context(
         mut self,
         context: crate::MemoryContext,
     ) -> Result<Self> {
-        self.storage = Arc::new(Storage::open(self.db_path())?.with_context(context));
+        self.storage = Arc::new(self.storage.clone_with_context(Some(context)));
         Ok(self)
     }
 
@@ -225,16 +239,27 @@ impl LightMem {
         memory.expired_at = None;
         memory.updated_at = Utc::now();
         let embedder = self.embedder()?;
-        self.storage
-            .insert_indexed_batch(
-                &[memory],
-                embedder.as_ref(),
-                &self.embedding_identity,
-                false,
-            )?
-            .into_iter()
-            .next()
-            .context("Restore did not return a memory")
+        let mut restored = self.storage.insert_indexed_batch(
+            &[memory],
+            embedder.as_ref(),
+            &self.embedding_identity,
+            false,
+        )?;
+        let restored_mem = restored
+            .pop()
+            .with_context(|| "Restore did not return a memory")?;
+        if let Ok(links) = self.storage.get_links_for_memory(&restored_mem.id) {
+            for link in links {
+                if link.relation == "superseded_by" && link.source_id == restored_mem.id {
+                    let _ = self.storage.remove_link(
+                        &restored_mem.id,
+                        &link.target_id,
+                        Some("superseded_by"),
+                    );
+                }
+            }
+        }
+        Ok(restored_mem)
     }
 
     /// Store a new memory into the database
@@ -310,7 +335,9 @@ impl LightMem {
             &self.embedding_identity,
             true,
         )?;
-        let mut stored = stored_batch.remove(0);
+        let mut stored = stored_batch
+            .pop()
+            .with_context(|| "Failed to store memory: empty batch returned")?;
 
         let active_peers = self.storage.list_memories(
             Some(stored.category),
@@ -339,9 +366,12 @@ impl LightMem {
             }
             let vec_sim =
                 stored_vec.and_then(|sv| vec_map.get(&peer.id).map(|pv| cosine_similarity(sv, pv)));
-            if let Some(conflict) =
-                detect_memory_conflict_with_similarity(&stored, peer, vec_sim, 0.72)
-            {
+            if let Some(conflict) = detect_memory_conflict_with_similarity(
+                &stored,
+                peer,
+                vec_sim,
+                DEFAULT_CONFLICT_SIMILARITY,
+            ) {
                 if conflict.older_memory.id == peer.id
                     && best_conflict
                         .as_ref()
@@ -666,7 +696,9 @@ impl LightMem {
                 &self.embedding_identity,
                 true,
             )?;
-            batch.remove(0)
+            batch
+                .pop()
+                .with_context(|| "Failed to store memory: empty batch returned")?
         };
 
         let active_peers = self.storage.list_memories(
@@ -696,9 +728,12 @@ impl LightMem {
             }
             let vec_sim =
                 stored_vec.and_then(|sv| vec_map.get(&peer.id).map(|pv| cosine_similarity(sv, pv)));
-            if let Some(conflict) =
-                detect_memory_conflict_with_similarity(&stored, peer, vec_sim, 0.72)
-            {
+            if let Some(conflict) = detect_memory_conflict_with_similarity(
+                &stored,
+                peer,
+                vec_sim,
+                DEFAULT_CONFLICT_SIMILARITY,
+            ) {
                 if conflict.older_memory.id == peer.id
                     && best_conflict
                         .as_ref()
@@ -737,7 +772,7 @@ impl LightMem {
 
     /// Scan active memories by finding each memory's closest vector neighbor and checking overlap.
     pub fn find_conflicts(&self, resolve: bool) -> Result<Vec<MemoryConflict>> {
-        self.find_conflicts_with_options(resolve, 0.78, None)
+        self.find_conflicts_with_options(resolve, DEFAULT_CONFLICT_SIMILARITY, None)
     }
 
     /// Nearest-neighbor conflict & overlap detector with configurable similarity threshold and reranker merge
@@ -752,7 +787,12 @@ impl LightMem {
             .list_memories(None, Some(MemoryStatus::Active), None, 0)?;
         let vec_map: HashMap<String, Vec<f32>> = self
             .storage
-            .get_candidate_vectors_checked(None, Some(MemoryStatus::Active), None, None)
+            .get_candidate_vectors_checked(
+                None,
+                Some(MemoryStatus::Active),
+                None,
+                Some(&self.embedding_identity),
+            )
             .unwrap_or_default()
             .into_iter()
             .collect();
@@ -850,8 +890,17 @@ impl LightMem {
             &self.embedding_identity,
             false,
         )?;
+        let survivor = updated
+            .pop()
+            .with_context(|| "Failed to merge conflict pair: empty batch returned")?;
         let _ = self.storage.forget_memory(&older.id, false)?;
-        Ok(updated.remove(0))
+        let _ = self
+            .storage
+            .add_link(&older.id, &survivor.id, Some("superseded_by"), Some(1.0));
+        let _ = self
+            .storage
+            .add_link(&survivor.id, &older.id, Some("supersedes"), Some(1.0));
+        Ok(survivor)
     }
 
     /// Semantic + BM25 Hybrid Recall
@@ -998,15 +1047,17 @@ impl LightMem {
                             continue;
                         }
                     }
-                    if let Some(at) = as_of {
-                        if memory.created_at > at {
+                    let ref_time = as_of.unwrap_or_else(Utc::now);
+                    if memory.created_at > ref_time {
+                        continue;
+                    }
+                    if let Some(expired) = memory.expired_at {
+                        if expired <= ref_time {
                             continue;
                         }
-                        if let Some(expired) = memory.expired_at {
-                            if expired <= at {
-                                continue;
-                            }
-                        }
+                    }
+                    if as_of.is_none() && memory.status != MemoryStatus::Active {
+                        continue;
                     }
                     if let Some(day) = on_date {
                         if memory.created_at.date_naive() != day
@@ -1062,32 +1113,8 @@ impl LightMem {
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedMemories> {
-        let Some(target_day) = on_date else {
-            return self
-                .storage
-                .list_memories_paginated(category, status, as_of, limit, offset);
-        };
-        let all = self.storage.list_memories(category, status, as_of, 0)?;
-        let filtered: Vec<MemoryRecord> = all
-            .into_iter()
-            .filter(|m| {
-                m.created_at.date_naive() == target_day || m.updated_at.date_naive() == target_day
-            })
-            .collect();
-        let total = filtered.len();
-        let items: Vec<MemoryRecord> = filtered.into_iter().skip(offset).take(limit).collect();
-        let page = offset.checked_div(limit).unwrap_or(0) + 1;
-        let total_pages = if limit > 0 { total.div_ceil(limit) } else { 1 };
-        let has_more = offset.saturating_add(items.len()) < total;
-        Ok(PaginatedMemories {
-            items,
-            total,
-            limit,
-            offset,
-            page,
-            total_pages,
-            has_more,
-        })
+        self.storage
+            .list_memories_filtered(category, status, as_of, on_date, None, None, limit, offset)
     }
 
     /// Apply media/date filters before pagination, including accurate filtered totals.
@@ -1102,45 +1129,38 @@ impl LightMem {
         limit: usize,
         offset: usize,
     ) -> Result<PaginatedMemories> {
+        self.list_filtered_with_tag(category, status, as_of, on_date, media, None, limit, offset)
+    }
+
+    /// Apply media/date/tag filters before pagination, including accurate filtered totals.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list_filtered_with_tag(
+        &self,
+        category: Option<MemoryType>,
+        status: Option<MemoryStatus>,
+        as_of: Option<DateTime<Utc>>,
+        on_date: Option<NaiveDate>,
+        media: Option<&str>,
+        tag: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<PaginatedMemories> {
         anyhow::ensure!(
             limit > 0 && limit <= i64::MAX as usize && offset <= i64::MAX as usize,
             "Invalid pagination range"
         );
-        if media.is_none() {
-            return self.list_paginated_with_date(category, status, as_of, on_date, limit, offset);
+        if let Some(m) = media {
+            let clean_m = m.trim().to_lowercase();
+            anyhow::ensure!(
+                matches!(
+                    clean_m.as_str(),
+                    "any" | "all" | "image" | "audio" | "video" | "document"
+                ),
+                "Invalid media filter"
+            );
         }
-        let media = media.unwrap().trim().to_lowercase();
-        anyhow::ensure!(
-            matches!(
-                media.as_str(),
-                "any" | "all" | "image" | "audio" | "video" | "document"
-            ),
-            "Invalid media filter"
-        );
-        let all = self.storage.list_memories(category, status, as_of, 0)?;
-        let filtered: Vec<_> = all
-            .into_iter()
-            .filter(|m| {
-                on_date.is_none_or(|d| {
-                    m.created_at.date_naive() == d || m.updated_at.date_naive() == d
-                }) && m
-                    .attachments
-                    .iter()
-                    .any(|a| matches!(media.as_str(), "any" | "all") || a.media_kind == media)
-            })
-            .collect();
-        let total = filtered.len();
-        let items: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
-        let has_more = offset.saturating_add(items.len()) < total;
-        Ok(PaginatedMemories {
-            items,
-            total,
-            limit,
-            offset,
-            page: offset / limit + 1,
-            total_pages: total.div_ceil(limit),
-            has_more,
-        })
+        self.storage
+            .list_memories_filtered(category, status, as_of, on_date, media, tag, limit, offset)
     }
 
     /// List memories by 1-indexed page number and page size
@@ -1324,6 +1344,41 @@ impl LightMem {
             .check_embedding_identity(&self.embedding_identity)?;
         self.storage
             .deduplicate_indexed(self.embedder()?.as_ref(), &self.embedding_identity)
+    }
+
+    /// Update an existing memory's content, title, category, tags, or confidence in-place
+    pub fn update_memory(
+        &self,
+        id_or_title: &str,
+        new_content: Option<&str>,
+        new_title: Option<&str>,
+        new_category: Option<MemoryType>,
+        new_tags: Option<Vec<String>>,
+        new_confidence: Option<f32>,
+    ) -> Result<MemoryRecord> {
+        self.storage
+            .check_embedding_identity(&self.embedding_identity)?;
+        let embedder = self.embedder()?;
+        let updated = self.storage.update_memory(
+            id_or_title,
+            new_content,
+            new_title,
+            new_category,
+            new_tags.as_deref(),
+            new_confidence,
+            Some(embedder.as_ref()),
+            Some(&self.embedding_identity),
+        )?;
+        let _ = self.storage.auto_link_memory(
+            &updated.id,
+            &format!("{}\n{}", updated.title, updated.content),
+        );
+        Ok(updated)
+    }
+
+    /// Retrieve all distinct tags and their active memory counts
+    pub fn get_all_tags(&self) -> Result<Vec<(String, usize)>> {
+        self.storage.get_all_tags()
     }
 
     /// Explicitly link two memories with an optional relation type (default: relates_to) and weight
@@ -1531,7 +1586,7 @@ impl LightMem {
                     .auto_link_memory(&rec.id, &format!("{}\n{}", rec.title, rec.content));
             }
         }
-        Ok(records.len())
+        Ok(stored_records.len())
     }
 
     fn collect_importable_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -1629,9 +1684,18 @@ impl LightMem {
             || lower == "mistral"
             || lower == "llm"
         {
+            let model_override = if let Some((p, m)) = self.config.reranker.split_once(':') {
+                if p.trim().eq_ignore_ascii_case(&lower) && !m.trim().is_empty() {
+                    Some(m.trim().to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             return Ok(Box::new(OllamaReranker::with_api_key(
                 effective_cfg.effective_ollama_url(),
-                Some(lower),
+                model_override,
                 effective_cfg.effective_ollama_api_key(),
             )));
         }
@@ -1649,9 +1713,15 @@ impl LightMem {
             if active_reranker.len() > prefix.len()
                 && active_reranker[..prefix.len()].eq_ignore_ascii_case(prefix)
             {
+                let raw_model = active_reranker[prefix.len()..].trim();
+                let model_param = if raw_model.is_empty() {
+                    None
+                } else {
+                    Some(raw_model.to_string())
+                };
                 return Ok(Box::new(OllamaReranker::with_api_key(
                     effective_cfg.effective_ollama_url(),
-                    Some(active_reranker.to_string()),
+                    model_param,
                     effective_cfg.effective_ollama_api_key(),
                 )));
             }
@@ -1831,7 +1901,9 @@ impl LightMem {
             &self.embedding_identity,
             true,
         )?;
-        let stored = stored_batch.remove(0);
+        let stored = stored_batch
+            .pop()
+            .with_context(|| "Failed to save candidate: empty batch returned")?;
         let _ = self
             .storage
             .auto_link_memory(&stored.id, &format!("{}\n{}", stored.title, stored.content));

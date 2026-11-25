@@ -128,20 +128,37 @@ lmem remember "PostgreSQL primary runs on port 5432 with WAL archiving enabled" 
 
 # 2. Recall memories (hybrid vector + full-text search)
 lmem recall "postgres port" --limit 5
+lmem recall "postgres" --tag database              # Tag filter
 
-# 3. Neural Extractive QA
+# 3. List and paginate memories
+lmem list --limit 10 --page 1                      # Paginated chronological view
+lmem list --tag postgres                           # Filter by tag
+lmem list --status expired                         # View archived records
+
+# 4. Neural Extractive QA
 lmem answer "what port does postgres use?"
 
-# 4. Inspect memory record, entities, and links
+# 5. In-place memory update
+lmem update <MEMORY_ID> --content "New text"       # Updates content and re-embeds
+lmem update <MEMORY_ID> --title "Postgres 16"      # Update metadata in-place
+
+# 6. Inspect memory record, entities, and links
 lmem inspect <MEMORY_ID>
 
-# 5. Interactive conflict & duplicate review
-lmem conflicts
+# 7. Knowledge graph and tags
+lmem links <MEMORY_ID>                             # Direct incoming/outgoing links
+lmem tags                                          # List all tags and memory counts
+
+# 8. Interactive conflict & duplicate review
+lmem deduplicate                                   # Exact hash deduplication
+lmem conflicts                                     # Semantic conflict review
 lmem conflicts --yes                               # Auto-merge detected duplicates
 
-# 6. Lifecycle & deletion
+# 9. Lifecycle, archival & restore
 lmem forget <MEMORY_ID>                            # Soft-retire (status -> expired)
 lmem forget <MEMORY_ID> --hard                     # Permanent purge (DB + vector + FTS)
+lmem restore <MEMORY_ID>                           # Restore expired memory
+lmem clear --yes                                   # Wipe entire database (requires --yes)
 ```
 
 ---
@@ -336,13 +353,22 @@ lmem connect cursor --mcp   # Configure Cursor only
 ### Exposed MCP Tools
 | Tool | Description |
 | :--- | :--- |
+| `context` | Show active user, agent, harness, memory scope, and database path. |
 | `remember` | Store persistent facts, preferences, decisions, or architectural notes with tags and files. |
 | `recall` | Hybrid semantic + keyword retrieval with optional category, media kind, and multi-hop expansion. |
+| `list` | Chronological paginated memory listing with category, tag, and status filters. |
+| `inspect` | Deep inspection of memory record, attachments, and knowledge graph links by ID or title. |
+| `update` | In-place update of memory content, title, category, tags, or confidence. |
 | `answer` | Neural Extractive QA: returns precise answer spans from vault memories. |
 | `link` | Connect two memories in the knowledge graph with custom relations and weights. |
+| `unlink` | Remove directional link between two memories. |
+| `graph` | Retrieve full or focused knowledge graph nodes and edges. |
 | `graph_related` | Multi-hop relationship traversal around a given memory node. |
+| `tags` | List all distinct tags in the active vault and their memory counts. |
 | `conflicts` | Detect and review contradictory or duplicate memories. |
-| `forget` | Deactivate or archive outdated memories safely. |
+| `forget` | Deactivate or archive outdated memories safely (soft or hard). |
+| `restore` | Recover an archived or expired memory by ID, prefix, or title. |
+| `config` | View or adjust active settings and presets. |
 | `stats` | Inspect total memory count, vector distribution, and vault disk footprint. |
 
 ---

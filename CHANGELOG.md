@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0
+
+- **Modular CLI Architecture**: Modularized `main.rs` from 5,000+ monolithic lines into maintainable domain-specific command handlers (`src/commands/`), eliminating raw database queries in views and CLI helpers.
+- **Global Flag Standardization & JSON Output**: Standardized `--json` as a true global flag across all subcommands, harmonized export formatting with `--format json|okf|bundle`, and added uniform `-y, --yes` confirmation gates for destructive actions (`forget --all --hard`, `clear`, `config --reset-db`, `reindex`).
+- **SQLite Migrations & Concurrency Safety**: Guaranteed safe version schema upgrades without dropping tombstones or table data, computed vector embeddings before acquiring SQLite transactions to eliminate I/O lock contention, and added file permission hardening (`0o600` on WAL/SHM files).
+- **FTS5 & Vector Scaling Optimizations**: Converted FTS5 triggers to external-content indexing with rowid synchronization, only firing index updates when indexed fields mutate; moved pagination and date filtering directly into SQL queries.
+- **Search & Reranker Correctness**: Enforced similarity thresholds across all recall paths, assigned contiguous vector ranks post-filtering, isolated corrupt/mismatched vector records during multi-item recall, and enabled streaming downloads for local ONNX assets.
+- **API Server & MCP Protocol Hardening**: Secured the HTTP API daemon to `127.0.0.1` by default with constant-time Bearer token comparisons; upgraded MCP implementation to full JSON-RPC 2.0 compliance (-32600 for invalid requests, -32602 for missing tools, reused persistent controller instances).
+
 ## 0.9.0
 
 - **Streamlined Interactive Configuration (`lmem config --edit`)**: Numbered sub-menus (1..10 for answer generation, 1..6 for vector embeddings, 1..2 for extraction and remote routing) with direct recommended defaults on `<Enter>`, preventing infinite re-prompt loops and eliminating double-prompt friction.
