@@ -888,7 +888,7 @@ pub fn handle_setup(
         CliView::render_config(&cfg, true, true, effective_db, global)?;
     } else {
         terminal::render_config(&cfg, true, effective_db, global)?;
-        if interactive {
+        if interactive && !yes {
             terminal::offer_downloads(&cfg)?;
         }
         terminal::completion_hint();

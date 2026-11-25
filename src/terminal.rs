@@ -116,9 +116,9 @@ pub fn prompt_remote(
     let default_url = current_url.unwrap_or("http://localhost:8080");
     let input = match line(&format!("Remote URL [{default_url}]: ")) {
         Ok(s) => s,
-        Err(_) => {
+        Err(err) => {
             eprintln!("\nOperation cancelled. No settings changed.");
-            std::process::exit(130);
+            return Err(err);
         }
     };
     let target = if input.is_empty() {
@@ -129,15 +129,22 @@ pub fn prompt_remote(
     let clean_url = normalize_http_url(&target)?;
 
     let key_prompt = if current_key.is_some() {
-        "API Key (press Enter to keep, or paste new key): "
+        "API Key (hidden; press Enter to keep, or 'none' to clear): "
     } else {
-        "API Key (optional, press Enter to skip): "
+        "API Key (hidden; optional, press Enter to skip): "
     };
-    let key_input = match line(key_prompt) {
-        Ok(s) => s,
-        Err(_) => {
+    eprint!("{key_prompt}");
+    io::stderr().flush()?;
+    let key_input = match rpassword::read_password() {
+        Ok(s) => {
+            eprintln!();
+            s.trim().to_string()
+        }
+        Err(err) => {
             eprintln!("\nOperation cancelled. No settings changed.");
-            std::process::exit(130);
+            return Err(anyhow::anyhow!(
+                "Input closed. No settings changed ({err})."
+            ));
         }
     };
     let final_key = if key_input.is_empty() {
@@ -315,82 +322,59 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
     .to_lowercase();
     eprintln!();
 
+    let ask_entity_extraction = |cfg: &mut LightMemConfig| -> Result<()> {
+        cfg.entity_extraction = if confirm(
+            "Enable LLM entity extraction (sends saved memory text to the configured endpoint)?",
+            false,
+        )? {
+            "on".into()
+        } else {
+            "off".into()
+        };
+        Ok(())
+    };
+
+    let configure_cloud =
+        |cfg: &mut LightMemConfig, preset: &str, default_model: &str, label: &str| -> Result<()> {
+            cfg.apply_preset(preset)?;
+            let model = value("Model name", default_model)?;
+            let prefix = format!("{preset}:");
+            let clean = model.strip_prefix(&prefix).unwrap_or(&model).trim();
+            if !clean.is_empty() {
+                cfg.reranker = format!("{preset}:{clean}");
+            }
+            ask_entity_extraction(cfg)?;
+            prompt_api_key(cfg, label)
+        };
+
     match choice.as_str() {
         "1" | "local" | "onnx" => cfg.apply_preset("local")?,
         "2" | "ollama" => {
             cfg.apply_preset("ollama")?;
             let model = value("Ollama model name", "qwen2.5:3b")?;
             let clean = model.strip_prefix("ollama:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "qwen2.5:3b" {
+            if !clean.is_empty() {
                 cfg.reranker = format!("ollama:{clean}");
             }
             let url = value("Ollama endpoint URL", "http://localhost:11434")?;
             if !url.is_empty() {
+                http_url(&url)?;
                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
             }
-            cfg.entity_extraction = "on".into();
+            ask_entity_extraction(&mut cfg)?;
         }
         "3" | "demo" | "hash" => cfg.apply_preset("demo")?,
-        "4" | "openai" => {
-            cfg.apply_preset("openai")?;
-            let model = value("Model name", "gpt-4o-mini")?;
-            let clean = model.strip_prefix("openai:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "gpt-4o-mini" {
-                cfg.reranker = format!("openai:{clean}");
-            }
-            cfg.entity_extraction = "on".into();
-            prompt_api_key(&mut cfg, "OpenAI")?;
-        }
-        "5" | "gemini" => {
-            cfg.apply_preset("gemini")?;
-            let model = value("Model name", "gemini-1.5-flash")?;
-            let clean = model.strip_prefix("gemini:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "gemini-1.5-flash" {
-                cfg.reranker = format!("gemini:{clean}");
-            }
-            cfg.entity_extraction = "on".into();
-            prompt_api_key(&mut cfg, "Google Gemini")?;
-        }
-        "6" | "groq" => {
-            cfg.apply_preset("groq")?;
-            let model = value("Model name", "llama-3.3-70b-versatile")?;
-            let clean = model.strip_prefix("groq:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "llama-3.3-70b-versatile" {
-                cfg.reranker = format!("groq:{clean}");
-            }
-            cfg.entity_extraction = "on".into();
-            prompt_api_key(&mut cfg, "Groq")?;
-        }
-        "7" | "openrouter" => {
-            cfg.apply_preset("openrouter")?;
-            let model = value("Model name", "anthropic/claude-3.5-sonnet")?;
-            let clean = model.strip_prefix("openrouter:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "anthropic/claude-3.5-sonnet" {
-                cfg.reranker = format!("openrouter:{clean}");
-            }
-            cfg.entity_extraction = "on".into();
-            prompt_api_key(&mut cfg, "OpenRouter")?;
-        }
-        "8" | "deepseek" => {
-            cfg.apply_preset("deepseek")?;
-            let model = value("Model name", "deepseek-chat")?;
-            let clean = model.strip_prefix("deepseek:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "deepseek-chat" {
-                cfg.reranker = format!("deepseek:{clean}");
-            }
-            cfg.entity_extraction = "on".into();
-            prompt_api_key(&mut cfg, "DeepSeek")?;
-        }
-        "9" | "mistral" => {
-            cfg.apply_preset("mistral")?;
-            let model = value("Model name", "mistral-small-latest")?;
-            let clean = model.strip_prefix("mistral:").unwrap_or(&model).trim();
-            if !clean.is_empty() && clean != "mistral-small-latest" {
-                cfg.reranker = format!("mistral:{clean}");
-            }
-            cfg.entity_extraction = "on".into();
-            prompt_api_key(&mut cfg, "Mistral")?;
-        }
+        "4" | "openai" => configure_cloud(&mut cfg, "openai", "gpt-4o-mini", "OpenAI")?,
+        "5" | "gemini" => configure_cloud(&mut cfg, "gemini", "gemini-1.5-flash", "Google Gemini")?,
+        "6" | "groq" => configure_cloud(&mut cfg, "groq", "llama-3.3-70b-versatile", "Groq")?,
+        "7" | "openrouter" => configure_cloud(
+            &mut cfg,
+            "openrouter",
+            "anthropic/claude-3.5-sonnet",
+            "OpenRouter",
+        )?,
+        "8" | "deepseek" => configure_cloud(&mut cfg, "deepseek", "deepseek-chat", "DeepSeek")?,
+        "9" | "mistral" => configure_cloud(&mut cfg, "mistral", "mistral-small-latest", "Mistral")?,
         "10" | "custom" => {
             cfg.apply_preset("custom")?;
             let url = value(
@@ -401,8 +385,12 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
             cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
             let model = value("Model name", "default")?;
             let clean = model.strip_prefix("custom:").unwrap_or(&model).trim();
-            cfg.reranker = format!("custom:{clean}");
-            cfg.entity_extraction = "on".into();
+            cfg.reranker = if clean.is_empty() {
+                "custom:default".to_string()
+            } else {
+                format!("custom:{clean}")
+            };
+            ask_entity_extraction(&mut cfg)?;
             prompt_api_key(&mut cfg, "Custom Endpoint")?;
         }
         "11" | "remote" => {
@@ -517,12 +505,17 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
             "  ╭─ {}",
             CliView::crimson_bold("SELECT SETTING TO CONFIGURE")
         );
+        let embed_display = if cfg.backend == "onnx" {
+            cfg.onnx_model.as_deref().unwrap_or("bge-small")
+        } else {
+            &cfg.embedding_model
+        };
         eprintln!(
             "  │  {} {} {:<26} {}",
             CliView::slate("▸"),
             CliView::white_bold("1."),
             "Search & Embeddings",
-            CliView::slate(&format!("[{}: {}]", cfg.backend, cfg.embedding_model))
+            CliView::slate(&format!("[{}: {}]", cfg.backend, embed_display))
         );
         let prov_display = CliView::model_provider_name(&cfg);
         eprintln!(
@@ -661,23 +654,36 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                         break;
                     }
                     "4" | "ollama" => {
-                        cfg.backend = "ollama".to_string();
                         let ep = value(
                             "Ollama embedding endpoint URL (e.g. http://localhost:11434)",
                             cfg.embedding_endpoint
                                 .as_deref()
                                 .unwrap_or("http://localhost:11434"),
                         )?;
-                        cfg.embedding_endpoint = Some(LightMemConfig::normalize_ollama_url(&ep));
-                        cfg.embedding_model = value(
-                            "Ollama embedding model",
-                            if cfg.embedding_model.is_empty() || cfg.embedding_model == "bge-small"
-                            {
-                                "nomic-embed-text"
-                            } else {
-                                &cfg.embedding_model
-                            },
-                        )?;
+                        http_url(&ep)?;
+                        let norm_ep = LightMemConfig::normalize_ollama_url(&ep);
+                        let default_emb = if cfg.backend != "ollama"
+                            || cfg.embedding_model.is_empty()
+                            || matches!(
+                                cfg.embedding_model.as_str(),
+                                "bge-small" | "minilm" | "nomic" | "hash"
+                            ) {
+                            "nomic-embed-text"
+                        } else {
+                            &cfg.embedding_model
+                        };
+                        let emb_model = value("Ollama embedding model", default_emb)?;
+                        cfg.backend = "ollama".to_string();
+                        cfg.embedding_endpoint = Some(norm_ep.clone());
+                        cfg.embedding_model = emb_model;
+                        if !norm_ep.contains("localhost")
+                            && !norm_ep.contains("127.0.0.1")
+                            && cfg.effective_embedding_api_key().is_none()
+                            && confirm("Configure embedding endpoint API key?", false)?
+                        {
+                            let present = cfg.effective_embedding_api_key().is_some();
+                            credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
+                        }
                         break;
                     }
                     "5" | "custom" => {
@@ -686,7 +692,8 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                             "Path to custom model directory",
                             cfg.onnx_model.as_deref().unwrap_or("~/.lightmem/models"),
                         )?;
-                        cfg.onnx_model = Some(dir);
+                        cfg.onnx_model = Some(dir.clone());
+                        cfg.embedding_model = dir;
                         break;
                     }
                     "6" | "hash" => {
@@ -728,7 +735,7 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                     CliView::slate("▸"),
                     CliView::white_bold(" 3."),
                     "Groq Ultra-Fast",
-                    CliView::slate("[qwen/qwen3.8-27b, llama-3.3-70b]")
+                    CliView::slate("[llama-3.3-70b-versatile]")
                 );
                 eprintln!(
                     "  │  {} {} {:<30} {}",
@@ -836,7 +843,13 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                             "http://localhost:8000/v1",
                         )?;
                         http_url(&ep)?;
-                        cfg.reranker = "custom".to_string();
+                        let model = value("Model name", "default")?;
+                        let clean = model.strip_prefix("custom:").unwrap_or(&model).trim();
+                        cfg.reranker = if clean.is_empty() {
+                            "custom:default".to_string()
+                        } else {
+                            format!("custom:{clean}")
+                        };
                         cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
                         prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
                         break;
@@ -882,7 +895,13 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                                     "http://localhost:8000/v1",
                                 )?;
                                 http_url(&ep)?;
-                                cfg.reranker = "custom".to_string();
+                                let model = value("Model name", "default")?;
+                                let clean = model.strip_prefix("custom:").unwrap_or(&model).trim();
+                                cfg.reranker = if clean.is_empty() {
+                                    "custom:default".to_string()
+                                } else {
+                                    format!("custom:{clean}")
+                                };
                                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(&ep);
                                 prompt_key_if_missing(&mut cfg, "Custom Endpoint")?;
                                 break;
@@ -911,10 +930,18 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 eprintln!(
                     "  │  Extracts structured entities & relations from newly saved memory text."
                 );
-                eprintln!(
-                    "  │  Generative Model Target: {}",
-                    CliView::emerald(&cfg.effective_ollama_url())
-                );
+                if cfg.has_active_llm() {
+                    eprintln!(
+                        "  │  Generative Model Target: {}",
+                        CliView::emerald(&cfg.effective_ollama_url())
+                    );
+                } else {
+                    eprintln!(
+                        "  │  Active Answer Engine:    {} {}",
+                        CliView::slate(&cfg.reranker),
+                        CliView::gold("(requires Ollama or a cloud/custom LLM)")
+                    );
+                }
                 eprintln!("  │");
                 eprintln!(
                     "  │  {} {} {:<26} {}",
@@ -1466,17 +1493,20 @@ pub struct TerminalProgress {
     total: usize,
     width: usize,
     is_tty: bool,
+    use_color: bool,
     start_time: std::time::Instant,
 }
 
 impl TerminalProgress {
     pub fn new(prefix: impl Into<String>, total: usize) -> Self {
         let is_tty = io::stderr().is_terminal();
+        let use_color = is_tty && colored::control::SHOULD_COLORIZE.should_colorize();
         Self {
             prefix: prefix.into(),
             total,
             width: 20,
             is_tty,
+            use_color,
             start_time: std::time::Instant::now(),
         }
     }
@@ -1489,15 +1519,21 @@ impl TerminalProgress {
         if !self.is_tty {
             return;
         }
-        let pct = (current * 100).checked_div(self.total).unwrap_or(100);
-        let filled = (current * self.width)
+        let pct = current
+            .saturating_mul(100)
             .checked_div(self.total)
-            .unwrap_or(self.width);
+            .unwrap_or(0)
+            .min(100);
+        let filled = current
+            .saturating_mul(self.width)
+            .checked_div(self.total)
+            .unwrap_or(0)
+            .min(self.width);
         let unfilled = self.width.saturating_sub(filled);
         let bar_filled: String = "▰".repeat(filled);
         let bar_unfilled: String = "▱".repeat(unfilled);
 
-        let max_msg_len = 32;
+        let max_msg_len = 24;
         let display_msg = if message.chars().count() > max_msg_len {
             let mut s = message
                 .chars()
@@ -1509,16 +1545,17 @@ impl TerminalProgress {
             message.to_string()
         };
 
-        eprint!(
-            "\r  \x1b[38;2;113;113;122m▸\x1b[0m {:<14} \x1b[38;2;220;38;38m{}\x1b[38;2;63;63;70m{}\x1b[0m {:>3}% ({}/{})  \x1b[38;2;161;161;170m{}\x1b[0m\x1b[K",
-            self.prefix,
-            bar_filled,
-            bar_unfilled,
-            pct,
-            current,
-            self.total,
-            display_msg
-        );
+        if self.use_color {
+            eprint!(
+                "\r  \x1b[38;2;113;113;122m▸\x1b[0m {:<14} \x1b[38;2;220;38;38m{}\x1b[38;2;63;63;70m{}\x1b[0m {:>3}% ({}/{})  \x1b[38;2;161;161;170m{}\x1b[0m\x1b[K",
+                self.prefix, bar_filled, bar_unfilled, pct, current, self.total, display_msg
+            );
+        } else {
+            eprint!(
+                "\r  ▸ {:<14} {}{} {:>3}% ({}/{})  {}",
+                self.prefix, bar_filled, bar_unfilled, pct, current, self.total, display_msg
+            );
+        }
         let _ = io::stderr().flush();
     }
 
@@ -1531,15 +1568,17 @@ impl TerminalProgress {
             } else {
                 format!("{}ms", elapsed.as_millis())
             };
-            eprintln!(
-                "\r  \x1b[38;2;113;113;122m▸\x1b[0m {:<14} \x1b[38;2;34;197;94m{}\x1b[0m 100% ({}/{})  \x1b[38;2;34;197;94m{} ({})\x1b[0m\x1b[K",
-                self.prefix,
-                bar_filled,
-                self.total,
-                self.total,
-                message,
-                elapsed_str
-            );
+            if self.use_color {
+                eprintln!(
+                    "\r  \x1b[38;2;113;113;122m▸\x1b[0m {:<14} \x1b[38;2;34;197;94m{}\x1b[0m 100% ({}/{})  \x1b[38;2;34;197;94m{} ({})\x1b[0m\x1b[K",
+                    self.prefix, bar_filled, self.total, self.total, message, elapsed_str
+                );
+            } else {
+                eprintln!(
+                    "\r  ▸ {:<14} {} 100% ({}/{})  {} ({})",
+                    self.prefix, bar_filled, self.total, self.total, message, elapsed_str
+                );
+            }
         }
     }
 }

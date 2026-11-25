@@ -28,14 +28,8 @@ jobs:
         run: cargo test --locked --lib --bins --tests
       - name: Check Rust lints
         run: cargo clippy --locked --all-targets -- -D warnings
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Validate browser scripts and documentation contracts
-        run: |
-          node --check static/docs.js
-          node --check static/site.js
-          python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Validate release and documentation contracts
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Test Python SDK against the native binary
         env:
           PYTHONPATH: python/src

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0
+
+### Highlights
+- **UI Streamlining & Legacy Removal**: Removed the embedded static documentation server (`lmem docs`), the web workspace surface (`lmem ui`, `/v1/workspace/*`), static site landing assets (`static/`, `vercel.json`), presentation artifacts (`dist/`, `slides.html`, decks), duplicate `demo_vault/`, and legacy 0.8.0 review/audit documents. Added `GET /v1/context` / `GET /context` on the daemon API server for direct scope telemetry.
+- **Terminal & Banner Rendering Fixes**: Fixed `"groq:"` reranker slice truncation (`groq (ama-...)`) and single-char model panics by uniformly splitting provider prefixes via `split_once(':')` (also supporting `custom:`); honored `NO_COLOR` and non-TTY streams across the half-block logo, `TerminalProgress`, `serve` startup banner, and `install.sh`; added compact fallback formatting for narrow (<92 col) terminals and accurate vault-path resolution in `--help`.
+- **Inspect, Lists, Tables, Conflicts & Errors**: Fixed `inspect` incoming link arrow direction (`◀──relation──`), tree-closing `╰─` branches, and multi-line content indentation; eliminated duplicate `title == snippet` lines in `lmem list` and normalized recall RRF score bars; fixed dynamic ANSI-aware column padding in `tags`, `entities`, `links`, and `status` (putting long vault paths on indented sub-lines); fixed conflict pair `02/03.` double-increment in `conflicts` interactive review; added numbered-list handling in `answer`; hid stale cloud endpoints when `Local ONNX`/`Top-1` is active, exposed env-var key provenance and `Embedding API Key` in `config`, repaired `Embedding Endpoint:` alignment and `"model_api_key"` diff labeling, added embedding HTTP error recognition + `--answer-model` hint in `try_render_model_error`, and ensured `--json` errors, `serve -d --json`, and `uninstall --yes --json` emit clean JSON.
+- **Interactive Prompt Hardening (`setup` & `config --edit`)**: Masked remote API keys via `rpassword` and returned clean errors on EOF instead of raw `exit(130)`; preserved Ollama default `qwen2.5:3b` in `setup`; prompted explicitly before enabling LLM entity extraction; skipped `offer_downloads` interactive prompts when `--yes` is passed; fixed `config --edit` menu display for ONNX/custom models, Groq model label alignment, inline HTTP URL validation, `embedding_model` sync on custom ONNX directories, custom answer model naming, and explicit confirmation loops in `observe` and `conflicts`.
+
 ## 0.11.0
 
 ### Highlights

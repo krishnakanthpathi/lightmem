@@ -610,6 +610,9 @@ impl OllamaReranker {
             if l == "ollama" || l.starts_with("ollama:") {
                 return "ollama";
             }
+            if l == "custom" || l.starts_with("custom:") {
+                return "llm";
+            }
         }
         let u = self.ollama_url.to_lowercase();
         if u.contains("groq.com") {
@@ -652,6 +655,7 @@ impl OllamaReranker {
                     | "groq"
                     | "deepseek"
                     | "mistral"
+                    | "custom"
                     | "llm"
                     | "default"
                     | ""
@@ -664,6 +668,7 @@ impl OllamaReranker {
                     "deepseek:",
                     "mistral:",
                     "ollama:",
+                    "custom:",
                     "llm:",
                 ] {
                     if explicit.len() > prefix.len()

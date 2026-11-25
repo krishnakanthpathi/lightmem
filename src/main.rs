@@ -847,22 +847,6 @@ pub enum Commands {
     /// Display version information and build metadata
     Version,
 
-    /// Launch an embedded local documentation and landing page web server (zero external processes)
-    #[command(visible_aliases = ["doc", "web"])]
-    Docs {
-        /// Port to bind the local HTTP server (defaults to auto-selecting 8080..8100)
-        #[arg(short = 'p', long)]
-        port: Option<u16>,
-
-        /// Open the landing page instead of the documentation page
-        #[arg(long)]
-        landing: bool,
-
-        /// Do not automatically open browser
-        #[arg(long)]
-        no_browser: bool,
-    },
-
     /// Switch to local mode (clears saved remote URL and API key)
     #[command(visible_aliases = ["disconnect"])]
     Local,
@@ -1159,7 +1143,6 @@ fn extract_subcommand_name(cli: &Cli) -> String {
         Some(Commands::Completions { .. }) => "completions",
         Some(Commands::CompletionConnections) => "__connections",
         Some(Commands::Version) => "version",
-        Some(Commands::Docs { .. }) => "docs",
         Some(Commands::Local) => "local",
         Some(Commands::Remote { .. }) => "remote",
         Some(Commands::Serve { .. }) => "serve",
@@ -1203,7 +1186,17 @@ fn main() {
             if CliView::try_render_known_error(&err, json) {
                 std::process::exit(1);
             }
-            eprintln!("Error: {err}");
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "error",
+                        "error": format!("{err:#}"),
+                    })
+                );
+            } else {
+                eprintln!("Error: {err}");
+            }
         }
         std::process::exit(1);
     }

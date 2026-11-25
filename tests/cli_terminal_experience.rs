@@ -268,7 +268,7 @@ fn live_connection_completion_is_readonly_and_filters_invalid_values() {
 #[test]
 fn no_memory_editor_or_tui_is_added() {
     let f = Fixture::new();
-    for command in ["edit", "tui", "ui"] {
+    for command in ["edit", "tui", "ui", "docs"] {
         assert!(!f.run(&[command]).status.success());
     }
 }
@@ -353,4 +353,150 @@ fn local_and_remote_commands_workflow() {
     // Verify config is back to local
     let cfg = f.json(&["config", "--json"]);
     assert!(cfg["remote_url"].is_null());
+}
+
+#[test]
+fn ui_fixes_banner_no_color_narrow_width_and_groq_slice() {
+    let f = Fixture::new();
+
+    let ver = f.run(&["--version"]);
+    assert!(ver.status.success());
+    assert!(String::from_utf8_lossy(&ver.stdout).contains("0.12.0"));
+
+    f.demo();
+    let groq_cfg = f.run(&[
+        "config",
+        "--backend",
+        "hash",
+        "--answer-model",
+        "groq:llama-3.3-70b-versatile",
+        "--ollama-api-key",
+        "gsk-dummy",
+        "--json",
+    ]);
+    assert!(groq_cfg.status.success());
+
+    let out = f.run(&[]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('\x1b'),
+        "NO_COLOR=1 must suppress ANSI escapes: {stdout}"
+    );
+    assert!(
+        stdout.contains("groq (llama-3.3-70b-versatile)"),
+        "expected full groq model name in banner: {stdout}"
+    );
+    assert!(!stdout.contains("groq (ama-3.3-70b-versatile)"));
+
+    let narrow = f.command().env("COLUMNS", "80").output().unwrap();
+    assert!(narrow.status.success());
+    let narrow_out = String::from_utf8_lossy(&narrow.stdout);
+    assert!(narrow_out.contains("L I G H T M E M"));
+    for line in narrow_out.lines().take(12) {
+        assert!(
+            line.chars().count() <= 80,
+            "narrow header line exceeded 80 cols ({}): {line}",
+            line.chars().count()
+        );
+    }
+
+    let custom_cfg = f.run(&[
+        "config",
+        "--answer-model",
+        "custom:x",
+        "--endpoint",
+        "http://localhost:8000/v1",
+        "--json",
+    ]);
+    assert!(custom_cfg.status.success());
+    let custom_out = f.run(&[]);
+    assert!(custom_out.status.success());
+    assert!(String::from_utf8_lossy(&custom_out.stdout).contains("custom (x)"));
+}
+
+#[test]
+fn ui_fixes_config_local_endpoint_and_json_errors() {
+    let f = Fixture::new();
+    let openai = f.run(&[
+        "config",
+        "--backend",
+        "hash",
+        "--preset",
+        "openai",
+        "--ollama-api-key",
+        "none",
+        "--json",
+    ]);
+    assert!(openai.status.success());
+
+    let back_local = f.run(&[
+        "config",
+        "--backend",
+        "hash",
+        "--answer-model",
+        "top1",
+        "--json",
+    ]);
+    assert!(back_local.status.success());
+
+    let cfg_out = f.run(&["config"]);
+    assert!(cfg_out.status.success());
+    let cfg_str = String::from_utf8_lossy(&cfg_out.stdout);
+    assert!(
+        !cfg_str.contains("https://api.openai.com"),
+        "dormant cloud endpoint should not render for Top-1: {cfg_str}"
+    );
+    assert!(cfg_str.contains("local (offline, built-in)"));
+
+    let err_out = f.run(&["config", "--preset", "nonexistent-preset", "--json"]);
+    assert!(!err_out.status.success());
+    let stderr_str = String::from_utf8_lossy(&err_out.stderr);
+    let err_json: Value = serde_json::from_str(stderr_str.trim())
+        .unwrap_or_else(|e| panic!("expected JSON error on stderr, got '{stderr_str}': {e}"));
+    assert_eq!(err_json["status"], "error");
+}
+
+#[test]
+fn ui_fixes_inspect_incoming_links_multiline_and_list_dedup() {
+    let f = Fixture::new();
+    f.demo();
+    let a = f.json(&["remember", "Line one alpha\nLine two alpha", "--json"]);
+    let b = f.json(&["remember", "Target summary line", "--json"]);
+    let a_id = a["id"].as_str().unwrap();
+    let b_id = b["id"].as_str().unwrap();
+
+    assert!(f
+        .run(&["link", a_id, b_id, "--relation", "depends_on", "--json"])
+        .status
+        .success());
+
+    let insp_b = f.run(&["inspect", b_id]);
+    assert!(insp_b.status.success());
+    let insp_b_str = String::from_utf8_lossy(&insp_b.stdout);
+    assert!(
+        insp_b_str.contains("◀──depends_on──"),
+        "incoming link arrow missing: {insp_b_str}"
+    );
+    assert!(
+        insp_b_str.contains(&format!("╰─ ◀──depends_on── ({})", &a_id[..8])),
+        "last link should close tree with ╰─: {insp_b_str}"
+    );
+
+    let insp_a = f.run(&["inspect", a_id]);
+    assert!(insp_a.status.success());
+    let insp_a_str = String::from_utf8_lossy(&insp_a.stdout);
+    assert!(
+        insp_a_str.contains("  Line one alpha\n  Line two alpha"),
+        "multiline content lines should stay aligned: {insp_a_str}"
+    );
+
+    let list_out = f.run(&["list"]);
+    assert!(list_out.status.success());
+    let list_str = String::from_utf8_lossy(&list_out.stdout);
+    assert!(
+        !list_str.contains("Target summary line ──")
+            && !list_str.contains("Target summary line ─ Target summary line"),
+        "list should not repeat identical title and snippet: {list_str}"
+    );
 }

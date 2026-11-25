@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use colored::*;
 use lightmem::{
-    CliView, ConnectService, DocsOptions, IdentityRegistry, LightMemConfig, ResolvedConnection,
-    ServerOptions,
+    CliView, ConnectService, IdentityRegistry, LightMemConfig, ResolvedConnection, ServerOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::io::{self, IsTerminal, Write};
@@ -209,15 +208,6 @@ pub fn handle_mcp(
     let server = lightmem::McpServer::new(global, effective_db.map(Path::to_path_buf))
         .with_connection(connection.cloned());
     server.run_stdio()
-}
-
-pub fn handle_docs(port: Option<u16>, landing: bool, no_browser: bool) -> Result<()> {
-    let options = DocsOptions {
-        port,
-        open_landing: landing,
-        no_browser,
-    };
-    lightmem::serve_docs(options)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -575,6 +565,23 @@ pub fn handle_serve(
                 || err_msg.contains("os error 10048")
             {
                 let alt_port = if port == 8080 { 8089 } else { port + 1 };
+                if json {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "error",
+                            "error": format!("Port {} is already in use", port),
+                            "host": host,
+                            "port": port,
+                            "suggested_port": alt_port,
+                        })
+                    );
+                    return Err(AlreadyHandledError::new(format!(
+                        "Port {} is already in use",
+                        port
+                    ))
+                    .into());
+                }
                 eprintln!(
                     "\n{} {}",
                     "⚠️".yellow(),
@@ -626,6 +633,29 @@ pub fn handle_serve(
             started_at: chrono::Utc::now().to_rfc3339(),
         };
         std::fs::write(&pid_file, serde_json::to_string_pretty(&daemon_info)?)?;
+
+        if json {
+            let probe_host = if host == "0.0.0.0" {
+                "127.0.0.1"
+            } else {
+                &host
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "started",
+                    "pid": child_pid,
+                    "host": host,
+                    "port": port,
+                    "auth_enabled": key.is_some(),
+                    "api_key": key,
+                    "health_url": format!("http://{probe_host}:{port}/v1/health"),
+                    "log_file": log_path.display().to_string(),
+                    "pid_file": pid_file.display().to_string(),
+                }))?
+            );
+            return Ok(());
+        }
 
         println!(
             "\n  {}  {}",
@@ -834,10 +864,12 @@ pub fn handle_uninstall(purge_data: bool, yes: bool, json: bool) -> Result<()> {
     let comp_dir = home.join(".lightmem").join("completions");
     if comp_dir.exists() {
         let _ = std::fs::remove_dir_all(&comp_dir);
-        println!(
-            "  {} Removed shell completions: ~/.lightmem/completions",
-            "◈".green().bold()
-        );
+        if !json {
+            println!(
+                "  {} Removed shell completions: ~/.lightmem/completions",
+                "◈".green().bold()
+            );
+        }
     }
 
     let bin_candidates = [
@@ -851,7 +883,9 @@ pub fn handle_uninstall(purge_data: bool, yes: bool, json: bool) -> Result<()> {
     let mut removed_count = 0;
     for bin in &bin_candidates {
         if bin.exists() && std::fs::remove_file(bin).is_ok() {
-            println!("  {} Removed binary: {}", "◈".green().bold(), bin.display());
+            if !json {
+                println!("  {} Removed binary: {}", "◈".green().bold(), bin.display());
+            }
             removed_count += 1;
         }
     }
@@ -860,7 +894,7 @@ pub fn handle_uninstall(purge_data: bool, yes: bool, json: bool) -> Result<()> {
     if lightmem_bin_dir.exists() {
         let _ = std::fs::remove_dir_all(&lightmem_bin_dir);
     }
-    if removed_count == 0 {
+    if removed_count == 0 && !json {
         println!(
             "  {}",
             "▸ No standalone binaries found in ~/.local/bin or ~/.cargo/bin".dimmed()
@@ -878,11 +912,13 @@ pub fn handle_uninstall(purge_data: bool, yes: bool, json: bool) -> Result<()> {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if stdout.contains("Successfully uninstalled") {
-                    println!(
-                        "  {} Uninstalled lmem Python package ({})",
-                        "◈".green().bold(),
-                        cmd[0]
-                    );
+                    if !json {
+                        println!(
+                            "  {} Uninstalled lmem Python package ({})",
+                            "◈".green().bold(),
+                            cmd[0]
+                        );
+                    }
                     break;
                 }
             }
@@ -893,15 +929,17 @@ pub fn handle_uninstall(purge_data: bool, yes: bool, json: bool) -> Result<()> {
     if purge_data {
         if lightmem_dir.exists() {
             let _ = std::fs::remove_dir_all(&lightmem_dir);
-            println!(
-                "  {} Purged all data & models: {}",
-                "◈".red().bold(),
-                lightmem_dir.display()
-            );
+            if !json {
+                println!(
+                    "  {} Purged all data & models: {}",
+                    "◈".red().bold(),
+                    lightmem_dir.display()
+                );
+            }
         }
     } else {
         let vault_file = lightmem_dir.join("memories.db");
-        if vault_file.exists() {
+        if vault_file.exists() && !json {
             println!(
                 "\n  {} Persistent vault preserved at: {}",
                 "ℹ".cyan().bold(),

@@ -209,28 +209,6 @@ impl LightMem {
         &self.config
     }
 
-    pub(crate) fn reconfigured(&self, config: LightMemConfig) -> Result<Self> {
-        let embedding_identity = config.embedding_identity()?;
-        let storage = Arc::new(
-            self.storage
-                .clone_with_context(self.storage.source_context().cloned()),
-        );
-        Ok(Self {
-            storage,
-            embedder: Mutex::new(None),
-            config,
-            embedding_identity,
-        })
-    }
-
-    pub(crate) fn reconfigured_with_context(
-        mut self,
-        context: crate::MemoryContext,
-    ) -> Result<Self> {
-        self.storage = Arc::new(self.storage.clone_with_context(Some(context)));
-        Ok(self)
-    }
-
     /// Embed disposable diagnostic text without saving a memory.
     pub fn test_embedding_provider(&self) -> Result<usize> {
         let vector = self

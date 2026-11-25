@@ -5,7 +5,7 @@
 set -e
 
 REPO="krishnakanthpathi/lightmem"
-VERSION="${LIGHTMEM_VERSION:-v0.11.0}"
+VERSION="${LIGHTMEM_VERSION:-v0.12.0}"
 INSTALL_DIR="${LIGHTMEM_INSTALL_DIR:-$HOME/.local/bin}"
 
 old_tty=""
@@ -59,8 +59,9 @@ done
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-# Render 24-bit TrueColor Crimson Cloud Logo + Installer Header
-awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" 'BEGIN {
+# Render Crimson Cloud Logo + Installer Header (respecting NO_COLOR)
+awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" -v no_color="${NO_COLOR:-}" 'BEGIN {
+    use_color = (no_color == "");
     m[0]  = "                     WWWWWW           ";
     m[1]  = "                   WWWRRRRWWW         ";
     m[2]  = "                  WRRRRRRRRRWW        ";
@@ -85,13 +86,23 @@ awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" 'BEGIN {
     m[21] = "            WWWWWW   WWWWW            ";
 
     r[0]  = "";
-    r[1]  = "\033[1;38;2;220;38;38m❖\033[0m  \033[1;38;2;248;250;252mL I G H T M E M\033[0m  \033[38;2;113;113;122m" ver "\033[0m";
-    r[2]  = "\033[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m";
-    r[3]  = "\033[1;38;2;220;38;38m▸\033[0m \033[38;2;228;228;231mUniversal Standalone Installer\033[0m";
-    r[4]  = "  \033[38;2;113;113;122m◫ Target     \033[1;38;2;248;250;252m" os " (" arch ")\033[0m";
-    r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx (bge-small)\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38monnx (minilm-squad2)\033[0m";
-    r[6]  = "  \033[38;2;113;113;122m✦ Storage    \033[38;2;212;212;216mSQLite WAL + FTS5 + Vector\033[0m";
-    r[7]  = "\033[38;2;113;113;122m────────────────────────────────────────────────\033[0m";
+    if (use_color) {
+        r[1]  = "\033[1;38;2;220;38;38m❖\033[0m  \033[1;38;2;248;250;252mL I G H T M E M\033[0m  \033[38;2;113;113;122m" ver "\033[0m";
+        r[2]  = "\033[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m";
+        r[3]  = "\033[1;38;2;220;38;38m▸\033[0m \033[38;2;228;228;231mUniversal Standalone Installer\033[0m";
+        r[4]  = "  \033[38;2;113;113;122m◫ Target     \033[1;38;2;248;250;252m" os " (" arch ")\033[0m";
+        r[5]  = "  \033[38;2;113;113;122m◈ Engines    \033[1;38;2;167;139;250monnx (bge-small)\033[0m \033[38;2;113;113;122m+\033[0m \033[1;38;2;220;38;38monnx (minilm-squad2)\033[0m";
+        r[6]  = "  \033[38;2;113;113;122m✦ Storage    \033[38;2;212;212;216mSQLite WAL + FTS5 + Vector\033[0m";
+        r[7]  = "\033[38;2;113;113;122m────────────────────────────────────────────────\033[0m";
+    } else {
+        r[1]  = "❖  L I G H T M E M  " ver;
+        r[2]  = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+        r[3]  = "▸ Universal Standalone Installer";
+        r[4]  = "  ◫ Target     " os " (" arch ")";
+        r[5]  = "  ◈ Engines    onnx (bge-small) + onnx (minilm-squad2)";
+        r[6]  = "  ✦ Storage    SQLite WAL + FTS5 + Vector";
+        r[7]  = "────────────────────────────────────────────────";
+    }
     r[8]  = "";
     r[9]  = "";
     r[10] = "";
@@ -108,6 +119,14 @@ awk -v os="$OS" -v arch="$ARCH" -v ver="$VERSION" 'BEGIN {
             b_rgb = (bc == "W") ? "248;250;252" : ((bc == "R") ? "204;36;36" : "");
             if (t_rgb == "" && b_rgb == "") {
                 line = line " ";
+            } else if (!use_color) {
+                if (t_rgb != "" && b_rgb == "") {
+                    line = line "▀";
+                } else if (t_rgb == "" && b_rgb != "") {
+                    line = line "▄";
+                } else {
+                    line = line ((tc == bc) ? "█" : "▀");
+                }
             } else if (t_rgb != "" && b_rgb == "") {
                 line = line "\033[38;2;" t_rgb "m▀\033[0m";
             } else if (t_rgb == "" && b_rgb != "") {

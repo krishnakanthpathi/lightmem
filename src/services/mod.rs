@@ -1,7 +1,6 @@
 pub mod api_server;
 pub mod bundle;
 pub mod connect;
-pub mod docs_server;
 pub mod embeddings;
 pub mod exporter;
 pub mod graph_view;
@@ -13,7 +12,6 @@ pub mod observer;
 pub mod remote_client;
 pub mod reranker;
 pub mod search;
-pub mod workspace;
 
 pub use api_server::{
     serve_api, AnswerRequest, AttachmentPayload, AutolinkRequest, ClearPayload, ConflictsRequest,
@@ -25,7 +23,6 @@ pub use bundle::{
     BundleStats,
 };
 pub use connect::{ConnectResult, ConnectService, PlatformInfo};
-pub use docs_server::{serve_docs, DocsOptions};
 #[cfg(feature = "mcp")]
 pub use mcp::McpServer;
 

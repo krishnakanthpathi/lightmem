@@ -26,7 +26,6 @@ LightMem combines **SQLite WAL + FTS5 BM25** with **lazy-initialized ONNX vector
 - [Single-File DB & Media Transfer Bundles](#-single-file-db--media-transfer-bundles)
 - [Remote Server & Multi-Device Sync](#-remote-server--multi-device-sync)
 - [Model Context Protocol (MCP) Server](#-model-context-protocol-mcp-server)
-- [Embedded Offline Documentation Server](#-embedded-offline-documentation-server)
 - [Memory Categories Reference](#-memory-categories-reference)
 - [Development & Testing](#-development--testing)
 - [License](#-license)
@@ -389,20 +388,6 @@ lmem connect cursor --mcp   # Configure Cursor only
 | `history` | Inspect recent CLI command execution history. |
 | `config` | View or adjust active settings, models, entity extraction, and presets. |
 | `stats` | Inspect total memory count, vector distribution, and vault disk footprint. |
-
----
-
-## 📖 Embedded Offline Documentation Server
-
-Browse full technical documentation offline with zero external web dependencies:
-
-```bash
-# Launch documentation server and open system browser
-lmem docs
-
-# Custom port or headless mode
-lmem docs --port 8085 --no-browser
-```
 
 ---
 

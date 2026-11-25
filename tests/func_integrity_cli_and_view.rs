@@ -806,7 +806,7 @@ fn test_open_image_status_and_docs_cli_surface() {
         &["config", "--backend", "hash", "--reranker", "top1"],
     );
 
-    // Help flags expose --open, --image, status/vaults, docs/doc/web
+    // Help flags expose --open, --image, and status/vaults
     let rec_help = run_lmem(&cfg_dir, &db_path, &["recall", "--help"]);
     assert!(rec_help.status.success());
     let rec_help_str = String::from_utf8_lossy(&rec_help.stdout);
@@ -816,13 +816,6 @@ fn test_open_image_status_and_docs_cli_surface() {
     let insp_help = run_lmem(&cfg_dir, &db_path, &["inspect", "--help"]);
     assert!(insp_help.status.success());
     assert!(String::from_utf8_lossy(&insp_help.stdout).contains("--open"));
-
-    for alias in ["docs", "doc", "web"] {
-        let docs_help = run_lmem(&cfg_dir, &db_path, &[alias, "--help"]);
-        assert!(docs_help.status.success(), "{alias} --help failed");
-        let s = String::from_utf8_lossy(&docs_help.stdout);
-        assert!(s.contains("--port") && s.contains("--landing") && s.contains("--no-browser"));
-    }
 
     // status and vaults aliases return valid JSON
     for cmd_name in ["status", "vaults"] {
@@ -1075,7 +1068,7 @@ fn e2e_cli_open_flag_dedup_and_extension_tags_with_os_shim() {
 }
 
 #[test]
-fn e2e_cli_multimodal_recall_image_and_live_docs_server() {
+fn e2e_cli_multimodal_recall_image() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -1245,45 +1238,6 @@ fn e2e_cli_multimodal_recall_image_and_live_docs_server() {
 
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     srv.join().unwrap();
-
-    // Live `lmem docs` child process HTTP E2E
-    let docs_probe = TcpListener::bind("127.0.0.1:0").unwrap();
-    let docs_port = docs_probe.local_addr().unwrap().port();
-    drop(docs_probe);
-
-    let mut docs_child = Command::new(lmem_bin())
-        .env("LIGHTMEM_CONFIG_DIR", &cfg_dir)
-        .args(["docs", "--port", &docs_port.to_string(), "--no-browser"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-
-    let addr = format!("127.0.0.1:{}", docs_port);
-    let mut connected = None;
-    for _ in 0..40 {
-        if let Ok(stream) = std::net::TcpStream::connect(&addr) {
-            connected = Some(stream);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    let mut s = connected.expect("lmem docs server did not bind in time");
-    let big_hdr = "X".repeat(24_000);
-    write!(
-        s,
-        "GET /docs HTTP/1.1\r\nHost: {}\r\nX-Big: {}\r\nConnection: close\r\n\r\n",
-        addr, big_hdr
-    )
-    .unwrap();
-    s.flush().unwrap();
-    let mut resp = String::new();
-    s.read_to_string(&mut resp).unwrap();
-    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(resp.contains("LightMem"));
-
-    let _ = docs_child.kill();
-    let _ = docs_child.wait();
 }
 
 fn encode_b64_for_test(input: &[u8]) -> String {

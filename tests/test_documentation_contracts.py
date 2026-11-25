@@ -1,53 +1,72 @@
-"""Keep versioned installation and documentation entry points aligned."""
-from html.parser import HTMLParser
 from pathlib import Path
 import re
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent.parent
 
 
-class Page(HTMLParser):
-    def __init__(self, text):
-        super().__init__()
-        self.ids, self.links, self.assets = [], [], []
-        self.feed(text)
+class DocumentationContractsTests(unittest.TestCase):
+    def test_removed_web_and_stale_doc_artifacts_are_absent(self) -> None:
+        removed_paths = [
+            "static",
+            "vercel.json",
+            "src/services/workspace.rs",
+            "src/services/docs_server.rs",
+            "artifacts",
+            "dist",
+            "slides.html",
+            "build_lightmem_deck.py",
+            "LightMem_Skill_Guide.pptx",
+            "PRESENTATION_NOTES.md",
+            "demo_vault",
+            "docs/cli-review-0.8.0.md",
+            "docs/review-0.8.0.md",
+            "docs/interface-inventory-2026-11-14.md",
+            "docs/project-audit-2026-11-14.md",
+            "docs/terminal-experience-proposal.md",
+            "docs/command-line-experience-proposal.md",
+        ]
+        for rel in removed_paths:
+            self.assertFalse((ROOT / rel).exists(), f"stale artifact still present: {rel}")
 
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        if "id" in attrs:
-            self.ids.append(attrs["id"])
-        if tag == "a" and "href" in attrs:
-            self.links.append(attrs["href"])
-        if tag == "script" and "src" in attrs:
-            self.assets.append(attrs["src"])
-        if tag == "link" and attrs.get("rel") in ("stylesheet", "icon"):
-            self.assets.append(attrs["href"])
+    def test_active_cli_guides_and_skill_exist(self) -> None:
+        required_docs = [
+            "README.md",
+            "CHANGELOG.md",
+            "SKILL.md",
+            "docs/answering.md",
+            "docs/conflicts_and_deduplication.md",
+            "docs/forgetting_and_clearing.md",
+            "docs/inspecting_and_listing.md",
+            "docs/recalling.md",
+            "docs/remembering.md",
+            "docs/terminal-commands.md",
+        ]
+        for rel in required_docs:
+            self.assertTrue((ROOT / rel).is_file(), f"missing documentation file: {rel}")
 
+    def test_release_version_is_consistent_across_manifests(self) -> None:
+        cargo_toml = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        cargo_match = re.search(r'^version\s*=\s*"([^"]+)"', cargo_toml, re.MULTILINE)
+        self.assertIsNotNone(cargo_match)
+        version = cargo_match.group(1)
 
-class DocumentationContracts(unittest.TestCase):
-    def test_static_entry_points_and_internal_links_exist(self):
-        for name in ["index.html", "docs.html"]:
-            page = Page((ROOT / "static" / name).read_text())
-            self.assertEqual(len(page.ids), len(set(page.ids)), name)
-            for link in page.links:
-                if link.startswith("#"):
-                    self.assertIn(link[1:], page.ids, (name, link))
-            for asset in page.assets:
-                self.assertTrue((ROOT / "static" / asset.split("?", 1)[0].lstrip("/")).is_file(), (name, asset))
+        pyproject = (ROOT / "python" / "pyproject.toml").read_text(encoding="utf-8")
+        py_init = (ROOT / "python" / "src" / "lmem" / "__init__.py").read_text(encoding="utf-8")
+        py_bin = (ROOT / "python" / "src" / "lmem" / "binary.py").read_text(encoding="utf-8")
+        install_sh = (ROOT / "install.sh").read_text(encoding="utf-8")
+        install_ps1 = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    def test_source_versions_and_release_defaults_match(self):
-        version = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M)[1]
-        for file in ["python/pyproject.toml", "python/src/lmem/__init__.py", "static/index.html", "static/docs.html", "install.sh", "install.ps1"]:
-            self.assertIn(version, (ROOT / file).read_text(), file)
-
-    def test_first_memory_example_has_no_missing_attachment_dependency(self):
-        docs = (ROOT / "static/docs.html").read_text()
-        cycle = docs.split('id="first-memory"', 1)[1].split('</pre>', 1)[0]
-        self.assertNotIn('./arch.png', cycle)
-        self.assertNotIn(' -f ', cycle)
-        for entry in ['id="command-serve"', 'id="install-windows"']:
-            self.assertIn(entry, docs)
+        self.assertRegex(
+            pyproject,
+            re.compile(rf'^version\s*=\s*"{re.escape(version)}"', re.MULTILINE),
+        )
+        self.assertIn(f'__version__ = "{version}"', py_init)
+        self.assertIn(f'version: str = "v{version}"', py_bin)
+        self.assertIn(f"VERSION=\"${{LIGHTMEM_VERSION:-v{version}}}\"", install_sh)
+        self.assertIn(f'"v{version}"', install_ps1)
+        self.assertIn(f"## {version}", changelog)
 
 
 if __name__ == "__main__":

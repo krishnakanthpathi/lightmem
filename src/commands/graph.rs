@@ -35,34 +35,47 @@ pub fn handle_conflicts(
         let mut force_all = false;
         let mut merged_count = 0usize;
 
+        let mut quit_requested = false;
         for (i, c) in conflicts.iter().enumerate() {
             if retired_ids.contains(&c.older_memory.id) || retired_ids.contains(&c.newer_memory.id)
             {
                 continue;
             }
 
-            CliView::render_conflict_pair(i + 1, conflicts.len(), c, false);
+            CliView::render_conflict_pair(i, conflicts.len(), c, false);
 
             let should_merge = if force_all {
                 true
             } else {
-                print!("  Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit: ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                match input.trim().to_lowercase().as_str() {
-                    "y" | "yes" => true,
-                    "a" | "all" => {
-                        force_all = true;
-                        true
+                loop {
+                    print!(
+                        "  Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit: "
+                    );
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    if io::stdin().read_line(&mut input)? == 0 {
+                        quit_requested = true;
+                        break false;
                     }
-                    "q" | "quit" => {
-                        println!("  Stopped conflict review ({} merged).", merged_count);
-                        break;
+                    match input.trim().to_lowercase().as_str() {
+                        "y" | "yes" => break true,
+                        "" | "n" | "no" => break false,
+                        "a" | "all" => {
+                            force_all = true;
+                            break true;
+                        }
+                        "q" | "quit" => {
+                            quit_requested = true;
+                            break false;
+                        }
+                        _ => eprintln!("  Enter y, n, a, or q."),
                     }
-                    _ => false,
                 }
             };
+            if quit_requested {
+                println!("  Stopped conflict review ({} merged).", merged_count);
+                break;
+            }
 
             if should_merge {
                 let merged = lm.merge_conflict_pair(c, reranker.as_deref())?;

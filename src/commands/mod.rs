@@ -125,7 +125,6 @@ pub fn run(cli: Cli) -> Result<()> {
                 Commands::Config { .. }
                     | Commands::Model { .. }
                     | Commands::Setup { .. }
-                    | Commands::Docs { .. }
                     | Commands::Serve { .. }
                     | Commands::Version
                     | Commands::Completions { .. }
@@ -669,12 +668,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Completions { shell } => service::print_completions(shell),
 
         Commands::Version => CliView::render_version(cli.json),
-
-        Commands::Docs {
-            port,
-            landing,
-            no_browser,
-        } => service::handle_docs(port, landing, no_browser),
 
         Commands::Serve {
             host,

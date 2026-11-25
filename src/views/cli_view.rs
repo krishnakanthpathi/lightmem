@@ -100,11 +100,149 @@ impl CliView {
         }
     }
 
+    fn use_color() -> bool {
+        colored::control::SHOULD_COLORIZE.should_colorize()
+    }
+
+    fn terminal_columns() -> Option<usize> {
+        if let Ok(cols) = std::env::var("COLUMNS") {
+            if let Ok(n) = cols.trim().parse::<usize>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                // SAFETY: TIOCGWINSZ populates winsize for STDOUT_FILENO.
+                unsafe {
+                    let mut ws: libc::winsize = std::mem::zeroed();
+                    if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0
+                        && ws.ws_col > 0
+                    {
+                        return Some(ws.ws_col as usize);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn pad_styled(plain: &str, styled: ColoredString, width: usize) -> String {
+        let vis = plain.chars().count();
+        if vis >= width {
+            styled.to_string()
+        } else {
+            format!("{}{}", styled, " ".repeat(width - vis))
+        }
+    }
+
+    fn pad_right_styled(plain: &str, styled: ColoredString, width: usize) -> String {
+        let vis = plain.chars().count();
+        if vis >= width {
+            styled.to_string()
+        } else {
+            format!("{}{}", " ".repeat(width - vis), styled)
+        }
+    }
+
+    fn middle_truncate(s: &str, max_chars: usize) -> String {
+        let total = s.chars().count();
+        if total <= max_chars || max_chars < 8 {
+            return s.to_string();
+        }
+        let head_len = (max_chars / 4).clamp(4, 12);
+        let tail_len = max_chars.saturating_sub(head_len + 3);
+        let head: String = s.chars().take(head_len).collect();
+        let tail: String = s.chars().skip(total.saturating_sub(tail_len)).collect();
+        format!("{head}...{tail}")
+    }
+
+    fn vault_mode_label(active_db: &Path) -> &'static str {
+        if active_db == LightMemConfig::global_db_path() {
+            return "global vault";
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            if active_db.starts_with(cwd.join(".lightmem")) {
+                return "project vault";
+            }
+        }
+        "selected vault"
+    }
+
+    fn model_endpoint_display(cfg: &LightMemConfig, provider: &str) -> ColoredString {
+        let eff_url = cfg.effective_ollama_url();
+        let is_local = matches!(provider, "Local ONNX" | "Local" | "Top-1");
+        if eff_url.is_empty()
+            || (is_local && LightMemConfig::is_known_provider_default_url(&eff_url))
+        {
+            Self::slate("local (offline, built-in)")
+        } else {
+            Self::emerald(&eff_url)
+        }
+    }
+
+    fn model_api_key_display(cfg: &LightMemConfig, provider: &str) -> ColoredString {
+        if provider == "Local ONNX" || provider == "Top-1" {
+            return Self::slate("none (local, offline)");
+        }
+        let has_stored = cfg
+            .ollama_api_key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"));
+        if has_stored {
+            return Self::gold("configured (secret)");
+        }
+        if let (_, _, Some(env_name)) = cfg.active_provider() {
+            if std::env::var(env_name)
+                .ok()
+                .is_some_and(|v| !v.trim().is_empty())
+            {
+                return Self::gold(&format!("from {env_name}"));
+            }
+        }
+        if provider == "Gemini"
+            && std::env::var("GOOGLE_API_KEY")
+                .ok()
+                .is_some_and(|v| !v.trim().is_empty())
+        {
+            return Self::gold("from GOOGLE_API_KEY");
+        }
+        if std::env::var("LIGHTMEM_LLM_API_KEY")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            return Self::gold("from LIGHTMEM_LLM_API_KEY");
+        }
+        Self::slate("empty (none)")
+    }
+
+    fn embedding_api_key_display(cfg: &LightMemConfig) -> ColoredString {
+        let has_stored = cfg
+            .embedding_api_key
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|k| !k.is_empty() && !k.eq_ignore_ascii_case("none"));
+        if has_stored {
+            return Self::gold("configured (secret)");
+        }
+        if std::env::var("LIGHTMEM_EMBEDDING_API_KEY")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+        {
+            return Self::gold("from LIGHTMEM_EMBEDDING_API_KEY");
+        }
+        Self::slate("none")
+    }
+
     /// Render a single pair of vertical pixel rows from `CLOUD_LOGO_MATRIX` using Unicode half-blocks.
     fn render_logo_row(pair_idx: usize) -> String {
         let top_row = CLOUD_LOGO_MATRIX[pair_idx * 2].as_bytes();
         let bot_row = CLOUD_LOGO_MATRIX[pair_idx * 2 + 1].as_bytes();
         let width = top_row.len().min(bot_row.len());
+        let use_color = Self::use_color();
 
         let mut out = String::from("  ");
         for x in 0..width {
@@ -122,13 +260,23 @@ impl CliView {
             match (color_rgb(t), color_rgb(b)) {
                 (None, None) => out.push(' '),
                 (Some((r, g, bl)), None) => {
-                    out.push_str(&format!("\x1b[38;2;{};{};{}m▀\x1b[0m", r, g, bl));
+                    if use_color {
+                        out.push_str(&format!("\x1b[38;2;{};{};{}m▀\x1b[0m", r, g, bl));
+                    } else {
+                        out.push('▀');
+                    }
                 }
                 (None, Some((r, g, bl))) => {
-                    out.push_str(&format!("\x1b[38;2;{};{};{}m▄\x1b[0m", r, g, bl));
+                    if use_color {
+                        out.push_str(&format!("\x1b[38;2;{};{};{}m▄\x1b[0m", r, g, bl));
+                    } else {
+                        out.push('▄');
+                    }
                 }
                 (Some((r1, g1, b1)), Some((r2, g2, b2))) => {
-                    if (r1, g1, b1) == (r2, g2, b2) {
+                    if !use_color {
+                        out.push(if t == b { '█' } else { '▀' });
+                    } else if (r1, g1, b1) == (r2, g2, b2) {
                         out.push_str(&format!("\x1b[38;2;{};{};{}m█\x1b[0m", r1, g1, b1));
                     } else {
                         out.push_str(&format!(
@@ -147,7 +295,7 @@ impl CliView {
         let cfg = LightMemConfig::load();
         let db_display = db_path
             .map(Self::format_path)
-            .unwrap_or_else(|| "~/.lightmem/memories.db".to_string());
+            .unwrap_or_else(|| Self::format_path(&LightMemConfig::resolve_db_path(false)));
 
         let mem_summary = if let Some(s) = stats {
             format!(
@@ -178,28 +326,18 @@ impl CliView {
         let reranker_label = match norm_reranker.as_str() {
             "minilm-squad2" | "tinyroberta-squad2" => format!("onnx ({})", norm_reranker),
             "ollama" | "auto" => "ollama (auto)".to_string(),
-            other if other.starts_with("ollama:") => {
-                format!("ollama ({})", &other[7..])
-            }
-            other if other.starts_with("openai:") => {
-                format!("openai ({})", &other[7..])
-            }
-            other if other.starts_with("openrouter:") => {
-                format!("openrouter ({})", &other[11..])
-            }
-            other if other.starts_with("gemini:") => {
-                format!("gemini ({})", &other[7..])
-            }
-            other if other.starts_with("groq:") => {
-                format!("groq ({})", &other[7..])
-            }
-            other if other.starts_with("deepseek:") => {
-                format!("deepseek ({})", &other[9..])
-            }
-            other if other.starts_with("mistral:") => {
-                format!("mistral ({})", &other[8..])
-            }
-            other => other.to_string(),
+            other => match other.split_once(':') {
+                Some((prov, model)) => format!("{} ({})", prov, model),
+                None => other.to_string(),
+            },
+        };
+
+        let compact_cols = Self::terminal_columns().filter(|&cols| cols < 92);
+        let db_display = if let Some(cols) = compact_cols {
+            let budget = cols.saturating_sub(18).max(24);
+            Self::middle_truncate(&db_display, budget)
+        } else {
+            db_display
         };
 
         let right_lines: [String; 11] = [
@@ -266,9 +404,15 @@ impl CliView {
 
         let mut lines = Vec::with_capacity(13);
         lines.push(String::new());
-        for (i, right_line) in right_lines.iter().enumerate() {
-            let logo_part = Self::render_logo_row(i);
-            lines.push(format!("{}   {}", logo_part, right_line));
+        if compact_cols.is_some() {
+            for right_line in right_lines.iter().filter(|l| !l.is_empty()) {
+                lines.push(format!("  {}", right_line));
+            }
+        } else {
+            for (i, right_line) in right_lines.iter().enumerate() {
+                let logo_part = Self::render_logo_row(i);
+                lines.push(format!("{}   {}", logo_part, right_line));
+            }
         }
         lines.join("\n")
     }
@@ -623,16 +767,22 @@ impl CliView {
         );
         println!();
 
+        let max_score = results.iter().map(|r| r.score).fold(0.0f32, f32::max);
         for (idx, r) in results.iter().enumerate() {
             let m = &r.memory;
             let short_id: String = m.id.chars().take(8).collect();
+            let bar_score = if max_score > 0.0 && max_score < 0.25 {
+                (r.score / max_score).clamp(0.0, 1.0)
+            } else {
+                r.score
+            };
             println!(
                 "  {} [{}] {} {} {}",
                 Self::crimson_bold(&format!("{:02}.", idx + 1)),
                 Self::violet_bold(m.category.as_str()),
                 Self::white_bold(&m.title),
-                Self::confidence_bar(r.score),
-                Self::rose(&format!("{:.2}", r.score))
+                Self::confidence_bar(bar_score),
+                Self::rose(&format!("{:.3}", r.score))
             );
             println!(
                 "     {} {}",
@@ -722,9 +872,15 @@ impl CliView {
 
         for m in &paginated.items {
             let short_id: String = m.id.chars().take(8).collect();
-            let first_line = m.content.lines().next().unwrap_or("").trim();
-            let char_count = first_line.chars().count();
-            let snippet = if char_count > 64 {
+            let first_line = m
+                .content
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("");
+            let snippet = if first_line.is_empty() || first_line == m.title.trim() {
+                String::new()
+            } else if first_line.chars().count() > 64 {
                 let truncated: String = first_line.chars().take(61).collect();
                 format!("{}...", truncated)
             } else {
@@ -738,16 +894,27 @@ impl CliView {
                     Self::emerald_bold(&format!("[📎 {}]", m.attachments.len()))
                 )
             };
-            println!(
-                "  {} [{}] {}{} {} {} {}",
-                Self::crimson_bold("▪"),
-                Self::violet_bold(m.category.as_str()),
-                Self::white_bold(&m.title),
-                att_badge,
-                Self::gold(&format!("({})", short_id)),
-                Self::slate("─"),
-                Self::slate(&snippet)
-            );
+            if snippet.is_empty() {
+                println!(
+                    "  {} [{}] {}{} {}",
+                    Self::crimson_bold("▪"),
+                    Self::violet_bold(m.category.as_str()),
+                    Self::white_bold(&m.title),
+                    att_badge,
+                    Self::gold(&format!("({})", short_id)),
+                );
+            } else {
+                println!(
+                    "  {} [{}] {}{} {} {} {}",
+                    Self::crimson_bold("▪"),
+                    Self::violet_bold(m.category.as_str()),
+                    Self::white_bold(&m.title),
+                    att_badge,
+                    Self::gold(&format!("({})", short_id)),
+                    Self::slate("─"),
+                    Self::slate(&snippet)
+                );
+            }
         }
 
         if paginated.has_more {
@@ -831,7 +998,14 @@ impl CliView {
             }
         );
         println!("  {} {}", Self::slate("Vault:"), Self::slate(&db_str));
-        println!("\n  {}", memory.content);
+        println!();
+        if memory.content.is_empty() {
+            println!("  ");
+        } else {
+            for line in memory.content.lines() {
+                println!("  {}", line);
+            }
+        }
 
         let tags_str = if memory.tags.is_empty() {
             "none".to_string()
@@ -884,7 +1058,12 @@ impl CliView {
                 Self::crimson_bold("📎"),
                 memory.attachments.len()
             );
-            for att in &memory.attachments {
+            for (i, att) in memory.attachments.iter().enumerate() {
+                let branch = if i + 1 == memory.attachments.len() {
+                    "╰─"
+                } else {
+                    "├─"
+                };
                 let mut extra = vec![att.media_kind.clone(), att.mime_type.clone()];
                 if let Some(ref dims) = att.dimensions {
                     extra.push(dims.clone());
@@ -894,7 +1073,8 @@ impl CliView {
                 }
                 extra.push(format!("{} bytes", att.size_bytes));
                 println!(
-                    "    ├─ {} {} {}",
+                    "    {} {} {} {}",
+                    Self::slate(branch),
                     Self::white_bold(&att.filename),
                     Self::slate(&format!("({})", extra.join(" · "))),
                     Self::gold(&format!(
@@ -911,14 +1091,31 @@ impl CliView {
                 Self::crimson_bold("◫"),
                 links.len()
             );
-            for link in links {
-                let target_short: String = link.target_id.chars().take(8).collect();
-                println!(
-                    "    ├─ ──{}──▶ ({}) {}",
-                    Self::violet_bold(&link.relation),
-                    Self::gold(&target_short),
-                    Self::slate(&format!("[weight: {:.1}]", link.weight))
-                );
+            for (i, link) in links.iter().enumerate() {
+                let branch = if i + 1 == links.len() {
+                    "╰─"
+                } else {
+                    "├─"
+                };
+                if link.source_id == memory.id {
+                    let target_short: String = link.target_id.chars().take(8).collect();
+                    println!(
+                        "    {} ──{}──▶ ({}) {}",
+                        Self::slate(branch),
+                        Self::violet_bold(&link.relation),
+                        Self::gold(&target_short),
+                        Self::slate(&format!("[weight: {:.1}]", link.weight))
+                    );
+                } else {
+                    let source_short: String = link.source_id.chars().take(8).collect();
+                    println!(
+                        "    {} ◀──{}── ({}) {}",
+                        Self::slate(branch),
+                        Self::violet_bold(&link.relation),
+                        Self::gold(&source_short),
+                        Self::slate(&format!("[weight: {:.1}]", link.weight))
+                    );
+                }
             }
         }
         println!();
@@ -1198,6 +1395,15 @@ impl CliView {
                         Self::crimson_bold("•"),
                         Self::white_bold(item.trim())
                     );
+                } else if let Some((num, rest)) = trimmed
+                    .split_once(". ")
+                    .filter(|(p, _)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                {
+                    println!(
+                        "  {} {}",
+                        Self::crimson_bold(&format!("{num}.")),
+                        Self::white_bold(rest.trim())
+                    );
                 } else if !printed_first {
                     println!(
                         "  {} {}",
@@ -1375,7 +1581,7 @@ impl CliView {
         println!("  ╭─ {}", Self::crimson_bold("ANSWER GENERATION ENGINE"));
         let provider = Self::model_provider_name(cfg);
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Provider:",
             Self::violet_bold(provider)
@@ -1388,40 +1594,24 @@ impl CliView {
         };
 
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Answer Model:",
             Self::emerald_bold(&model_display)
         );
 
-        let eff_url = cfg.effective_ollama_url();
-        let endpoint_disp = if eff_url.is_empty()
-            || ((provider == "Local ONNX" || provider == "Top-1")
-                && eff_url == "http://localhost:11434")
-        {
-            Self::slate("local (offline, built-in)")
-        } else {
-            Self::emerald(&eff_url)
-        };
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Model Endpoint:",
-            endpoint_disp
+            Self::model_endpoint_display(cfg, provider)
         );
 
-        let key_disp = if provider == "Local ONNX" || provider == "Top-1" {
-            Self::slate("none (local, offline)")
-        } else if cfg.effective_ollama_api_key().is_some() {
-            Self::gold("configured (secret)")
-        } else {
-            Self::slate("empty (none)")
-        };
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Model API Key:",
-            key_disp
+            Self::model_api_key_display(cfg, provider)
         );
 
         let extraction_summary = if !cfg.has_active_llm() {
@@ -1432,7 +1622,7 @@ impl CliView {
             Self::slate("off")
         };
         println!(
-            "  ╰─ {} {:<18} {}",
+            "  ╰─ {} {:<20} {}",
             Self::slate("▸"),
             "Entity Extraction:",
             extraction_summary
@@ -1441,7 +1631,7 @@ impl CliView {
 
         println!("  ╭─ {}", Self::crimson_bold("VECTOR SEARCH EMBEDDINGS"));
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Search Embedder:",
             Self::emerald_bold(&cfg.active_embedding_summary())
@@ -1453,14 +1643,22 @@ impl CliView {
             Self::emerald(&emb_url)
         };
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Embedding Endpoint:",
             emb_endpoint_disp
         );
+        if cfg.backend == "ollama" {
+            println!(
+                "  │  {} {:<20} {}",
+                Self::slate("▸"),
+                "Embedding API Key:",
+                Self::embedding_api_key_display(cfg)
+            );
+        }
         let migration_req = plan["migration_required"] == true;
         println!(
-            "  ╰─ {} {:<18} {}",
+            "  ╰─ {} {:<20} {}",
             Self::slate("▸"),
             "Vault Index:",
             if migration_req {
@@ -1473,7 +1671,7 @@ impl CliView {
 
         println!("  ╭─ {}", Self::crimson_bold("ROUTING & MIGRATION"));
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Saved Remote:",
             cfg.remote_url
@@ -1489,7 +1687,7 @@ impl CliView {
                     let display_name = match item {
                         "reranker" | "openai_model" => "answer_model",
                         "ollama_url" | "openai_endpoint" => "endpoint",
-                        "ollama_api_key" | "openai_api_key" => "api_key",
+                        "ollama_api_key" | "openai_api_key" => "model_api_key",
                         other => other,
                     };
                     unique.insert(display_name);
@@ -1498,7 +1696,7 @@ impl CliView {
             })
             .unwrap_or_default();
         println!(
-            "  ╰─ {} {:<18} {}",
+            "  ╰─ {} {:<20} {}",
             Self::slate("▸"),
             "Changed Fields:",
             if changes.is_empty() {
@@ -1598,7 +1796,12 @@ impl CliView {
                         "ollama-local": "Local ONNX embeddings + Ollama LLM reranker (localhost:11434)"
                     }),
                 );
-                for key_name in ["ollama_api_key", "openai_api_key"] {
+                for key_name in [
+                    "ollama_api_key",
+                    "openai_api_key",
+                    "embedding_api_key",
+                    "api_key",
+                ] {
                     if let Some(key_val) = obj.get_mut(key_name) {
                         if let Some(key_str) = key_val.as_str() {
                             if !key_str.is_empty() {
@@ -1635,11 +1838,7 @@ impl CliView {
         let active_db = effective_db
             .map(Path::to_path_buf)
             .unwrap_or_else(|| LightMemConfig::resolve_db_path(global));
-        let db_mode = if active_db == LightMemConfig::global_db_path() {
-            "global vault"
-        } else {
-            "workspace vault"
-        };
+        let db_mode = Self::vault_mode_label(&active_db);
 
         println!(
             "  {} {:<20} {}",
@@ -1664,7 +1863,7 @@ impl CliView {
         println!("  ╭─ {}", Self::crimson_bold("ANSWER GENERATION ENGINE"));
         let provider = Self::model_provider_name(cfg);
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Provider:",
             Self::violet_bold(provider)
@@ -1676,46 +1875,22 @@ impl CliView {
         };
 
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Answer Model:",
             Self::emerald_bold(&model_display)
         );
-        let eff_url = cfg.effective_ollama_url();
-        let endpoint_disp = if eff_url.is_empty()
-            || ((provider == "Local ONNX" || provider == "Local" || provider == "Top-1")
-                && eff_url == "http://localhost:11434")
-        {
-            Self::slate("local (offline, built-in)")
-        } else {
-            Self::emerald(&eff_url)
-        };
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Model Endpoint:",
-            endpoint_disp
+            Self::model_endpoint_display(cfg, provider)
         );
-        let key_disp = if provider == "Local ONNX" || provider == "Top-1" {
-            Self::slate("none (local, offline)")
-        } else if cfg.effective_ollama_api_key().is_some() {
-            Self::gold("configured (secret)")
-        } else if let Some((_, _, Some(env_name))) = Some(cfg.active_provider()) {
-            if std::env::var(env_name).is_ok() {
-                Self::gold(&format!("from {}", env_name))
-            } else if provider == "Gemini" && std::env::var("GOOGLE_API_KEY").is_ok() {
-                Self::gold("from GOOGLE_API_KEY")
-            } else {
-                Self::slate("empty (none)")
-            }
-        } else {
-            Self::slate("empty (none)")
-        };
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Model API Key:",
-            key_disp
+            Self::model_api_key_display(cfg, provider)
         );
         let extraction_summary = if !cfg.has_active_llm() {
             Self::slate("skipped (requires LLM)")
@@ -1725,7 +1900,7 @@ impl CliView {
             Self::slate("off")
         };
         println!(
-            "  ╰─ {} {:<18} {}",
+            "  ╰─ {} {:<20} {}",
             Self::slate("▸"),
             "Entity Extraction:",
             extraction_summary
@@ -1734,7 +1909,7 @@ impl CliView {
 
         println!("  ╭─ {}", Self::crimson_bold("VECTOR SEARCH EMBEDDINGS"));
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Search Embedder:",
             Self::emerald_bold(&cfg.active_embedding_summary())
@@ -1745,13 +1920,21 @@ impl CliView {
             Self::slate("local (offline, built-in)")
         };
         println!(
-            "  │  {} {:<18} {}",
+            "  │  {} {:<20} {}",
             Self::slate("▸"),
             "Embedding Endpoint:",
             emb_ep_disp
         );
+        if cfg.backend == "ollama" {
+            println!(
+                "  │  {} {:<20} {}",
+                Self::slate("▸"),
+                "Embedding API Key:",
+                Self::embedding_api_key_display(cfg)
+            );
+        }
         println!(
-            "  ╰─ {} {:<18} {}",
+            "  ╰─ {} {:<20} {}",
             Self::slate("▸"),
             "Config File:",
             Self::format_path(&LightMemConfig::config_file())
@@ -1761,13 +1944,13 @@ impl CliView {
         println!("  ╭─ {}", Self::crimson_bold("ROUTING & REMOTE"));
         if let Some(endpoint) = cfg.effective_remote_url() {
             println!(
-                "  │  {} {:<18} {}",
+                "  │  {} {:<20} {}",
                 Self::slate("▸"),
                 "Remote Server:",
                 Self::violet_bold(&endpoint)
             );
             println!(
-                "  │  {} {:<18} {}",
+                "  │  {} {:<20} {}",
                 Self::slate("▸"),
                 "Remote Credential:",
                 if cfg.effective_api_key().is_some() {
@@ -1778,20 +1961,20 @@ impl CliView {
             );
         } else {
             println!(
-                "  │  {} {:<18} {}",
+                "  │  {} {:<20} {}",
                 Self::slate("▸"),
                 "Remote Server:",
                 Self::slate("not configured (local mode active)")
             );
             println!(
-                "  │  {} {:<18} {}",
+                "  │  {} {:<20} {}",
                 Self::slate("▸"),
                 "Remote Credential:",
                 Self::slate("none (default)")
             );
         }
         println!(
-            "  ╰─ {} {:<18} {}",
+            "  ╰─ {} {:<20} {}",
             Self::slate("▸"),
             "Offline Policy:",
             if LightMemConfig::offline_requested() {
@@ -2013,16 +2196,27 @@ impl CliView {
             "  {}",
             Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
-        println!("  {:<32} {:>10}", Self::slate("TAG"), Self::slate("COUNT"));
+        let tag_w = tags
+            .iter()
+            .map(|(t, _)| t.chars().count())
+            .max()
+            .unwrap_or(3)
+            .clamp(20, 44);
         println!(
-            "  {}",
-            Self::slate("──────────────────────────────────────────")
+            "  {} {:>10}",
+            Self::pad_styled("TAG", Self::slate("TAG"), tag_w),
+            Self::slate("COUNT")
         );
+        println!("  {}", Self::slate(&"─".repeat(tag_w + 11)));
         for (tag, count) in tags {
             println!(
-                "  {:<32} {:>10}",
-                Self::gold(tag),
-                Self::white_bold(&count.to_string())
+                "  {} {}",
+                Self::pad_styled(tag, Self::gold(tag), tag_w),
+                Self::pad_right_styled(
+                    &count.to_string(),
+                    Self::white_bold(&count.to_string()),
+                    10
+                )
             );
         }
         println!();
@@ -2053,22 +2247,32 @@ impl CliView {
             "  {}",
             Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
+        let ent_w = entities
+            .iter()
+            .map(|e| e.name.chars().count())
+            .max()
+            .unwrap_or(6)
+            .clamp(14, 24);
+        let val_w = entities
+            .iter()
+            .map(|e| e.val.chars().count())
+            .max()
+            .unwrap_or(5)
+            .clamp(20, 36);
         println!(
-            "  {:<20} {:<30} {:>8}",
-            Self::slate("ENTITY"),
-            Self::slate("VALUE"),
-            Self::slate("COUNT")
+            "  {} {} {}",
+            Self::pad_styled("ENTITY", Self::slate("ENTITY"), ent_w),
+            Self::pad_styled("VALUE", Self::slate("VALUE"), val_w),
+            Self::pad_right_styled("COUNT", Self::slate("COUNT"), 8)
         );
-        println!(
-            "  {}",
-            Self::slate("──────────────────────────────────────────────────────────────")
-        );
+        println!("  {}", Self::slate(&"─".repeat(ent_w + val_w + 10)));
         for ent in entities {
+            let count_s = ent.count.to_string();
             println!(
-                "  {:<20} {:<30} {:>8}",
-                Self::violet_bold(&ent.name),
-                Self::gold(&ent.val),
-                Self::white_bold(&ent.count.to_string())
+                "  {} {} {}",
+                Self::pad_styled(&ent.name, Self::violet_bold(&ent.name), ent_w),
+                Self::pad_styled(&ent.val, Self::gold(&ent.val), val_w),
+                Self::pad_right_styled(&count_s, Self::white_bold(&count_s), 8)
             );
         }
         println!();
@@ -2230,17 +2434,20 @@ impl CliView {
             "  {}",
             Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
+        let rel_w = links
+            .iter()
+            .map(|l| l.relation.chars().count())
+            .max()
+            .unwrap_or(8)
+            .clamp(16, 26);
         println!(
-            "  {:<14} {:<22} {:<16} {:>8}",
-            Self::slate("DIRECTION"),
-            Self::slate("RELATION"),
-            Self::slate("CONNECTED ID"),
-            Self::slate("WEIGHT")
+            "  {} {} {} {}",
+            Self::pad_styled("DIRECTION", Self::slate("DIRECTION"), 14),
+            Self::pad_styled("RELATION", Self::slate("RELATION"), rel_w),
+            Self::pad_styled("CONNECTED ID", Self::slate("CONNECTED ID"), 16),
+            Self::pad_right_styled("WEIGHT", Self::slate("WEIGHT"), 8)
         );
-        println!(
-            "  {}",
-            Self::slate("───────────────────────────────────────────────────────────────")
-        );
+        println!("  {}", Self::slate(&"─".repeat(14 + rel_w + 16 + 11)));
         for link in links {
             let is_outgoing = link.source_id == term
                 || (link.target_id != term && link.source_id.starts_with(term));
@@ -2256,10 +2463,10 @@ impl CliView {
                 )
             };
             println!(
-                "  {:<14} {:<22} {:<16} {:>8.1}",
-                Self::slate(dir),
-                Self::violet_bold(&link.relation),
-                Self::gold(&target_id),
+                "  {} {} {} {:>8.1}",
+                Self::pad_styled(dir, Self::slate(dir), 14),
+                Self::pad_styled(&link.relation, Self::violet_bold(&link.relation), rel_w),
+                Self::pad_styled(&target_id, Self::gold(&target_id), 16),
                 link.weight
             );
         }
@@ -2570,20 +2777,48 @@ impl CliView {
                 Self::gold("lmem identity connection-add <id> --user <user> --agent <agent> --harness <harness> --project <project>")
             );
         } else {
+            let conn_w = overview
+                .connections
+                .iter()
+                .map(|c| c.connection_id.chars().count())
+                .max()
+                .unwrap_or(10)
+                .clamp(12, 20);
+            let harness_w = overview
+                .connections
+                .iter()
+                .map(|c| c.harness_id.chars().count())
+                .max()
+                .unwrap_or(7)
+                .clamp(10, 16);
+            let user_w = overview
+                .connections
+                .iter()
+                .map(|c| c.user_id.chars().count())
+                .max()
+                .unwrap_or(4)
+                .clamp(10, 16);
+            let proj_w = overview
+                .connections
+                .iter()
+                .map(|c| c.project_id.as_deref().unwrap_or("—").chars().count())
+                .max()
+                .unwrap_or(7)
+                .clamp(10, 18);
+
             println!(
                 "  {}",
                 "────────────────────────────────────────────────────────────────────────────"
                     .bright_black()
             );
             println!(
-                "  {:<12} {:<12} {:<10} {:<12} {:<8} {:<14} {}",
-                Self::slate("CONNECTION"),
-                Self::slate("HARNESS"),
-                Self::slate("USER"),
-                Self::slate("PROJECT"),
-                Self::slate("SCOPE"),
-                Self::slate("MEMORIES"),
-                Self::slate("PHYSICAL VAULT")
+                "  {} {} {} {} {} {}",
+                Self::pad_styled("CONNECTION", Self::slate("CONNECTION"), conn_w),
+                Self::pad_styled("HARNESS", Self::slate("HARNESS"), harness_w),
+                Self::pad_styled("USER", Self::slate("USER"), user_w),
+                Self::pad_styled("PROJECT", Self::slate("PROJECT"), proj_w),
+                Self::pad_styled("SCOPE", Self::slate("SCOPE"), 8),
+                Self::slate("MEMORIES")
             );
             println!(
                 "  {}",
@@ -2606,17 +2841,21 @@ impl CliView {
                 let vault_path = Self::format_path(&c.db_path);
 
                 println!(
-                    "  {:<12} {:<12} {:<10} {:<12} {:<8} {:<14} {}",
-                    Self::white_bold(&c.connection_id),
-                    Self::violet_bold(&c.harness_id),
-                    Self::gold(&c.user_id),
+                    "  {} {} {} {:<proj_w$} {} {}",
+                    Self::pad_styled(&c.connection_id, Self::white_bold(&c.connection_id), conn_w),
+                    Self::pad_styled(&c.harness_id, Self::violet_bold(&c.harness_id), harness_w),
+                    Self::pad_styled(&c.user_id, Self::gold(&c.user_id), user_w),
                     project_display,
-                    Self::slate(scope_display),
+                    Self::pad_styled(scope_display, Self::slate(scope_display), 8),
                     if c.db_exists && c.active_memories > 0 {
                         Self::emerald_bold(&mem_display)
                     } else {
                         Self::slate(&mem_display)
-                    },
+                    }
+                );
+                println!(
+                    "    {} {}",
+                    Self::slate("╰─ Vault:"),
                     Self::slate(&vault_path)
                 );
             }
@@ -2991,16 +3230,22 @@ impl CliView {
         eprintln!();
     }
 
-    /// Parse and render a generative/chat completions error using a standardized LightMem error card.
+    /// Parse and render a model or embedding HTTP error using a standardized LightMem error card.
     /// Returns `true` if the error was recognized as a model error and rendered, or `false` otherwise.
     pub fn try_render_model_error(err_str: &str, json: bool) -> bool {
+        let lower_raw = err_str.to_lowercase();
+        let is_embedding = lower_raw.contains("/v1/embeddings")
+            || lower_raw.contains("/api/embeddings")
+            || lower_raw.contains("embedding request")
+            || lower_raw.contains("embeddings request")
+            || lower_raw.contains("ollama embedding");
         let is_chat = err_str.contains("Chat completions request to")
             || err_str.contains("Ollama QA request to")
             || err_str.contains("/v1/chat/completions")
             || err_str.contains("chat/completions")
             || err_str.contains("/api/generate");
 
-        if !is_chat {
+        if !is_chat && !is_embedding {
             return false;
         }
 
@@ -3175,11 +3420,19 @@ impl CliView {
             (
                 "Chat Model Not Found",
                 "The requested model or endpoint was not found (HTTP 404 Not Found).".to_string(),
-                &[
-                    ("Configure model:", "lmem config --openai-model <model>"),
-                    ("Pull model (Ollama):", "ollama pull <model>"),
-                    ("Switch to local model:", "lmem config --preset local"),
-                ],
+                if is_embedding {
+                    &[
+                        ("Configure model:", "lmem config --embedding-model <model>"),
+                        ("Pull model (Ollama):", "ollama pull <model>"),
+                        ("Switch to local ONNX:", "lmem config --backend onnx"),
+                    ]
+                } else {
+                    &[
+                        ("Configure model:", "lmem config --answer-model <model>"),
+                        ("Pull model (Ollama):", "ollama pull <model>"),
+                        ("Switch to local model:", "lmem config --preset local"),
+                    ]
+                },
             )
         } else if is_429 {
             if !model.is_empty() {
@@ -3326,5 +3579,17 @@ mod tests {
 
         let non_model_err = "Sqlite error: database disk image is malformed";
         assert!(!CliView::try_render_model_error(non_model_err, false));
+
+        let emb_404 = "Embeddings request to http://localhost:11434/v1/embeddings (model 'bad-emb') failed: status code 404: model not found";
+        assert!(CliView::try_render_model_error(emb_404, false));
+        assert!(CliView::try_render_model_error(emb_404, true));
+    }
+
+    #[test]
+    fn test_ansi_safe_column_padding() {
+        let padded = CliView::pad_styled("tag-a", CliView::gold("tag-a"), 12);
+        let right = CliView::pad_right_styled("42", CliView::white_bold("42"), 6);
+        assert!(padded.ends_with(&" ".repeat(7)));
+        assert!(right.starts_with(&" ".repeat(4)));
     }
 }

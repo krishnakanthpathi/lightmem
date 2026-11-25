@@ -58,6 +58,7 @@ fn strip_provider_prefix_clean(spec: &str) -> &str {
         "deepseek:",
         "mistral:",
         "ollama:",
+        "custom:",
         "llm:",
     ] {
         if trimmed.len() > prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
@@ -93,21 +94,25 @@ impl ObserverService {
 
         let is_llm_spec = |spec: &str| {
             let l = spec.trim().to_lowercase();
-            l == "ollama"
-                || l == "openai"
-                || l == "openrouter"
-                || l == "gemini"
-                || l == "groq"
-                || l == "deepseek"
-                || l == "mistral"
-                || l == "llm"
-                || l.starts_with("ollama:")
+            matches!(
+                l.as_str(),
+                "ollama"
+                    | "openai"
+                    | "openrouter"
+                    | "gemini"
+                    | "groq"
+                    | "deepseek"
+                    | "mistral"
+                    | "custom"
+                    | "llm"
+            ) || l.starts_with("ollama:")
                 || l.starts_with("openai:")
                 || l.starts_with("openrouter:")
                 || l.starts_with("gemini:")
                 || l.starts_with("groq:")
                 || l.starts_with("deepseek:")
                 || l.starts_with("mistral:")
+                || l.starts_with("custom:")
                 || l.starts_with("llm:")
         };
 

@@ -434,18 +434,6 @@ fn process_server() -> ProcessServer {
     }
     server
 }
-fn wait_job(base: &str) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
-        let (status, value) = request(base, "/v1/workspace/status", None);
-        assert_eq!(status, 200);
-        if value["busy"] == false {
-            return value;
-        }
-        assert!(Instant::now() < deadline, "Job timed out");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
 
 #[test]
 fn remote_unsupported_commands_and_options_never_fall_back_locally() {
@@ -536,84 +524,6 @@ fn remote_precision_cli_returns_an_answer_using_the_server_configuration() {
 }
 
 #[test]
-fn workspace_config_preview_job_and_model_test_preserve_vault_binding() {
-    let server = process_server();
-    let client = RemoteClient::new(&server.base, Some(KEY.into()));
-    let m = remember(&client, "Config review");
-    let (status, preview) = post(
-        &server.base,
-        "/v1/workspace/config/preview",
-        json!({"backend":"onnx","onnx_model":"bge-small"}),
-    );
-    assert_eq!(status, 200);
-    assert_eq!(preview["needs_reindex"], true);
-    let before = std::fs::read(server.root.path().join("config.json")).unwrap();
-    assert_eq!(
-        post(
-            &server.base,
-            "/v1/workspace/config",
-            json!({"backend":"onnx","onnx_model":"bge-small"})
-        )
-        .0,
-        400
-    );
-    assert_eq!(
-        std::fs::read(server.root.path().join("config.json")).unwrap(),
-        before
-    );
-    assert_eq!(
-        post(
-            &server.base,
-            "/v1/workspace/config",
-            json!({"entity_extraction":"off","reranker":"top1"})
-        )
-        .0,
-        200
-    );
-    let status = wait_job(&server.base);
-    assert_eq!(status["job"]["status"], "complete");
-    assert_eq!(status["stats"]["total_memories"], 1);
-    assert_eq!(client.get(&m.id).unwrap().unwrap().id, m.id);
-    let (status, test) = post(&server.base, "/v1/workspace/test", json!({}));
-    assert_eq!(status, 200);
-    assert_eq!(test["ok"], true);
-    assert_eq!(client.stats().unwrap().total_memories, 1);
-}
-
-#[test]
-fn workspace_restore_requires_matching_preview_destination_and_unchanged_vault() {
-    let server = process_server();
-    let client = RemoteClient::new(&server.base, Some(KEY.into()));
-    remember(&client, "Before backup");
-    let bytes = ureq::post(&format!("{}/v1/workspace/backup", server.base))
-        .set("Authorization", &format!("Bearer {KEY}"))
-        .send_json(json!({}))
-        .unwrap()
-        .into_reader();
-    let mut archive = Vec::new();
-    bytes.take(10_000_000).read_to_end(&mut archive).unwrap();
-    let (_, preview) = post(
-        &server.base,
-        "/v1/workspace/restore/preview",
-        json!({"data_base64":lightmem::encode_base64(&archive)}),
-    );
-    assert_eq!(preview["manifest"]["stats"]["total_memories"], 1);
-    assert_eq!(post(&server.base,"/v1/workspace/restore",json!({"preview_id":preview["preview_id"],"mode":"replace","confirm_vault":"wrong-vault"})).0,400);
-    remember(&client, "After preview");
-    assert_eq!(post(&server.base,"/v1/workspace/restore",json!({"preview_id":preview["preview_id"],"mode":"replace","confirm_vault":preview["destination"]})).0,400);
-    assert_eq!(client.stats().unwrap().total_memories, 2);
-    let (_, preview) = post(
-        &server.base,
-        "/v1/workspace/restore/preview",
-        json!({"data_base64":lightmem::encode_base64(&archive)}),
-    );
-    assert_eq!(post(&server.base,"/v1/workspace/restore",json!({"preview_id":preview["preview_id"],"mode":"replace","confirm_vault":preview["destination"]})).0,200);
-    let state = wait_job(&server.base);
-    assert_eq!(state["job"]["status"], "complete", "{state}");
-    assert_eq!(client.stats().unwrap().total_memories, 1);
-}
-
-#[test]
 fn named_connections_are_rejected_in_remote_mode_and_daemon_scope_is_forwarded() {
     let root = tempdir().unwrap();
     write_config(root.path());
@@ -698,82 +608,10 @@ fn named_connections_are_rejected_in_remote_mode_and_daemon_scope_is_forwarded()
         String::from_utf8_lossy(&out.stderr)
     );
     let base = format!("http://127.0.0.1:{port}");
-    let result = request(&base, "/v1/workspace/status", None);
+    let result = request(&base, "/v1/context", None);
     let stopped = cli(root.path(), &["serve", "--stop"]);
     assert!(stopped.status.success());
     assert_eq!(result.0, 200);
     assert_eq!(result.1["db_path"], expected["db_path"]);
     assert_eq!(result.1["context"]["session_id"], "review-session");
-}
-
-#[test]
-fn stale_workspace_tabs_cannot_write_to_a_new_vault_and_config_changes_preserve_attribution() {
-    let server = process_server();
-    let (_, initial) = request(&server.base, "/v1/workspace/status", None);
-    let encoded: String = initial["db_path"]
-        .as_str()
-        .unwrap()
-        .bytes()
-        .map(|b| format!("%{b:02X}"))
-        .collect();
-    assert_eq!(post(&server.base, "/v1/workspace/connections", json!({"id":"review", "user":"reviewer", "agent":"coding", "harness":"codex", "project":"demo", "scope":"project"})).0, 200);
-    assert_eq!(
-        post(
-            &server.base,
-            "/v1/workspace/vault",
-            json!({"connection":"review"})
-        )
-        .0,
-        200
-    );
-    let attempted = ureq::post(&format!("{}/v1/remember", server.base))
-        .set("Authorization", &format!("Bearer {KEY}"))
-        .set("X-LightMem-Vault", &encoded)
-        .send_json(json!({"content":"must not land in another vault"}));
-    assert!(matches!(attempted, Err(ureq::Error::Status(409, _))));
-    let client = RemoteClient::new(&server.base, Some(KEY.into()));
-    assert_eq!(client.stats().unwrap().total_memories, 0);
-    assert_eq!(
-        post(
-            &server.base,
-            "/v1/workspace/config",
-            json!({"reranker":"top1","entity_extraction":"off"})
-        )
-        .0,
-        200
-    );
-    let state = wait_job(&server.base);
-    assert_eq!(state["job"]["status"], "complete");
-    let saved = remember(&client, "Attributed after configuration");
-    assert_eq!(saved.context.unwrap().connection_id, "review");
-    assert_eq!(
-        post(
-            &server.base,
-            "/v1/workspace/vault",
-            json!({"connection":null})
-        )
-        .0,
-        200
-    );
-    assert_eq!(client.stats().unwrap().total_memories, 0);
-}
-
-#[test]
-fn workspace_refuses_to_overwrite_configuration_changed_outside_its_session() {
-    let server = process_server();
-    let mut changed = hash_config();
-    changed.entity_extraction = "llm".into();
-    let bytes = serde_json::to_vec(&changed).unwrap();
-    std::fs::write(server.root.path().join("config.json"), &bytes).unwrap();
-    let (status, error) = post(
-        &server.base,
-        "/v1/workspace/config/preview",
-        json!({"entity_extraction":"off"}),
-    );
-    assert_eq!(status, 400);
-    assert!(error["error"].as_str().unwrap().contains("changed outside"));
-    assert_eq!(
-        std::fs::read(server.root.path().join("config.json")).unwrap(),
-        bytes
-    );
 }

@@ -92,7 +92,12 @@ pub fn handle_observe(
         return Ok(());
     }
 
-    CliView::render_observed_candidates(&candidates, false, false)?;
+    println!(
+        "\n  {} {} ({} candidates discovered)",
+        CliView::crimson_bold("❖"),
+        CliView::white_bold("OBSERVED CONVERSATIONAL MEMORIES"),
+        candidates.len()
+    );
     println!(
         "  {}",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".bright_black()
@@ -102,47 +107,44 @@ pub fn handle_observe(
     let mut saved_count = 0usize;
     let mut skipped_count = 0usize;
     let mut force_all = false;
+    let mut quit_requested = false;
 
     for (i, c) in candidates.iter().enumerate() {
-        println!(
-            "  {} [{}] {} {} {}",
-            CliView::crimson_bold(&format!("[Candidate {}/{}]", i + 1, candidates.len())),
-            CliView::violet_bold(c.category.as_str()),
-            CliView::white_bold(&c.title),
-            CliView::emerald_bold(&format!(
-                "({}% conf)",
-                (c.confidence * 100.0).round() as u32
-            )),
-            CliView::slate(&format!("[{}]", c.provenance))
-        );
-        println!(
-            "    Content: {}",
-            CliView::gold(&format!("\"{}\"", c.content))
-        );
+        CliView::render_observed_card(i, candidates.len(), c);
 
         let should_save = if force_all {
             true
         } else {
-            print!("  Save this memory? [y]es / [n]o (skip) / [a]ll (--yes) / [q]uit: ");
-            io::stdout().flush()?;
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer)?;
-            match answer.trim().to_lowercase().as_str() {
-                "y" | "yes" => true,
-                "a" | "all" => {
-                    force_all = true;
-                    true
+            loop {
+                print!("  Save this memory? [y]es / [n]o (skip) / [a]ll (--yes) / [q]uit: ");
+                io::stdout().flush()?;
+                let mut answer = String::new();
+                if io::stdin().read_line(&mut answer)? == 0 {
+                    quit_requested = true;
+                    break false;
                 }
-                "q" | "quit" => {
-                    println!(
-                        "  Stopped candidate review ({} saved, {} skipped).",
-                        saved_count, skipped_count
-                    );
-                    break;
+                match answer.trim().to_lowercase().as_str() {
+                    "y" | "yes" => break true,
+                    "" | "n" | "no" => break false,
+                    "a" | "all" => {
+                        force_all = true;
+                        break true;
+                    }
+                    "q" | "quit" => {
+                        quit_requested = true;
+                        break false;
+                    }
+                    _ => eprintln!("  Enter y, n, a, or q."),
                 }
-                _ => false,
             }
         };
+        if quit_requested {
+            println!(
+                "  Stopped candidate review ({} saved, {} skipped).",
+                saved_count, skipped_count
+            );
+            break;
+        }
 
         if should_save {
             let record = lm.save_observed_candidate(c)?;

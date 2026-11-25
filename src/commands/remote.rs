@@ -715,7 +715,6 @@ pub fn handle_remote_command(
         Commands::Config { .. }
         | Commands::Model { .. }
         | Commands::Setup { .. }
-        | Commands::Docs { .. }
         | Commands::Bundle {
             action: BundleCommand::Info { .. },
             ..

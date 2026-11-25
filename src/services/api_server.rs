@@ -396,12 +396,12 @@ fn authorized(headers: &HashMap<String, String>, expected_key: Option<&str>) -> 
         .unwrap_or(false)
 }
 
-pub(crate) struct HttpRequest {
-    pub method: String,
-    pub path: String,
-    pub query: HashMap<String, String>,
-    pub headers: HashMap<String, String>,
-    pub body: Vec<u8>,
+struct HttpRequest {
+    method: String,
+    path: String,
+    query: HashMap<String, String>,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
 }
 
 fn read_request(stream: &mut TcpStream, key: Option<&str>) -> Result<Option<HttpRequest>> {
@@ -481,7 +481,7 @@ fn read_request(stream: &mut TcpStream, key: Option<&str>) -> Result<Option<Http
     }))
 }
 
-pub(crate) fn send_response(
+fn send_response(
     mut stream: TcpStream,
     status_code: u16,
     status_text: &str,
@@ -494,7 +494,7 @@ pub(crate) fn send_response(
          Content-Length: {}\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Cache-Control: no-store\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'\r\n\
+         Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'\r\n\
          Referrer-Policy: no-referrer\r\n\
          Connection: close\r\n\r\n",
         status_code,
@@ -508,12 +508,7 @@ pub(crate) fn send_response(
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-pub(crate) fn send_json<T: Serialize>(
-    stream: TcpStream,
-    status_code: u16,
-    status_text: &str,
-    data: &T,
-) {
+fn send_json<T: Serialize>(stream: TcpStream, status_code: u16, status_text: &str, data: &T) {
     match serde_json::to_vec(data) {
         Ok(bytes) => send_response(
             stream,
@@ -536,14 +531,14 @@ pub(crate) fn send_json<T: Serialize>(
     }
 }
 
-pub(crate) fn send_error(stream: TcpStream, status_code: u16, status_text: &str, message: &str) {
+fn send_error(stream: TcpStream, status_code: u16, status_text: &str, message: &str) {
     let err = serde_json::json!({ "error": message });
     send_json(stream, status_code, status_text, &err);
 }
 
 fn handle_connection(
     mut stream: TcpStream,
-    state: &Arc<super::workspace::WorkspaceState>,
+    controller: &Arc<LightMem>,
     effective_api_key: Option<&str>,
 ) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
@@ -610,64 +605,19 @@ fn handle_connection(
         return;
     }
 
-    if req.method == "GET" {
-        if let Some((bytes, content_type)) = super::workspace::asset(&req.path) {
-            send_response(stream, 200, "OK", content_type, bytes);
-            return;
-        }
-    }
-
-    let _mutation = if req.method != "GET" {
-        match state.mutation.lock() {
-            Ok(guard) => Some(guard),
-            Err(_) => {
-                send_error(
-                    stream,
-                    500,
-                    "Internal Server Error",
-                    "Workspace operation lock unavailable",
-                );
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    if req.method != "GET" && state.busy.load(std::sync::atomic::Ordering::SeqCst) {
-        send_error(
-            stream,
-            409,
-            "Conflict",
-            "A model or restore operation is running; retry when it finishes",
-        );
-        return;
-    }
-    let controller = match state.controller() {
-        Ok(controller) => controller,
-        Err(e) => {
-            send_error(stream, 500, "Internal Server Error", &e.to_string());
-            return;
-        }
-    };
-
-    if let Some(expected) = req.headers.get("x-lightmem-vault") {
-        if url_decode(expected).ok().as_deref()
-            != Some(controller.db_path().to_string_lossy().as_ref())
-        {
-            send_error(stream, 409, "Conflict", "The selected vault changed in another tab. Refresh the workspace before continuing.");
-            return;
-        }
-    }
-    if req.path.starts_with("/v1/workspace/") {
-        super::workspace::handle(stream, &req, state);
-        return;
-    }
-
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/v1/health") | ("GET", "/health") => {
             let res = serde_json::json!({
                 "status": "ok",
                 "version": env!("CARGO_PKG_VERSION"),
+            });
+            send_json(stream, 200, "OK", &res);
+        }
+
+        ("GET", "/v1/context") | ("GET", "/context") => {
+            let res = serde_json::json!({
+                "db_path": controller.db_path(),
+                "context": controller.storage().source_context(),
             });
             send_json(stream, 200, "OK", &res);
         }
@@ -1431,55 +1381,117 @@ pub fn serve_api(controller: Arc<LightMem>, options: ServerOptions) -> Result<()
         Some(format!("lmem_{}", uuid::Uuid::new_v4().simple()))
     };
 
+    let use_color = colored::control::SHOULD_COLORIZE.should_colorize();
+    let paint = |seq: &str, txt: &str| -> String {
+        if use_color {
+            format!("\x1b[{seq}m{txt}\x1b[0m")
+        } else {
+            txt.to_string()
+        }
+    };
+
     println!();
-    println!("  \x1b[1;38;2;220;38;38m❖\x1b[0m  \x1b[1;38;2;248;250;252mL I G H T M E M\x1b[0m  \x1b[38;2;113;113;122mPersistent Backend Server\x1b[0m");
-    println!("  \x1b[38;2;220;38;38m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\x1b[0m");
+    println!(
+        "  {}  {}  {}",
+        paint("1;38;2;220;38;38", "❖"),
+        paint("1;38;2;248;250;252", "L I G H T M E M"),
+        paint("38;2;113;113;122", "Persistent Backend Server")
+    );
+    println!(
+        "  {}",
+        paint(
+            "38;2;220;38;38",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+    );
     if options.host == "0.0.0.0" {
         println!(
-            "  \x1b[1;38;2;16;185;129m▸ Listening:\x1b[0m         \x1b[38;2;96;165;250m0.0.0.0:{}\x1b[0m \x1b[38;2;113;113;122m(all network interfaces)\x1b[0m",
-            options.port
+            "  {}         {} {}",
+            paint("1;38;2;16;185;129", "▸ Listening:"),
+            paint("38;2;96;165;250", &format!("0.0.0.0:{}", options.port)),
+            paint("38;2;113;113;122", "(all network interfaces)")
         );
-        println!("  \x1b[1;38;2;16;185;129m▸ Network Endpoints:\x1b[0m");
+        println!("  {}", paint("1;38;2;16;185;129", "▸ Network Endpoints:"));
         let endpoints = discover_host_endpoints();
         for ep in &endpoints {
             println!(
-                "    \x1b[38;2;113;113;122m•\x1b[0m \x1b[1m{:<12}\x1b[0m \x1b[38;2;96;165;250mhttp://{}:{}\x1b[0m \x1b[38;2;113;113;122m({})\x1b[0m",
-                ep.label, ep.ip, options.port, ep.if_name
+                "    {} {} {} {}",
+                paint("38;2;113;113;122", "•"),
+                paint("1", &format!("{:<12}", ep.label)),
+                paint(
+                    "38;2;96;165;250",
+                    &format!("http://{}:{}", ep.ip, options.port)
+                ),
+                paint("38;2;113;113;122", &format!("({})", ep.if_name))
             );
         }
     } else {
         println!(
-            "  \x1b[1;38;2;16;185;129m▸ Listening:\x1b[0m         \x1b[38;2;96;165;250mhttp://{}:{}\x1b[0m",
-            options.host, options.port
+            "  {}         {}",
+            paint("1;38;2;16;185;129", "▸ Listening:"),
+            paint(
+                "38;2;96;165;250",
+                &format!("http://{}:{}", options.host, options.port)
+            )
         );
     }
     println!(
-        "  \x1b[1;38;2;16;185;129m▸ Vault DB:\x1b[0m          \x1b[38;2;148;163;184m{}\x1b[0m",
-        controller.db_path().display()
+        "  {}          {}",
+        paint("1;38;2;16;185;129", "▸ Vault DB:"),
+        paint(
+            "38;2;148;163;184",
+            &controller.db_path().display().to_string()
+        )
     );
     if let Some(ref key) = effective_key {
         println!(
-            "  \x1b[1;38;2;16;185;129m▸ API Key:\x1b[0m           \x1b[1;38;2;234;179;8m{}\x1b[0m  \x1b[38;2;113;113;122m(Keep this secret!)\x1b[0m",
-            key
+            "  {}           {}  {}",
+            paint("1;38;2;16;185;129", "▸ API Key:"),
+            paint("1;38;2;234;179;8", key),
+            paint("38;2;113;113;122", "(Keep this secret!)")
         );
-        println!("  \x1b[1;38;2;16;185;129m▸ Client Setup (Examples):\x1b[0m");
+        println!(
+            "  {}",
+            paint("1;38;2;16;185;129", "▸ Client Setup (Examples):")
+        );
         if options.host == "0.0.0.0" {
             let endpoints = discover_host_endpoints();
             for ep in &endpoints {
                 println!(
-                    "    \x1b[38;2;113;113;122m•\x1b[0m {:<12} \x1b[38;2;248;250;252mlmem remote http://{}:{} --api-key \"{}\"\x1b[0m",
-                    ep.label, ep.ip, options.port, key
+                    "    {} {:<12} {}",
+                    paint("38;2;113;113;122", "•"),
+                    ep.label,
+                    paint(
+                        "38;2;248;250;252",
+                        &format!(
+                            "lmem remote http://{}:{} --api-key \"{}\"",
+                            ep.ip, options.port, key
+                        )
+                    )
                 );
             }
         } else {
             println!(
-                "    \x1b[38;2;113;113;122m•\x1b[0m {:<12} \x1b[38;2;248;250;252mlmem remote http://{}:{} --api-key \"{}\"\x1b[0m",
-                "Remote", options.host, options.port, key
+                "    {} {:<12} {}",
+                paint("38;2;113;113;122", "•"),
+                "Remote",
+                paint(
+                    "38;2;248;250;252",
+                    &format!(
+                        "lmem remote http://{}:{} --api-key \"{}\"",
+                        options.host, options.port, key
+                    )
+                )
             );
         }
     } else {
         println!(
-            "  \x1b[1;38;2;239;68;68m▸ Auth:\x1b[0m              \x1b[38;2;239;68;68mDisabled (--no-auth). Open to any network client.\x1b[0m"
+            "  {}              {}",
+            paint("1;38;2;239;68;68", "▸ Auth:"),
+            paint(
+                "38;2;239;68;68",
+                "Disabled (--no-auth). Open to any network client."
+            )
         );
     }
     let probe_host = if options.host == "0.0.0.0" {
@@ -1488,10 +1500,20 @@ pub fn serve_api(controller: Arc<LightMem>, options: ServerOptions) -> Result<()
         &options.host
     };
     println!(
-        "  \x1b[1;38;2;16;185;129m▸ Health Probe:\x1b[0m      \x1b[38;2;96;165;250mhttp://{}:{}/v1/health\x1b[0m",
-        probe_host, options.port
+        "  {}      {}",
+        paint("1;38;2;16;185;129", "▸ Health Probe:"),
+        paint(
+            "38;2;96;165;250",
+            &format!("http://{}:{}/v1/health", probe_host, options.port)
+        )
     );
-    println!("  \x1b[38;2;148;163;184mServing across devices. Press Ctrl+C to stop.\x1b[0m\n");
+    println!(
+        "  {}\n",
+        paint(
+            "38;2;148;163;184",
+            "Serving across devices. Press Ctrl+C to stop."
+        )
+    );
 
     serve_loop(listener, controller, effective_key)
 }
@@ -1502,7 +1524,6 @@ pub fn serve_loop(
     effective_key: Option<String>,
 ) -> Result<()> {
     let key_arc = effective_key.map(Arc::new);
-    let state = Arc::new(super::workspace::WorkspaceState::new(controller));
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     struct RequestGuard(Arc<std::sync::atomic::AtomicUsize>);
     impl Drop for RequestGuard {
@@ -1533,7 +1554,7 @@ pub fn serve_loop(
                     continue;
                 }
                 let guard = RequestGuard(Arc::clone(&active));
-                let ctrl = Arc::clone(&state);
+                let ctrl = Arc::clone(&controller);
                 let key = key_arc.clone();
                 std::thread::spawn(move || {
                     let _guard = guard;

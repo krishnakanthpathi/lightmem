@@ -112,6 +112,7 @@ impl LightMemConfig {
             "deepseek:",
             "mistral:",
             "ollama:",
+            "custom:",
             "llm:",
         ] {
             if trimmed.len() > prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix)
@@ -132,7 +133,7 @@ impl LightMemConfig {
         }
         match lower.as_str() {
             "ollama" | "openai" | "openrouter" | "gemini" | "groq" | "deepseek" | "mistral"
-            | "llm" => {
+            | "custom" | "llm" => {
                 if let Some(qm) = legacy_qa.map(str::trim).filter(|m| {
                     !m.is_empty() && !matches!(*m, "minilm-squad2" | "tinyroberta-squad2")
                 }) {
