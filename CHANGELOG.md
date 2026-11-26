@@ -3,6 +3,7 @@
 ## 0.12.1
 
 ### Highlights
+- **32-bit ARM (`armv7l`) Pure-Rust ONNX & Static Release**: Added `armv7-unknown-linux-musleabihf` release builds powered by the pure-Rust `ort-tract` backend (`tract-onnx` with runtime-detected `armvfpv2`/`armv7neon` kernels) alongside `install.sh` and Python SDK `armv7l` support so LightMem runs with full local embeddings and extractive QA on 32-bit ARM devices.
 - **ANSI-Safe Terminal Column Alignment**: Switched styled labels and status fields across `CliView` (`banner_string`, intro tree, `context`, `config`, `stats`, `identity`, `connect --list`, `history`, `render_error`), `terminal.rs` (`config --edit`, `doctor`), and `transfer` / `service` / `remote` / `config` commands to visible-width `CliView::pad_styled` / `pad_right_styled` padding so colored terminals align identically to `NO_COLOR`.
 - **List Status & Recall Score Clarity**: Added an `[expired]` badge and `○` marker for expired memories in `lmem list` (`--status all` / `--status expired`), and removed the `< 0.25` score-bar rescaling in `lmem recall` so weak hits render honest proportional bars.
 - **Interactive Prompt Hardening**: Moved `observe` and `conflicts` review prompts onto `stderr` so `stdout` stays clean, and added retry loops on invalid choices in `setup`, `credential`, and `config --edit` submenus while preserving clean EOF cancellation.

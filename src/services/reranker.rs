@@ -297,6 +297,7 @@ impl OnnxQaReranker {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get().min(4))
             .unwrap_or(2);
+        crate::services::embeddings::ensure_ort_backend();
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!("ORT session builder error: {}", e))?
             .with_optimization_level(GraphOptimizationLevel::Level3)

@@ -7,6 +7,29 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
+/// Registers the pure-Rust `ort-tract` backend on 32-bit ARM targets where
+/// prebuilt ONNX Runtime binaries are unavailable.
+pub(crate) fn ensure_ort_backend() {
+    #[cfg(target_arch = "arm")]
+    {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            // `ort` api-22+ invokes SetSymbolicDimensions unconditionally during session init,
+            // while `ort-tract` 0.4.x leaves it unimplemented in the stub table.
+            unsafe extern "system" fn noop_set_symbolic_dimensions(
+                _info: *mut ort_sys::OrtTensorTypeAndShapeInfo,
+                _dim_params: *mut *const std::ffi::c_char,
+                _dim_params_length: usize,
+            ) -> ort_sys::OrtStatusPtr {
+                ort_sys::OrtStatusPtr::default()
+            }
+            let mut api = ort_tract::api();
+            api.SetSymbolicDimensions = noop_set_symbolic_dimensions;
+            ort::set_api(api);
+        });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MultimodalInput<'a> {
     pub text: &'a str,
@@ -112,6 +135,7 @@ impl OnnxEmbeddingProvider {
             }
         }
         let _ = std::fs::create_dir_all(&cache_dir);
+        ensure_ort_backend();
         let options = TextInitOptions::new(selected_model)
             .with_cache_dir(cache_dir)
             .with_show_download_progress(true);
@@ -157,6 +181,7 @@ impl OnnxEmbeddingProvider {
         };
 
         let user_model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files);
+        ensure_ort_backend();
         let model =
             TextEmbedding::try_new_from_user_defined(user_model, InitOptionsUserDefined::default())
                 .map_err(|e| {

@@ -236,8 +236,14 @@ def ensure_binary_downloaded(version: str = "v0.12.1") -> str:
         )
         if is_android and machine in ["arm64", "aarch64"]:
             target = "aarch64-linux-android"
+        elif is_android and machine.startswith(("armv7", "armv8", "armhf")):
+            target = "armv7-linux-androideabi"
+        elif machine in ["arm64", "aarch64"]:
+            target = "aarch64-unknown-linux-gnu"
+        elif machine.startswith(("armv7", "armv8", "armhf")) or machine == "arm":
+            target = "armv7-unknown-linux-musleabihf"
         else:
-            target = "aarch64-unknown-linux-gnu" if machine in ["arm64", "aarch64"] else "x86_64-unknown-linux-gnu"
+            target = "x86_64-unknown-linux-gnu"
         archive_name = f"lmem-{target}.tar.gz"
         exe_name = "lmem"
     elif system == "windows":

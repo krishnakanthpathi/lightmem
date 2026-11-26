@@ -42,6 +42,7 @@ class TestBinaryResolution(unittest.TestCase):
         # 0x3E (62) for x86_64, 0xB7 (183) for aarch64
         elf_x86_64 = bytearray(b"\x7fELF\x02\x01" + b"\x00" * 12 + struct.pack("<H", 0x3E) + b"\x00" * 44)
         elf_arm64 = bytearray(b"\x7fELF\x02\x01" + b"\x00" * 12 + struct.pack("<H", 0xB7) + b"\x00" * 44)
+        elf_armv7 = bytearray(b"\x7fELF\x01\x01" + b"\x00" * 12 + struct.pack("<H", 0x28) + b"\x00" * 44)
 
         f_x86 = self.tmp / "lmem_x86"
         f_x86.write_bytes(elf_x86_64)
@@ -51,14 +52,43 @@ class TestBinaryResolution(unittest.TestCase):
         f_arm.write_bytes(elf_arm64)
         f_arm.chmod(0o755)
 
+        f_armv7 = self.tmp / "lmem_armv7"
+        f_armv7.write_bytes(elf_armv7)
+        f_armv7.chmod(0o755)
+
         with patch("platform.system", return_value="Linux"), patch("platform.machine", return_value="x86_64"):
             self.assertTrue(_is_native_binary(f_x86))
             # Must reject ARM binary on x86_64 / AMD processor!
             self.assertFalse(_is_native_binary(f_arm))
+            self.assertFalse(_is_native_binary(f_armv7))
 
         with patch("platform.system", return_value="Linux"), patch("platform.machine", return_value="aarch64"):
             self.assertFalse(_is_native_binary(f_x86))
             self.assertTrue(_is_native_binary(f_arm))
+
+        with patch("platform.system", return_value="Linux"), patch("platform.machine", return_value="armv7l"):
+            self.assertFalse(_is_native_binary(f_x86))
+            self.assertTrue(_is_native_binary(f_armv7))
+
+    def test_armv7l_download_target_resolution(self):
+        from lmem.binary import ensure_binary_downloaded
+
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.machine", return_value="armv7l"), \
+             patch("os.path.exists", return_value=False), \
+             patch.dict(os.environ, {"HOME": str(self.tmp), "LIGHTMEM_OFFLINE": "1"}, clear=False):
+            with self.assertRaises(RuntimeError):
+                ensure_binary_downloaded()
+        # Verify target mapping directly by inspecting requested download URL when online
+        with patch("platform.system", return_value="Linux"), \
+             patch("platform.machine", return_value="armv7l"), \
+             patch("os.path.exists", return_value=False), \
+             patch.dict(os.environ, {"HOME": str(self.tmp)}, clear=True), \
+             patch("urllib.request.urlretrieve", side_effect=RuntimeError("abort")) as mock_retrieve:
+            with self.assertRaises(RuntimeError) as ctx:
+                ensure_binary_downloaded("v0.12.1")
+            self.assertIn("lmem-armv7-unknown-linux-musleabihf.tar.gz", str(ctx.exception))
+            self.assertTrue(mock_retrieve.called)
 
     def test_architecture_validation_darwin(self):
         # Mach-O ARM64: magic 0xcffaedfe, cputype 0x0100000C

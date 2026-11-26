@@ -241,6 +241,14 @@ case "$ARCH" in
     arm64|aarch64)
         ARCH_TARGET="aarch64"
         ;;
+    armv7l|armv7*|armv8l|armhf)
+        ARCH_TARGET="armv7"
+        if [ "$OS_TARGET" = "unknown-linux-gnu" ]; then
+            OS_TARGET="unknown-linux-musleabihf"
+        elif [ "$OS_TARGET" = "linux-android" ]; then
+            OS_TARGET="linux-androideabi"
+        fi
+        ;;
     x86_64|amd64)
         ARCH_TARGET="x86_64"
         ;;
