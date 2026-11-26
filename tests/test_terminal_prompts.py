@@ -212,6 +212,66 @@ class TerminalPrompts(unittest.TestCase):
         self.assertNotEqual(code, 0, output)
         self.assertFalse(self.config.exists())
 
+    def test_setup_and_submenu_retry_on_invalid_choice(self):
+        code, output = self.interact(['setup'], [
+            ('Use recommended local settings', '99\n'),
+            ('Use recommended local settings', '1\n'),
+            ('Save these shared settings', 'y\n'),
+        ])
+        self.assertEqual(code, 0, output)
+        self.assertIn('Enter 0-11', output)
+
+        before = self.config.read_bytes()
+        code, output = self.interact(['config', '--edit'], [
+            ('Choose [1-5]', '1\n'),
+            ('Search embedder', '99\n'),
+            ('Search embedder', '0\n'),
+            ('Choose [1-5]', '0\n'),
+        ])
+        self.assertEqual(code, 0, output)
+        self.assertIn('Choose 0-6', output)
+        self.assertEqual(self.config.read_bytes(), before)
+
+    def test_observe_prompt_writes_to_stderr_not_stdout(self):
+        import pty
+        self.demo()
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [str(BINARY), '--db', str(self.db), 'observe', 'User: I prefer dark mode', '--confidence', '0.5', '--reranker', 'top1'],
+            env=self.env,
+            cwd=self.root,
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=slave,
+        )
+        os.close(slave)
+        stderr_data = b''
+        deadline = time.monotonic() + 15
+        try:
+            while b'Save this memory?' not in stderr_data:
+                if time.monotonic() >= deadline:
+                    self.fail(f'Timeout waiting for observe prompt: {stderr_data.decode(errors="replace")}')
+                if select.select([master], [], [], .1)[0]:
+                    chunk = os.read(master, 65536)
+                    if not chunk:
+                        break
+                    stderr_data += chunk
+            os.write(master, b'n\n')
+            stdout_data, _ = proc.communicate(timeout=10)
+            while select.select([master], [], [], .05)[0]:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                stderr_data += chunk
+        finally:
+            os.close(master)
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn('Save this memory?', stdout_data.decode(errors='replace'))
+        self.assertIn('Save this memory?', stderr_data.decode(errors='replace'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -315,12 +315,6 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
     eprintln!();
 
     let mut cfg = previous.clone();
-    let choice = value(
-        "Select profile [1-11] (Use recommended local settings)",
-        "1",
-    )?
-    .to_lowercase();
-    eprintln!();
 
     let ask_entity_extraction = |cfg: &mut LightMemConfig| -> Result<()> {
         cfg.entity_extraction = if confirm(
@@ -347,66 +341,101 @@ pub fn setup_configuration(previous: &LightMemConfig) -> Result<LightMemConfig> 
             prompt_api_key(cfg, label)
         };
 
-    match choice.as_str() {
-        "1" | "local" | "onnx" => cfg.apply_preset("local")?,
-        "2" | "ollama" => {
-            cfg.apply_preset("ollama")?;
-            let model = value("Ollama model name", "qwen2.5:3b")?;
-            let clean = model.strip_prefix("ollama:").unwrap_or(&model).trim();
-            if !clean.is_empty() {
-                cfg.reranker = format!("ollama:{clean}");
+    loop {
+        let choice = value(
+            "Select profile [1-11] (Use recommended local settings)",
+            "1",
+        )?
+        .to_lowercase();
+        eprintln!();
+
+        match choice.as_str() {
+            "1" | "local" | "onnx" => {
+                cfg.apply_preset("local")?;
+                break;
             }
-            let url = value("Ollama endpoint URL", "http://localhost:11434")?;
-            if !url.is_empty() {
+            "2" | "ollama" => {
+                cfg.apply_preset("ollama")?;
+                let model = value("Ollama model name", "qwen2.5:3b")?;
+                let clean = model.strip_prefix("ollama:").unwrap_or(&model).trim();
+                if !clean.is_empty() {
+                    cfg.reranker = format!("ollama:{clean}");
+                }
+                let url = value("Ollama endpoint URL", "http://localhost:11434")?;
+                if !url.is_empty() {
+                    http_url(&url)?;
+                    cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
+                }
+                ask_entity_extraction(&mut cfg)?;
+                break;
+            }
+            "3" | "demo" | "hash" => {
+                cfg.apply_preset("demo")?;
+                break;
+            }
+            "4" | "openai" => {
+                configure_cloud(&mut cfg, "openai", "gpt-4o-mini", "OpenAI")?;
+                break;
+            }
+            "5" | "gemini" => {
+                configure_cloud(&mut cfg, "gemini", "gemini-1.5-flash", "Google Gemini")?;
+                break;
+            }
+            "6" | "groq" => {
+                configure_cloud(&mut cfg, "groq", "llama-3.3-70b-versatile", "Groq")?;
+                break;
+            }
+            "7" | "openrouter" => {
+                configure_cloud(
+                    &mut cfg,
+                    "openrouter",
+                    "anthropic/claude-3.5-sonnet",
+                    "OpenRouter",
+                )?;
+                break;
+            }
+            "8" | "deepseek" => {
+                configure_cloud(&mut cfg, "deepseek", "deepseek-chat", "DeepSeek")?;
+                break;
+            }
+            "9" | "mistral" => {
+                configure_cloud(&mut cfg, "mistral", "mistral-small-latest", "Mistral")?;
+                break;
+            }
+            "10" | "custom" => {
+                cfg.apply_preset("custom")?;
+                let url = value(
+                    "Custom OpenAI-compatible endpoint URL (e.g. http://localhost:8000/v1)",
+                    "http://localhost:8000/v1",
+                )?;
                 http_url(&url)?;
                 cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
+                let model = value("Model name", "default")?;
+                let clean = model.strip_prefix("custom:").unwrap_or(&model).trim();
+                cfg.reranker = if clean.is_empty() {
+                    "custom:default".to_string()
+                } else {
+                    format!("custom:{clean}")
+                };
+                ask_entity_extraction(&mut cfg)?;
+                prompt_api_key(&mut cfg, "Custom Endpoint")?;
+                break;
             }
-            ask_entity_extraction(&mut cfg)?;
+            "11" | "remote" => {
+                let url = value(
+                    "Remote LightMem URL",
+                    cfg.remote_url.as_deref().unwrap_or("http://localhost:8080"),
+                )?;
+                http_url(&url)?;
+                cfg.remote_url = Some(url.trim_end_matches('/').into());
+                let present = cfg.effective_api_key().is_some();
+                credential(&mut cfg.api_key, "remote LightMem", present)?;
+                eprintln!("Remote client setup does not download local models. Test the server with lmem context.");
+                return Ok(cfg);
+            }
+            "0" | "cancel" => bail!("Setup cancelled. No settings changed."),
+            _ => eprintln!("Invalid choice '{choice}'. Enter 0-11 or a profile name."),
         }
-        "3" | "demo" | "hash" => cfg.apply_preset("demo")?,
-        "4" | "openai" => configure_cloud(&mut cfg, "openai", "gpt-4o-mini", "OpenAI")?,
-        "5" | "gemini" => configure_cloud(&mut cfg, "gemini", "gemini-1.5-flash", "Google Gemini")?,
-        "6" | "groq" => configure_cloud(&mut cfg, "groq", "llama-3.3-70b-versatile", "Groq")?,
-        "7" | "openrouter" => configure_cloud(
-            &mut cfg,
-            "openrouter",
-            "anthropic/claude-3.5-sonnet",
-            "OpenRouter",
-        )?,
-        "8" | "deepseek" => configure_cloud(&mut cfg, "deepseek", "deepseek-chat", "DeepSeek")?,
-        "9" | "mistral" => configure_cloud(&mut cfg, "mistral", "mistral-small-latest", "Mistral")?,
-        "10" | "custom" => {
-            cfg.apply_preset("custom")?;
-            let url = value(
-                "Custom OpenAI-compatible endpoint URL (e.g. http://localhost:8000/v1)",
-                "http://localhost:8000/v1",
-            )?;
-            http_url(&url)?;
-            cfg.ollama_url = LightMemConfig::normalize_ollama_url(&url);
-            let model = value("Model name", "default")?;
-            let clean = model.strip_prefix("custom:").unwrap_or(&model).trim();
-            cfg.reranker = if clean.is_empty() {
-                "custom:default".to_string()
-            } else {
-                format!("custom:{clean}")
-            };
-            ask_entity_extraction(&mut cfg)?;
-            prompt_api_key(&mut cfg, "Custom Endpoint")?;
-        }
-        "11" | "remote" => {
-            let url = value(
-                "Remote LightMem URL",
-                cfg.remote_url.as_deref().unwrap_or("http://localhost:8080"),
-            )?;
-            http_url(&url)?;
-            cfg.remote_url = Some(url.trim_end_matches('/').into());
-            let present = cfg.effective_api_key().is_some();
-            credential(&mut cfg.api_key, "remote LightMem", present)?;
-            eprintln!("Remote client setup does not download local models. Test the server with lmem context.");
-            return Ok(cfg);
-        }
-        "0" | "cancel" => bail!("Setup cancelled. No settings changed."),
-        _ => bail!("Invalid choice '{choice}'. No settings changed."),
     }
     if cfg.effective_remote_url().is_some() {
         eprintln!("Remote routing is configured. Local presets do not clear routing.");
@@ -435,22 +464,27 @@ fn credential(stored: &mut Option<String>, label: &str, effective_present: bool)
             "not configured"
         }
     );
-    match value("Action: keep, replace, remove", "keep")?.as_str() {
-        "keep" => {}
-        "remove" => *stored = None,
-        "replace" => {
-            eprint!("New {label} credential (hidden): ");
-            io::stderr().flush()?;
-            let key = rpassword::read_password()?;
-            ensure!(
-                !key.trim().is_empty(),
-                "Credential cannot be blank. No settings changed."
-            );
-            *stored = Some(key.trim().into());
+    loop {
+        match value("Action: keep, replace, remove", "keep")?.as_str() {
+            "keep" => return Ok(()),
+            "remove" => {
+                *stored = None;
+                return Ok(());
+            }
+            "replace" => {
+                eprint!("New {label} credential (hidden): ");
+                io::stderr().flush()?;
+                let key = rpassword::read_password()?;
+                ensure!(
+                    !key.trim().is_empty(),
+                    "Credential cannot be blank. No settings changed."
+                );
+                *stored = Some(key.trim().into());
+                return Ok(());
+            }
+            _ => eprintln!("Enter keep, replace, or remove."),
         }
-        _ => bail!("Choose keep, replace, or remove. No settings changed."),
     }
-    Ok(())
 }
 
 fn prompt_key_if_missing(cfg: &mut LightMemConfig, provider_name: &str) -> Result<()> {
@@ -495,9 +529,9 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
             CliView::slate("─────────────────────────────────────────────────────────────")
         );
         eprintln!(
-            "  {} {:<16} {}",
+            "  {} {} {}",
             CliView::slate("◫"),
-            CliView::white_bold("Config File:"),
+            CliView::pad_styled("Config File:", CliView::white_bold("Config File:"), 16),
             CliView::slate(&LightMemConfig::config_file().display().to_string())
         );
         eprintln!();
@@ -632,83 +666,101 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                 );
                 eprintln!();
 
-                let choice = value("Search embedder (select 1-6)", "1")?;
-                match choice.trim() {
-                    "0" => continue,
-                    "1" | "bge-small" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("bge-small".to_string());
-                        cfg.embedding_model = "bge-small".to_string();
-                        break;
-                    }
-                    "2" | "minilm" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("minilm".to_string());
-                        cfg.embedding_model = "minilm".to_string();
-                        break;
-                    }
-                    "3" | "nomic" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("nomic".to_string());
-                        cfg.embedding_model = "nomic".to_string();
-                        break;
-                    }
-                    "4" | "ollama" => {
-                        let ep = value(
-                            "Ollama embedding endpoint URL (e.g. http://localhost:11434)",
-                            cfg.embedding_endpoint
-                                .as_deref()
-                                .unwrap_or("http://localhost:11434"),
-                        )?;
-                        http_url(&ep)?;
-                        let norm_ep = LightMemConfig::normalize_ollama_url(&ep);
-                        let default_emb = if cfg.backend != "ollama"
-                            || cfg.embedding_model.is_empty()
-                            || matches!(
-                                cfg.embedding_model.as_str(),
-                                "bge-small" | "minilm" | "nomic" | "hash"
-                            ) {
-                            "nomic-embed-text"
-                        } else {
-                            &cfg.embedding_model
-                        };
-                        let emb_model = value("Ollama embedding model", default_emb)?;
-                        cfg.backend = "ollama".to_string();
-                        cfg.embedding_endpoint = Some(norm_ep.clone());
-                        cfg.embedding_model = emb_model;
-                        if !norm_ep.contains("localhost")
-                            && !norm_ep.contains("127.0.0.1")
-                            && cfg.effective_embedding_api_key().is_none()
-                            && confirm("Configure embedding endpoint API key?", false)?
-                        {
-                            let present = cfg.effective_embedding_api_key().is_some();
-                            credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
+                let mut done = false;
+                loop {
+                    let choice = value("Search embedder (select 1-6)", "1")?;
+                    match choice.trim() {
+                        "0" | "b" | "back" => break,
+                        "1" | "bge-small" => {
+                            cfg.backend = "onnx".to_string();
+                            cfg.onnx_model = Some("bge-small".to_string());
+                            cfg.embedding_model = "bge-small".to_string();
+                            done = true;
+                            break;
                         }
-                        break;
+                        "2" | "minilm" => {
+                            cfg.backend = "onnx".to_string();
+                            cfg.onnx_model = Some("minilm".to_string());
+                            cfg.embedding_model = "minilm".to_string();
+                            done = true;
+                            break;
+                        }
+                        "3" | "nomic" => {
+                            cfg.backend = "onnx".to_string();
+                            cfg.onnx_model = Some("nomic".to_string());
+                            cfg.embedding_model = "nomic".to_string();
+                            done = true;
+                            break;
+                        }
+                        "4" | "ollama" => {
+                            let ep = value(
+                                "Ollama embedding endpoint URL (e.g. http://localhost:11434)",
+                                cfg.embedding_endpoint
+                                    .as_deref()
+                                    .unwrap_or("http://localhost:11434"),
+                            )?;
+                            http_url(&ep)?;
+                            let norm_ep = LightMemConfig::normalize_ollama_url(&ep);
+                            let default_emb = if cfg.backend != "ollama"
+                                || cfg.embedding_model.is_empty()
+                                || matches!(
+                                    cfg.embedding_model.as_str(),
+                                    "bge-small" | "minilm" | "nomic" | "hash"
+                                ) {
+                                "nomic-embed-text"
+                            } else {
+                                &cfg.embedding_model
+                            };
+                            let emb_model = value("Ollama embedding model", default_emb)?;
+                            cfg.backend = "ollama".to_string();
+                            cfg.embedding_endpoint = Some(norm_ep.clone());
+                            cfg.embedding_model = emb_model;
+                            if !norm_ep.contains("localhost")
+                                && !norm_ep.contains("127.0.0.1")
+                                && cfg.effective_embedding_api_key().is_none()
+                                && confirm("Configure embedding endpoint API key?", false)?
+                            {
+                                let present = cfg.effective_embedding_api_key().is_some();
+                                credential(
+                                    &mut cfg.embedding_api_key,
+                                    "embedding endpoint",
+                                    present,
+                                )?;
+                            }
+                            done = true;
+                            break;
+                        }
+                        "5" | "custom" => {
+                            cfg.backend = "onnx".to_string();
+                            let dir = value(
+                                "Path to custom model directory",
+                                cfg.onnx_model.as_deref().unwrap_or("~/.lightmem/models"),
+                            )?;
+                            cfg.onnx_model = Some(dir.clone());
+                            cfg.embedding_model = dir;
+                            done = true;
+                            break;
+                        }
+                        "6" | "hash" => {
+                            cfg.backend = "hash".to_string();
+                            cfg.embedding_model = "hash".to_string();
+                            done = true;
+                            break;
+                        }
+                        "onnx" => {
+                            cfg.backend = "onnx".to_string();
+                            cfg.onnx_model = Some("bge-small".to_string());
+                            cfg.embedding_model = "bge-small".to_string();
+                            done = true;
+                            break;
+                        }
+                        _ => eprintln!("Choose 0-6, onnx, ollama, or hash."),
                     }
-                    "5" | "custom" => {
-                        cfg.backend = "onnx".to_string();
-                        let dir = value(
-                            "Path to custom model directory",
-                            cfg.onnx_model.as_deref().unwrap_or("~/.lightmem/models"),
-                        )?;
-                        cfg.onnx_model = Some(dir.clone());
-                        cfg.embedding_model = dir;
-                        break;
-                    }
-                    "6" | "hash" => {
-                        cfg.backend = "hash".to_string();
-                        cfg.embedding_model = "hash".to_string();
-                        break;
-                    }
-                    "onnx" => {
-                        cfg.backend = "onnx".to_string();
-                        cfg.onnx_model = Some("bge-small".to_string());
-                        cfg.embedding_model = "bge-small".to_string();
-                        break;
-                    }
-                    _ => bail!("Choose 1-6, onnx, ollama, or hash. No settings changed."),
                 }
+                if done {
+                    break;
+                }
+                continue;
             }
             "2" => {
                 eprintln!();
@@ -1094,29 +1146,39 @@ pub fn edit_configuration(previous: &LightMemConfig) -> Result<Option<LightMemCo
                     CliView::slate("Back to main menu")
                 );
                 eprintln!();
-                match line(
-                    "Credential: 1. Model service, 2. Remote LightMem, 3. Embedding endpoint: ",
-                )?
-                .as_str()
-                {
-                    "0" => continue,
-                    "1" => {
-                        let present = cfg.effective_ollama_api_key().is_some();
-                        credential(&mut cfg.ollama_api_key, "model service", present)?;
-                        break;
+                let mut done = false;
+                loop {
+                    match line(
+                        "Credential: 1. Model service, 2. Remote LightMem, 3. Embedding endpoint: ",
+                    )?
+                    .trim()
+                    {
+                        "0" | "b" | "back" => break,
+                        "1" => {
+                            let present = cfg.effective_ollama_api_key().is_some();
+                            credential(&mut cfg.ollama_api_key, "model service", present)?;
+                            done = true;
+                            break;
+                        }
+                        "2" => {
+                            let present = cfg.effective_api_key().is_some();
+                            credential(&mut cfg.api_key, "remote LightMem", present)?;
+                            done = true;
+                            break;
+                        }
+                        "3" => {
+                            let present = cfg.effective_embedding_api_key().is_some();
+                            credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
+                            done = true;
+                            break;
+                        }
+                        _ => eprintln!("Choose 0-3."),
                     }
-                    "2" => {
-                        let present = cfg.effective_api_key().is_some();
-                        credential(&mut cfg.api_key, "remote LightMem", present)?;
-                        break;
-                    }
-                    "3" => {
-                        let present = cfg.effective_embedding_api_key().is_some();
-                        credential(&mut cfg.embedding_api_key, "embedding endpoint", present)?;
-                        break;
-                    }
-                    _ => bail!("Invalid credential choice. No settings changed."),
                 }
+                if done {
+                    break;
+                }
+                continue;
             }
             _ => bail!("Invalid choice. No settings changed."),
         }
@@ -1378,22 +1440,22 @@ pub fn doctor(
             CliView::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
         println!(
-            "  {} {:<18} {} ({})",
+            "  {} {} {} ({})",
             CliView::slate("◫"),
-            CliView::white_bold("Target Vault:"),
+            CliView::pad_styled("Target Vault:", CliView::white_bold("Target Vault:"), 18),
             report["target"].as_str().unwrap(),
             report["mode"].as_str().unwrap()
         );
         println!(
-            "  {} {:<18} {}",
+            "  {} {} {}",
             CliView::slate("◈"),
-            CliView::white_bold("Discovery:"),
+            CliView::pad_styled("Discovery:", CliView::white_bold("Discovery:"), 18),
             selected_source
         );
         println!(
-            "  {} {:<18} {}",
+            "  {} {} {}",
             CliView::slate("✦"),
-            CliView::white_bold("Config File:"),
+            CliView::pad_styled("Config File:", CliView::white_bold("Config File:"), 18),
             LightMemConfig::config_file().display()
         );
         println!();
@@ -1412,7 +1474,13 @@ pub fn doctor(
                 _ => (CliView::slate("○"), CliView::slate(name)),
             };
             let prefix = if i == last_idx { "  ╰─" } else { "  │ " };
-            println!("{} {} {:<16} {}", prefix, glyph, styled_name, message);
+            println!(
+                "{} {} {} {}",
+                prefix,
+                glyph,
+                CliView::pad_styled(name, styled_name, 16),
+                message
+            );
         }
         println!();
         if ok {

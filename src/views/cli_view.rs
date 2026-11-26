@@ -129,7 +129,7 @@ impl CliView {
         None
     }
 
-    fn pad_styled(plain: &str, styled: ColoredString, width: usize) -> String {
+    pub fn pad_styled(plain: &str, styled: ColoredString, width: usize) -> String {
         let vis = plain.chars().count();
         if vis >= width {
             styled.to_string()
@@ -138,7 +138,7 @@ impl CliView {
         }
     }
 
-    fn pad_right_styled(plain: &str, styled: ColoredString, width: usize) -> String {
+    pub fn pad_right_styled(plain: &str, styled: ColoredString, width: usize) -> String {
         let vis = plain.chars().count();
         if vis >= width {
             styled.to_string()
@@ -358,21 +358,21 @@ impl CliView {
                 "Ultra-Fast Local Agent Memory Engine".truecolor(228, 228, 231)
             ),
             format!(
-                "  {} {:<10} {}",
+                "  {} {} {}",
                 Self::slate("◫"),
-                Self::slate("Vault"),
+                Self::pad_styled("Vault", Self::slate("Vault"), 10),
                 Self::white_bold(&db_display)
             ),
             format!(
-                "  {} {:<10} {}",
+                "  {} {} {}",
                 Self::slate("◈"),
-                Self::slate("Status"),
+                Self::pad_styled("Status", Self::slate("Status"), 10),
                 mem_summary.truecolor(212, 212, 216)
             ),
             format!(
-                "  {} {:<10} {} {} {}",
+                "  {} {} {} {} {}",
                 Self::slate("✦"),
-                Self::slate("Engines"),
+                Self::pad_styled("Engines", Self::slate("Engines"), 10),
                 Self::violet_bold(&embedder_label),
                 Self::slate("+"),
                 Self::crimson_bold(&reranker_label)
@@ -468,8 +468,8 @@ impl CliView {
         ];
         for (branch, cmd, desc) in cmds {
             println!(
-                "  {:<2} {:<36} {}",
-                Self::crimson_bold(branch),
+                "  {} {:<36} {}",
+                Self::pad_styled(branch, Self::crimson_bold(branch), 2),
                 cmd.truecolor(248, 250, 252),
                 Self::slate(desc)
             );
@@ -767,21 +767,15 @@ impl CliView {
         );
         println!();
 
-        let max_score = results.iter().map(|r| r.score).fold(0.0f32, f32::max);
         for (idx, r) in results.iter().enumerate() {
             let m = &r.memory;
             let short_id: String = m.id.chars().take(8).collect();
-            let bar_score = if max_score > 0.0 && max_score < 0.25 {
-                (r.score / max_score).clamp(0.0, 1.0)
-            } else {
-                r.score
-            };
             println!(
                 "  {} [{}] {} {} {}",
                 Self::crimson_bold(&format!("{:02}.", idx + 1)),
                 Self::violet_bold(m.category.as_str()),
                 Self::white_bold(&m.title),
-                Self::confidence_bar(bar_score),
+                Self::confidence_bar(r.score),
                 Self::rose(&format!("{:.3}", r.score))
             );
             println!(
@@ -886,6 +880,12 @@ impl CliView {
             } else {
                 first_line.to_string()
             };
+            let is_expired = m.status == crate::models::MemoryStatus::Expired;
+            let bullet = if is_expired {
+                Self::slate("○")
+            } else {
+                Self::crimson_bold("▪")
+            };
             let att_badge = if m.attachments.is_empty() {
                 String::new()
             } else {
@@ -894,22 +894,29 @@ impl CliView {
                     Self::emerald_bold(&format!("[📎 {}]", m.attachments.len()))
                 )
             };
+            let status_badge = if is_expired {
+                format!(" {}", Self::rose("[expired]"))
+            } else {
+                String::new()
+            };
             if snippet.is_empty() {
                 println!(
-                    "  {} [{}] {}{} {}",
-                    Self::crimson_bold("▪"),
+                    "  {} [{}] {}{}{} {}",
+                    bullet,
                     Self::violet_bold(m.category.as_str()),
                     Self::white_bold(&m.title),
                     att_badge,
+                    status_badge,
                     Self::gold(&format!("({})", short_id)),
                 );
             } else {
                 println!(
-                    "  {} [{}] {}{} {} {} {}",
-                    Self::crimson_bold("▪"),
+                    "  {} [{}] {}{}{} {} {} {}",
+                    bullet,
                     Self::violet_bold(m.category.as_str()),
                     Self::white_bold(&m.title),
                     att_badge,
+                    status_badge,
                     Self::gold(&format!("({})", short_id)),
                     Self::slate("─"),
                     Self::slate(&snippet)
@@ -1471,9 +1478,9 @@ impl CliView {
             "Local"
         };
         println!(
-            "  {} {:<18} {}",
+            "  {} {} {}",
             Self::slate("◫"),
-            Self::white_bold("Active Mode:"),
+            Self::pad_styled("Active Mode:", Self::white_bold("Active Mode:"), 18),
             if mode == "Remote" {
                 mode.cyan().bold()
             } else {
@@ -1482,17 +1489,17 @@ impl CliView {
         );
         if let Some(db) = value.get("db_path").and_then(serde_json::Value::as_str) {
             println!(
-                "  {} {:<18} {}",
+                "  {} {} {}",
                 Self::slate("◈"),
-                Self::white_bold("Database:"),
+                Self::pad_styled("Database:", Self::white_bold("Database:"), 18),
                 db
             );
         }
         if let Some(r_url) = value.get("remote_url").and_then(serde_json::Value::as_str) {
             println!(
-                "  {} {:<18} {}",
+                "  {} {} {}",
                 Self::slate("◈"),
-                Self::white_bold("Remote URL:"),
+                Self::pad_styled("Remote URL:", Self::white_bold("Remote URL:"), 18),
                 r_url.cyan()
             );
         }
@@ -1560,21 +1567,21 @@ impl CliView {
         );
         println!();
         println!(
-            "  {} {:<20} {}",
+            "  {} {} {}",
             Self::slate("◫"),
-            Self::white_bold("Config File:"),
+            Self::pad_styled("Config File:", Self::white_bold("Config File:"), 20),
             plan["config_file"].as_str().unwrap_or_default()
         );
         println!(
-            "  {} {:<20} {}",
+            "  {} {} {}",
             Self::slate("◈"),
-            Self::white_bold("Selected Vault:"),
+            Self::pad_styled("Selected Vault:", Self::white_bold("Selected Vault:"), 20),
             plan["selected_db"].as_str().unwrap_or_default()
         );
         println!(
-            "  {} {:<20} shared across vaults in this root",
+            "  {} {} shared across vaults in this root",
             Self::slate("✦"),
-            Self::white_bold("Setting Scope:")
+            Self::pad_styled("Setting Scope:", Self::white_bold("Setting Scope:"), 20)
         );
         println!();
 
@@ -1841,22 +1848,22 @@ impl CliView {
         let db_mode = Self::vault_mode_label(&active_db);
 
         println!(
-            "  {} {:<20} {}",
+            "  {} {} {}",
             Self::slate("◫"),
-            Self::white_bold("Config Root:"),
+            Self::pad_styled("Config Root:", Self::white_bold("Config Root:"), 20),
             Self::format_path(&LightMemConfig::config_dir())
         );
         println!(
-            "  {} {:<20} {} {}",
+            "  {} {} {} {}",
             Self::slate("◈"),
-            Self::white_bold("Active Vault:"),
+            Self::pad_styled("Active Vault:", Self::white_bold("Active Vault:"), 20),
             Self::format_path(&active_db),
             Self::slate(&format!("({})", db_mode))
         );
         println!(
-            "  {} {:<20} shared across vaults in this root",
+            "  {} {} shared across vaults in this root",
             Self::slate("✦"),
-            Self::white_bold("Settings Scope:")
+            Self::pad_styled("Settings Scope:", Self::white_bold("Settings Scope:"), 20)
         );
         println!();
 
@@ -2043,23 +2050,23 @@ impl CliView {
             Self::white_bold("Vault Storage Telemetry")
         );
         println!(
-            "  {} {:<14} {}",
+            "  {} {} {}",
             Self::slate("├─"),
-            Self::slate("Database"),
+            Self::pad_styled("Database", Self::slate("Database"), 14),
             Self::white_bold(&db_str)
         );
         println!(
-            "  {} {:<14} {} total  ({} active, {} expired)",
+            "  {} {} {} total  ({} active, {} expired)",
             Self::slate("├─"),
-            Self::slate("Memories"),
+            Self::pad_styled("Memories", Self::slate("Memories"), 14),
             Self::white_bold(&stats.total_memories.to_string()),
             Self::emerald_bold(&stats.active_memories.to_string()),
             Self::gold(&stats.expired_memories.to_string())
         );
         println!(
-            "  {} {:<14} {} embedded",
+            "  {} {} {} embedded",
             Self::slate("╰─"),
-            Self::slate("Vectors"),
+            Self::pad_styled("Vectors", Self::slate("Vectors"), 14),
             Self::violet_bold(&stats.total_vectors.to_string())
         );
 
@@ -2085,11 +2092,12 @@ impl CliView {
                 };
                 let bar_len = ((*count as f32 / max_count as f32) * 16.0).round() as usize;
                 let bar = "▰".repeat(bar_len.max(1)).truecolor(220, 38, 38);
+                let count_str = count.to_string();
                 println!(
-                    "  {} {:<14} {:>4}  {}",
+                    "  {} {} {}  {}",
                     Self::slate(branch),
-                    Self::violet_bold(cat),
-                    Self::white_bold(&count.to_string()),
+                    Self::pad_styled(cat, Self::violet_bold(cat), 14),
+                    Self::pad_right_styled(&count_str, Self::white_bold(&count_str), 4),
                     bar
                 );
             }
@@ -2309,7 +2317,12 @@ impl CliView {
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
-                println!("  {} {:<16} {}", Self::slate("▸"), Self::slate(k), disp);
+                println!(
+                    "  {} {} {}",
+                    Self::slate("▸"),
+                    Self::pad_styled(k, Self::slate(k), 16),
+                    disp
+                );
             }
         }
         println!();
@@ -2368,9 +2381,9 @@ impl CliView {
                 format!("name={}", name.unwrap_or(id))
             };
             println!(
-                "  {} {:<18} {}",
+                "  {} {} {}",
                 Self::slate("▸"),
-                Self::gold(id),
+                Self::pad_styled(id, Self::gold(id), 18),
                 Self::slate(&extra)
             );
         }
@@ -2690,17 +2703,17 @@ impl CliView {
         );
 
         for p in platforms {
-            let status = if p.detected {
-                Self::emerald_bold("● detected")
+            let (status_plain, status) = if p.detected {
+                ("● detected", Self::emerald_bold("● detected"))
             } else {
-                Self::slate("○ not found")
+                ("○ not found", Self::slate("○ not found"))
             };
             let path_str = Self::format_path(&p.target_file);
             println!(
-                "  {} {:<16} {:<14} {}",
+                "  {} {} {} {}",
                 Self::crimson_bold("▪"),
-                Self::white_bold(&p.id),
-                status,
+                Self::pad_styled(&p.id, Self::white_bold(&p.id), 16),
+                Self::pad_styled(status_plain, status, 14),
                 Self::slate(&path_str)
             );
         }
@@ -3009,9 +3022,9 @@ impl CliView {
             Self::crimson("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         );
         println!(
-            "  {} {:<18} {}",
+            "  {} {} {}",
             Self::slate("◫"),
-            "Storage:".dimmed(),
+            Self::pad_styled("Storage:", "Storage:".dimmed(), 18),
             Self::format_path(db_path).bold()
         );
         let count_str = if entries.len() < total {
@@ -3020,9 +3033,9 @@ impl CliView {
             format!("{} recorded", total)
         };
         println!(
-            "  {} {:<18} {}",
+            "  {} {} {}",
             Self::slate("◈"),
-            "Total Entries:".dimmed(),
+            Self::pad_styled("Total Entries:", "Total Entries:".dimmed(), 18),
             Self::emerald_bold(&count_str)
         );
         println!();
@@ -3034,11 +3047,11 @@ impl CliView {
         }
 
         println!(
-            "  {:<6} {:<8} {:<14} {:<10} {}",
-            "#".dimmed(),
-            "STATUS".dimmed(),
-            "TIME".dimmed(),
-            "DURATION".dimmed(),
+            "  {} {} {} {} {}",
+            Self::pad_styled("#", "#".dimmed(), 6),
+            Self::pad_styled("STATUS", "STATUS".dimmed(), 8),
+            Self::pad_styled("TIME", "TIME".dimmed(), 14),
+            Self::pad_styled("DURATION", "DURATION".dimmed(), 10),
             "COMMAND".dimmed()
         );
         println!(
@@ -3053,11 +3066,16 @@ impl CliView {
                 entries.len() - idx
             };
             let row_num = format!("{:>4}", row_id);
-            let status_mark = if entry.status == "success" {
-                Self::emerald_bold("✓")
+            let (status_plain, status_mark) = if entry.status == "success" {
+                ("  ✓", format!("  {}", Self::emerald_bold("✓")))
             } else {
-                Self::crimson_bold("✗")
+                ("  ✗", format!("  {}", Self::crimson_bold("✗")))
             };
+            let status_padded = format!(
+                "{}{}",
+                status_mark,
+                " ".repeat(8usize.saturating_sub(status_plain.chars().count()))
+            );
             let time_disp = Self::format_relative_time(&entry.created_at);
             let dur_disp = if entry.duration_ms < 1000 {
                 format!("{}ms", entry.duration_ms)
@@ -3066,11 +3084,11 @@ impl CliView {
             };
 
             println!(
-                "  {}     {}     {:<14} {:<10} {}",
-                Self::slate(&row_num),
-                status_mark,
-                Self::slate(&time_disp),
-                Self::slate(&dur_disp),
+                "  {} {} {} {} {}",
+                Self::pad_styled(&row_num, Self::slate(&row_num), 6),
+                status_padded,
+                Self::pad_styled(&time_disp, Self::slate(&time_disp), 14),
+                Self::pad_styled(&dur_disp, Self::slate(&dur_disp), 10),
                 entry.command.white().bold()
             );
             if let Some(ref err_msg) = entry.error_message {
@@ -3192,19 +3210,18 @@ impl CliView {
             .unwrap_or(16)
             .max(16);
         eprintln!(
-            "  {} {:<width$} {}",
+            "  {} {} {}",
             Self::slate("◈"),
-            Self::white_bold("Reason:"),
-            err.reason,
-            width = max_label_len
+            Self::pad_styled("Reason:", Self::white_bold("Reason:"), max_label_len),
+            err.reason
         );
         for (label, val) in err.details {
+            let label_colon = format!("{}:", label);
             eprintln!(
-                "  {} {:<width$} {}",
+                "  {} {} {}",
                 Self::slate("◈"),
-                Self::white_bold(&format!("{}:", label)),
-                val,
-                width = max_label_len
+                Self::pad_styled(&label_colon, Self::white_bold(&label_colon), max_label_len),
+                val
             );
         }
         if !err.suggestions.is_empty() {
@@ -3591,5 +3608,12 @@ mod tests {
         let right = CliView::pad_right_styled("42", CliView::white_bold("42"), 6);
         assert!(padded.ends_with(&" ".repeat(7)));
         assert!(right.starts_with(&" ".repeat(4)));
+    }
+
+    #[test]
+    fn test_confidence_bar_reflects_low_scores_without_stretching() {
+        let bar = CliView::confidence_bar(0.08);
+        assert_eq!(bar.matches('▰').count(), 1);
+        assert_eq!(bar.matches('▱').count(), 9);
     }
 }

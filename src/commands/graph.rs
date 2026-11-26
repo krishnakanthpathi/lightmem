@@ -48,10 +48,10 @@ pub fn handle_conflicts(
                 true
             } else {
                 loop {
-                    print!(
+                    eprint!(
                         "  Merge these memories? [y]es / [n]o (next) / [a]ll (--yes) / [q]uit: "
                     );
-                    io::stdout().flush()?;
+                    io::stderr().flush()?;
                     let mut input = String::new();
                     if io::stdin().read_line(&mut input)? == 0 {
                         quit_requested = true;

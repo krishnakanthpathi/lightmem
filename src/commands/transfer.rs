@@ -131,16 +131,20 @@ pub fn handle_bundle(
                 );
                 if let Some(out_p) = output.as_deref() {
                     eprintln!(
-                        "  {} {:<16} {}",
+                        "  {} {} {}",
                         CliView::slate("◫"),
-                        CliView::white_bold("Destination:"),
+                        CliView::pad_styled(
+                            "Destination:",
+                            CliView::white_bold("Destination:"),
+                            16
+                        ),
                         out_p.display()
                     );
                 }
                 eprintln!(
-                    "  {} {:<16} {}",
+                    "  {} {} {}",
                     CliView::slate("◈"),
-                    CliView::white_bold("Vault:"),
+                    CliView::pad_styled("Vault:", CliView::white_bold("Vault:"), 16),
                     lm.db_path().display()
                 );
                 eprintln!();
@@ -215,15 +219,19 @@ pub fn handle_bundle(
                     )
                 );
                 eprintln!(
-                    "  {} {:<16} {}",
+                    "  {} {} {}",
                     CliView::slate("◫"),
-                    CliView::white_bold("Bundle Archive:"),
+                    CliView::pad_styled(
+                        "Bundle Archive:",
+                        CliView::white_bold("Bundle Archive:"),
+                        16
+                    ),
                     file.display()
                 );
                 eprintln!(
-                    "  {} {:<16} {}",
+                    "  {} {} {}",
                     CliView::slate("◈"),
-                    CliView::white_bold("Mode:"),
+                    CliView::pad_styled("Mode:", CliView::white_bold("Mode:"), 16),
                     if replace {
                         "Overwrite / Replace active vault (--replace)"
                     } else if merge {

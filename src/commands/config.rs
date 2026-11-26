@@ -166,9 +166,9 @@ pub fn handle_local(global: bool, json: bool) -> Result<()> {
             "Switched to local mode.".white().bold()
         );
         println!(
-            "  {} {:<10} {}",
+            "  {} {} {}",
             "◫".dimmed(),
-            "Vault".dimmed(),
+            CliView::pad_styled("Vault", "Vault".dimmed(), 10),
             CliView::format_path(&default_vault).bold()
         );
         if std::env::var("LIGHTMEM_REMOTE_URL").is_ok() || std::env::var("LIGHTMEM_URL").is_ok() {
@@ -229,25 +229,25 @@ pub fn handle_remote(url: Option<String>, api_key: Option<String>, json: bool) -
             "Switched to remote mode.".white().bold()
         );
         println!(
-            "  {} {:<10} {}",
+            "  {} {} {}",
             "◫".dimmed(),
-            "Remote".dimmed(),
+            CliView::pad_styled("Remote", "Remote".dimmed(), 10),
             target_url.bold()
         );
         if let Ok(stats) = probe_res {
             println!(
-                "  {} {:<10} {}",
+                "  {} {} {}",
                 "◈".dimmed(),
-                "Status".dimmed(),
+                CliView::pad_styled("Status", "Status".dimmed(), 10),
                 format!("connected ({} active memories)", stats.active_memories).green()
             );
         } else if let Err(ref e) = probe_res {
             let err_str = e.to_string();
             if err_str.contains("401") || err_str.contains("Unauthorized") {
                 println!(
-                    "  {} {:<10} {}",
+                    "  {} {} {}",
                     "◈".dimmed(),
-                    "Status".dimmed(),
+                    CliView::pad_styled("Status", "Status".dimmed(), 10),
                     "authentication failed (401 Unauthorized)".red().bold()
                 );
                 println!(
@@ -260,9 +260,9 @@ pub fn handle_remote(url: Option<String>, api_key: Option<String>, json: bool) -
                 );
             } else {
                 println!(
-                    "  {} {:<10} {}",
+                    "  {} {} {}",
                     "◈".dimmed(),
-                    "Status".dimmed(),
+                    CliView::pad_styled("Status", "Status".dimmed(), 10),
                     "configured (server not responding yet)".yellow()
                 );
                 println!(
@@ -273,9 +273,9 @@ pub fn handle_remote(url: Option<String>, api_key: Option<String>, json: bool) -
         }
         if cfg.api_key.is_some() {
             println!(
-                "  {} {:<10} API key configured",
+                "  {} {} API key configured",
                 "✦".dimmed(),
-                "Auth".dimmed()
+                CliView::pad_styled("Auth", "Auth".dimmed(), 10)
             );
         }
     }

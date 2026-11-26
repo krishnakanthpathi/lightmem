@@ -383,9 +383,9 @@ pub fn handle_serve(
                 let endpoints = lightmem::services::api_server::discover_host_endpoints();
                 for ep in &endpoints {
                     println!(
-                        "    {} {:<12} http://{}:{} ({})",
+                        "    {} {} http://{}:{} ({})",
                         "•".dimmed(),
-                        ep.label.bold(),
+                        CliView::pad_styled(ep.label, ep.label.bold(), 12),
                         ep.ip,
                         port_num,
                         ep.if_name
@@ -590,9 +590,9 @@ pub fn handle_serve(
                         .bold()
                 );
                 eprintln!(
-                    "  {} {:<12} Port {} is already in use by another process.",
+                    "  {} {} Port {} is already in use by another process.",
                     "◈".dimmed(),
-                    "Reason:".white().bold(),
+                    CliView::pad_styled("Reason:", "Reason:".white().bold(), 12),
                     port
                 );
                 eprintln!();
@@ -677,9 +677,9 @@ pub fn handle_serve(
             let endpoints = lightmem::services::api_server::discover_host_endpoints();
             for ep in &endpoints {
                 println!(
-                    "    {} {:<12} http://{}:{} ({})",
+                    "    {} {} http://{}:{} ({})",
                     "•".dimmed(),
-                    ep.label.bold(),
+                    CliView::pad_styled(ep.label, ep.label.bold(), 12),
                     ep.ip,
                     port,
                     ep.if_name
@@ -761,9 +761,9 @@ pub fn handle_serve(
                     .bold()
             );
             eprintln!(
-                "  {} {:<12} Port {} is already in use by another process.",
+                "  {} {} Port {} is already in use by another process.",
                 "◈".dimmed(),
-                "Reason:".white().bold(),
+                CliView::pad_styled("Reason:", "Reason:".white().bold(), 12),
                 port
             );
             eprintln!();

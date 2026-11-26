@@ -361,7 +361,7 @@ fn ui_fixes_banner_no_color_narrow_width_and_groq_slice() {
 
     let ver = f.run(&["--version"]);
     assert!(ver.status.success());
-    assert!(String::from_utf8_lossy(&ver.stdout).contains("0.12.0"));
+    assert!(String::from_utf8_lossy(&ver.stdout).contains("0.12.1"));
 
     f.demo();
     let groq_cfg = f.run(&[
@@ -499,4 +499,83 @@ fn ui_fixes_inspect_incoming_links_multiline_and_list_dedup() {
             && !list_str.contains("Target summary line ─ Target summary line"),
         "list should not repeat identical title and snippet: {list_str}"
     );
+}
+
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn ui_fixes_ansi_alignment_matches_no_color_and_list_shows_expired_badge() {
+    let f = Fixture::new();
+    f.demo();
+    let active = f.json(&["remember", "Active architecture decision", "--json"]);
+    let retired = f.json(&["remember", "Old retired note", "--json"]);
+    let retired_id = retired["id"].as_str().unwrap();
+    assert!(f.run(&["forget", retired_id, "--json"]).status.success());
+    assert!(active["id"].is_string());
+
+    for args in [
+        vec![],
+        vec!["config"],
+        vec!["stats"],
+        vec!["context"],
+        vec!["doctor"],
+        vec!["connect", "--list"],
+        vec!["list", "--status", "all"],
+    ] {
+        let plain = f
+            .command()
+            .arg("--db")
+            .arg(f.db())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(plain.status.success(), "{args:?}");
+        let colored = f
+            .command()
+            .env_remove("NO_COLOR")
+            .env("CLICOLOR_FORCE", "1")
+            .arg("--db")
+            .arg(f.db())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(colored.status.success(), "{args:?}");
+        let colored_str = String::from_utf8_lossy(&colored.stdout);
+        let plain_str = String::from_utf8_lossy(&plain.stdout);
+        assert!(
+            colored_str.contains('\x1b'),
+            "expected ANSI output under CLICOLOR_FORCE for {args:?}"
+        );
+        assert_eq!(
+            strip_ansi(&colored_str),
+            plain_str,
+            "visible column alignment diverged under color for {args:?}"
+        );
+    }
+
+    let list_all = f.run(&["list", "--status", "all"]);
+    assert!(list_all.status.success());
+    let list_str = String::from_utf8_lossy(&list_all.stdout);
+    assert!(
+        list_str.contains("[expired]"),
+        "expected [expired] badge in list --status all: {list_str}"
+    );
+    assert!(list_str.contains("○ [fact] Old retired note [expired]"));
+    assert!(list_str.contains("▪ [fact] Active architecture decision"));
 }

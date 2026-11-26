@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use colored::*;
-use lightmem::{LightMem, LightMemConfig, ResolvedConnection};
+use lightmem::{CliView, LightMem, LightMemConfig, ResolvedConnection};
 use std::path::{Path, PathBuf};
 
 pub fn open_controller(
@@ -108,9 +108,9 @@ pub fn handle_remote_network_error(
                 .bold()
         );
         eprintln!(
-            "  {} {:<12} The remote server requires a valid API key.",
+            "  {} {} The remote server requires a valid API key.",
             "◈".dimmed(),
-            "Reason:".white().bold()
+            CliView::pad_styled("Reason:", "Reason:".white().bold(), 12)
         );
         eprintln!();
         eprintln!("  {} {}", "💡".dimmed(), "How to fix:".white().bold());
@@ -142,9 +142,9 @@ pub fn handle_remote_network_error(
                 .bold()
         );
         eprintln!(
-            "  {} {:<12} {}",
+            "  {} {} {}",
             "◈".dimmed(),
-            "Details:".white().bold(),
+            CliView::pad_styled("Details:", "Details:".white().bold(), 12),
             err_str.dimmed()
         );
         eprintln!();

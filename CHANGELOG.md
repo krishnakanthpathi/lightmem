@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1
+
+### Highlights
+- **ANSI-Safe Terminal Column Alignment**: Switched styled labels and status fields across `CliView` (`banner_string`, intro tree, `context`, `config`, `stats`, `identity`, `connect --list`, `history`, `render_error`), `terminal.rs` (`config --edit`, `doctor`), and `transfer` / `service` / `remote` / `config` commands to visible-width `CliView::pad_styled` / `pad_right_styled` padding so colored terminals align identically to `NO_COLOR`.
+- **List Status & Recall Score Clarity**: Added an `[expired]` badge and `○` marker for expired memories in `lmem list` (`--status all` / `--status expired`), and removed the `< 0.25` score-bar rescaling in `lmem recall` so weak hits render honest proportional bars.
+- **Interactive Prompt Hardening**: Moved `observe` and `conflicts` review prompts onto `stderr` so `stdout` stays clean, and added retry loops on invalid choices in `setup`, `credential`, and `config --edit` submenus while preserving clean EOF cancellation.
+
 ## 0.12.0
 
 ### Highlights

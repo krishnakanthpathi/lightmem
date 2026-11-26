@@ -116,8 +116,8 @@ pub fn handle_observe(
             true
         } else {
             loop {
-                print!("  Save this memory? [y]es / [n]o (skip) / [a]ll (--yes) / [q]uit: ");
-                io::stdout().flush()?;
+                eprint!("  Save this memory? [y]es / [n]o (skip) / [a]ll (--yes) / [q]uit: ");
+                io::stderr().flush()?;
                 let mut answer = String::new();
                 if io::stdin().read_line(&mut answer)? == 0 {
                     quit_requested = true;

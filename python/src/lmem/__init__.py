@@ -18,7 +18,7 @@ from .models import (
 )
 from .binary import get_binary_path
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 __all__ = [
     "LightMem",
     "AttachmentMetadata",
